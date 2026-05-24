@@ -44,27 +44,42 @@ def _extract_http_client(client_kwargs: dict):
 
 
 @pytest.fixture(autouse=True)
-def _stub_codex_context_probe():
-    """Keep agent construction off the network for these proxy-mount tests.
+def _hermetic_agent_construction(monkeypatch):
+    """Keep ``AIAgent`` construction fully offline for these proxy-mount tests.
 
-    ``AIAgent.__init__`` resolves a codex-OAuth model's context window via a
-    *live* ``GET chatgpt.com/backend-api/codex/models``
-    (``model_metadata._fetch_codex_oauth_context_lengths``). Under the hermetic
-    test environment (``HOME`` is a tmp dir, so the on-disk context cache is
-    cold) that probe fires during ``_make_agent()``. With the intentionally
-    dead ``HTTPS_PROXY`` these tests set, the request routes through the dead
-    proxy; in CI (where the loopback connect is dropped, not refused) it pays
-    the full per-request timeout, and init calls ``get_model_context_length``
-    from several sites, so the cumulative wait trips pytest-timeout — the >30s
-    hang this test file used to be skipped for. The keepalive ``httpx.Client``
-    is not involved. Stub the probe to ``{}`` so resolution falls back to the
-    hardcoded table: no network, fast, deterministic.
+    Two construction-time paths reach the network. With the intentionally dead
+    ``HTTPS_PROXY`` these tests set, both route through the dead proxy and — in
+    CI, where the loopback connect is *dropped*, not refused — block until
+    pytest-timeout fires. That is the >30s hang this file was skipped for. The
+    keepalive ``httpx.Client`` is NOT involved (it is lazy; constructing it with
+    a proxy never connects).
+
+    1. Tool registration runs each tool's ``check_fn``;
+       ``check_tts_requirements`` -> ``_import_elevenlabs`` -> ``lazy_deps.ensure``
+       pip-installs the (CI-absent) ElevenLabs SDK via a ``subprocess`` that
+       honors the proxy. Disable lazy installs so ``ensure`` raises
+       ``FeatureUnavailable`` instead; the check then degrades to "TTS
+       unavailable" (it already swallows ``ImportError``).
+    2. ``ContextCompressor`` resolves a codex-OAuth model's context window via a
+       live ``GET chatgpt.com/backend-api/codex/models``
+       (``model_metadata._fetch_codex_oauth_context_lengths``), which fires when
+       the on-disk cache is cold (it always is under the hermetic ``HOME``).
+       Stub it to ``{}`` so resolution uses the hardcoded fallback table.
     """
-    with patch(
+    from tools.registry import invalidate_check_fn_cache
+
+    monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
+    monkeypatch.setattr(
         "agent.model_metadata._fetch_codex_oauth_context_lengths",
-        return_value={},
-    ):
-        yield
+        lambda *a, **k: {},
+    )
+    # Tool-availability check_fns are memoized process-wide (TTL cache). Drop it
+    # so the check re-runs under HERMES_DISABLE_LAZY_INSTALLS rather than reusing
+    # a value computed before this fixture set the env var; clear again on exit
+    # so a value computed under our env doesn't leak into other test files.
+    invalidate_check_fn_cache()
+    yield
+    invalidate_check_fn_cache()
 
 
 def test_get_proxy_from_env_prefers_https_then_http_then_all(monkeypatch):
