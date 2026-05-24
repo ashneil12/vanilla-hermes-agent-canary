@@ -43,6 +43,30 @@ def _extract_http_client(client_kwargs: dict):
     return client_kwargs.get("http_client")
 
 
+@pytest.fixture(autouse=True)
+def _stub_codex_context_probe():
+    """Keep agent construction off the network for these proxy-mount tests.
+
+    ``AIAgent.__init__`` resolves a codex-OAuth model's context window via a
+    *live* ``GET chatgpt.com/backend-api/codex/models``
+    (``model_metadata._fetch_codex_oauth_context_lengths``). Under the hermetic
+    test environment (``HOME`` is a tmp dir, so the on-disk context cache is
+    cold) that probe fires during ``_make_agent()``. With the intentionally
+    dead ``HTTPS_PROXY`` these tests set, the request routes through the dead
+    proxy; in CI (where the loopback connect is dropped, not refused) it pays
+    the full per-request timeout, and init calls ``get_model_context_length``
+    from several sites, so the cumulative wait trips pytest-timeout — the >30s
+    hang this test file used to be skipped for. The keepalive ``httpx.Client``
+    is not involved. Stub the probe to ``{}`` so resolution falls back to the
+    hardcoded table: no network, fast, deterministic.
+    """
+    with patch(
+        "agent.model_metadata._fetch_codex_oauth_context_lengths",
+        return_value={},
+    ):
+        yield
+
+
 def test_get_proxy_from_env_prefers_https_then_http_then_all(monkeypatch):
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
@@ -76,14 +100,6 @@ def test_get_proxy_from_env_normalizes_socks_alias(monkeypatch):
     assert _get_proxy_from_env() == "socks5://127.0.0.1:1080/"
 
 
-@pytest.mark.skip(
-    reason="hermes-fork: hangs (pytest-timeout >30s) in CI. The fork's "
-    "_build_keepalive_http_client appears to eagerly touch the proxy during "
-    "construction, so the test's intentionally-dead HTTPS_PROXY (127.0.0.1:7897) "
-    "blocks. This is a test-env artifact — real prod proxies respond — not a "
-    "merge regression (the proxy-mount behavior itself is unchanged). "
-    "Tracked for proper neutralization; see the spawned follow-up task."
-)
 @patch("run_agent.OpenAI")
 def test_create_openai_client_routes_via_proxy_when_env_set(mock_openai, monkeypatch):
     """With HTTPS_PROXY set, the custom httpx.Client must mount an HTTPProxy pool.

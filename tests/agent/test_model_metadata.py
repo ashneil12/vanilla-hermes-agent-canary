@@ -299,6 +299,7 @@ class TestCodexOAuthContextLength:
         import agent.model_metadata as mm
         mm._codex_oauth_context_cache = {}
         mm._codex_oauth_context_cache_time = 0.0
+        mm._codex_oauth_context_fail_time = 0.0
 
     def test_fallback_table_used_without_token(self):
         """With no access token, the hardcoded Codex fallback table wins
@@ -382,6 +383,31 @@ class TestCodexOAuthContextLength:
                 provider="openai-codex",
             )
         assert ctx == 272_000
+
+    def test_failed_probe_is_negative_cached(self):
+        """A failed probe is negative-cached for a short window so repeated
+        resolutions during a single cold-cache agent init don't each pay the
+        request timeout. Without this, a dead/slow proxy stacks one timeout per
+        ``get_model_context_length`` call site into a startup stall (the >30s
+        hang that forced skipping the proxy keepalive test)."""
+        import agent.model_metadata as mm
+
+        fake_response = MagicMock()
+        fake_response.status_code = 401
+        fake_response.json.return_value = {}
+
+        with patch(
+            "agent.model_metadata.requests.get", return_value=fake_response
+        ) as mock_get:
+            first = mm._fetch_codex_oauth_context_lengths("expired-token")
+            second = mm._fetch_codex_oauth_context_lengths("expired-token")
+
+        assert first == {}
+        assert second == {}
+        assert mock_get.call_count == 1, (
+            "second probe within the cooldown must be served from the negative "
+            f"cache, not re-issued (got {mock_get.call_count} requests)"
+        )
 
     def test_non_codex_providers_unaffected(self):
         """Resolving gpt-5.5 on non-Codex providers must NOT use the Codex
