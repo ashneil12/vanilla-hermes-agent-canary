@@ -1,22 +1,9 @@
 name: Docker Build and Publish
 
 on:
+  # Manual only. builderbox-1 is the primary trusted image publisher;
+  # this GitHub workflow remains a backup path and must not race :stable on merge.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '**/*.py'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - 'Dockerfile'
-      - 'docker/**'
-      # Bundled skills are COPYed into the image — skill edits must rebuild it,
-      # or the image's /opt/hermes/skills (and thus every install) stays stale.
-      - 'skills/**'
-      - 'optional-skills/**'
-      - '.github/workflows/docker-publish.yml'
-  release:
-    types: [published]
 
 permissions:
   contents: read
