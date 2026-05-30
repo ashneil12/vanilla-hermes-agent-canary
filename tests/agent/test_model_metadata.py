@@ -847,6 +847,115 @@ class TestGetModelContextLength:
         assert result == 131072
 
     @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_local_single_model_max_input_tokens_wins_over_output_cap(self, mock_endpoint_fetch, mock_fetch, monkeypatch):
+        """Local Anthropic-compatible proxies expose max_input_tokens as context.
+
+        Anthropic's /v1/models/{id} shape also includes max_tokens, but that is
+        the output cap. The local probe must not treat max_tokens as the input
+        context window when max_input_tokens is present.
+        """
+        import httpx
+        import agent.model_metadata as mm
+
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {}
+        monkeypatch.setattr(mm, "get_cached_context_length", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "save_context_length", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "_query_ollama_api_show", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "detect_local_server_type", lambda *a, **k: None)
+
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def get(self, url):
+                if url.endswith("/v1/models/claude-opus-4-8"):
+                    return FakeResponse(200, {
+                        "id": "claude-opus-4-8",
+                        "max_input_tokens": 1_000_000,
+                        "max_tokens": 128_000,
+                    })
+                return FakeResponse(404, {})
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
+
+        result = get_model_context_length(
+            "claude-opus-4-8",
+            base_url="http://127.0.0.1:18801",
+            provider="custom",
+        )
+
+        assert result == 1_000_000
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_local_model_list_max_input_tokens_wins_over_output_cap(self, mock_endpoint_fetch, mock_fetch, monkeypatch):
+        """The /v1/models list fallback also treats max_input_tokens as context."""
+        import httpx
+        import agent.model_metadata as mm
+
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {}
+        monkeypatch.setattr(mm, "get_cached_context_length", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "save_context_length", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "_query_ollama_api_show", lambda *a, **k: None)
+        monkeypatch.setattr(mm, "detect_local_server_type", lambda *a, **k: None)
+
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def get(self, url):
+                if url.endswith("/v1/models/claude-opus-4-8"):
+                    return FakeResponse(404, {})
+                if url.endswith("/v1/models"):
+                    return FakeResponse(200, {"data": [{
+                        "id": "claude-opus-4-8",
+                        "max_input_tokens": 1_000_000,
+                        "max_tokens": 128_000,
+                    }]})
+                return FakeResponse(404, {})
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
+
+        result = get_model_context_length(
+            "claude-opus-4-8",
+            base_url="http://127.0.0.1:18801",
+            provider="custom",
+        )
+
+        assert result == 1_000_000
+
+    @patch("agent.model_metadata.fetch_model_metadata")
     def test_config_context_length_overrides_all(self, mock_fetch):
         """Explicit config_context_length takes priority over everything."""
         mock_fetch.return_value = {
