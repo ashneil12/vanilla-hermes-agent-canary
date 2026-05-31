@@ -18,10 +18,40 @@ Only **one** context engine can be active at a time. Selection is config-driven:
 # config.yaml
 context:
   engine: "compressor"    # default built-in
-  engine: "lcm"           # activates a plugin engine named "lcm"
+  engine: "lossless"      # activates the bundled lossless context engine
 ```
 
 Plugin engines are **never auto-activated** — the user must explicitly set `context.engine` to the plugin's name.
+
+## Bundled lossless engine
+
+Hermes ships a V0 lossless context engine at `plugins/context_engine/lossless/`.
+It is inactive by default. Enable it with:
+
+```bash
+hermes config set context.engine lossless
+```
+
+or:
+
+```yaml
+context:
+  engine: "lossless"
+```
+
+The bundled engine persists raw message contents to
+`$HERMES_HOME/context_engines/lossless/lossless_context.db` before replacing
+older prompt spans with a compact recovery marker. It exposes these tools to
+the model when the `context_engine` toolset is enabled:
+
+- `lcm_grep` — search persisted raw messages and summary markers.
+- `lcm_describe` — inspect `msg_*` or `sum_*` records.
+- `lcm_expand` — recover source messages behind a `sum_*` marker.
+- `lcm_status` — show store/session counters.
+
+This is a Hermes-native implementation of the useful Lossless Context
+Management pattern, not an OpenClaw plugin shim. It implements the
+`ContextEngine` ABC directly and follows Hermes session lifecycle hooks.
 
 ## Directory structure
 
@@ -162,7 +192,7 @@ Users select your engine via `hermes plugins` → Provider Plugins → Context E
 
 ```yaml
 context:
-  engine: "lcm"   # must match your engine's name property
+  engine: "lossless"   # must match your engine's name property
 ```
 
 The `compression` config block (`compression.threshold`, `compression.protect_last_n`, etc.) is specific to the built-in `ContextCompressor`. Your engine should define its own config format if needed, reading from `config.yaml` during initialization.

@@ -14,7 +14,7 @@ Context management is built on the `ContextEngine` ABC (`agent/context_engine.py
 ```yaml
 context:
   engine: "compressor"    # default — built-in lossy summarization
-  engine: "lcm"           # example — plugin providing lossless context
+  engine: "lossless"      # bundled lossless recall engine
 ```
 
 The engine is responsible for:
@@ -33,6 +33,15 @@ Plugin engines are **never auto-activated** — the user must explicitly set `co
 Configure via `hermes plugins` → Provider Plugins → Context Engine, or edit `config.yaml` directly.
 
 For building a context engine plugin, see [Context Engine Plugins](/developer-guide/context-engine-plugin).
+
+### Bundled lossless mode
+
+Set `context.engine: "lossless"` to use the bundled Hermes-native lossless
+engine. It stores raw messages in
+`$HERMES_HOME/context_engines/lossless/lossless_context.db`, replaces older
+prompt spans with compact recovery markers, and gives the model `lcm_grep`,
+`lcm_describe`, `lcm_expand`, and `lcm_status` tools for retrieval. This mode
+is opt-in and does not change the default `compressor` behavior.
 
 ## Dual Compression System
 
@@ -356,4 +365,4 @@ The CLI shows caching status at startup:
 
 ## Context Pressure Warnings
 
-Intermediate context-pressure warnings have been removed (see the iteration-budget block in `run_agent.py`, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured `compression.threshold` (default 50%) with no prior warning step; gateway session hygiene fires as the secondary safety net at 85% of the model's context window.
+Intermediate context-pressure warnings have been removed (see the iteration-budget block in `run_agent.py`, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured `compression.threshold` (default 85%) with no prior warning step; gateway session hygiene also fires as a secondary safety net at 85% of the model's context window.
