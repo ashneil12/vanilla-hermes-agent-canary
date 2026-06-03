@@ -445,6 +445,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("VENICE_API_KEY",),
         base_url_env_var="VENICE_BASE_URL",
     ),
+    "surplus": ProviderConfig(
+        id="surplus",
+        name="Surplus Intelligence",
+        auth_type="api_key",
+        inference_base_url="https://www.surplusintelligence.ai/api/inference/v1",
+        api_key_env_vars=("SURPLUS_API_KEY",),
+        base_url_env_var="SURPLUS_BASE_URL",
+    ),
     "crof": ProviderConfig(
         id="crof",
         name="CrofAI",
