@@ -81,6 +81,8 @@ customizations:
       re-render. On a merge conflict, re-add: (1) 'admin-panel' to the
       SidebarNavId + action unions, (2) the SIDEBAR_NAV entry, (3) the
       selectSidebarItem branch calling window.hermesDesktop.openAdminPanel.
+
+  - id: webchat-serve
     status: live-multistage-bake     # baked LIGHT via a throwaway builder stage
     files:
       - path: Dockerfile
