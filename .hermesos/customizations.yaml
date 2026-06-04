@@ -81,16 +81,21 @@ customizations:
       re-render. On a merge conflict, re-add: (1) 'admin-panel' to the
       SidebarNavId + action unions, (2) the SIDEBAR_NAV entry, (3) the
       selectSidebarItem branch calling window.hermesDesktop.openAdminPanel.
+
+  - id: webchat-serve
     status: live-multistage-bake     # baked LIGHT via a throwaway builder stage
     files:
       - path: Dockerfile
-        ownership: block            # webchat_build builder stage + COPY --from of the dist only
+        ownership: block            # webchat_build builder stage + COPY --from of the dist; + the base=/dash second dashboard build
         on_conflict: merge-careful
       - path: hermes_cli/web_server.py
         ownership: block            # mount_webchat serves /webchat from the baked dist
         on_conflict: keep-ours
       - path: pyproject.toml
         ownership: one-line         # webchat_dist/**/* in package-data
+        on_conflict: keep-ours
+      - path: web/inject-dash-bootstrap.cjs
+        ownership: whole-file       # entirely ours — splices the #iframe_token bootstrap into the /dash bundle
         on_conflict: keep-ours
     decision: >
       First attempt baked the bundle in the SAME image layer as its build deps —
@@ -102,6 +107,18 @@ customizations:
       travels with the agent image (no separate asset pipeline); web_server.py's
       mount_webchat serves it at /webchat.
     serves: "GET /webchat (+ /webchat/assets/*) — mount_webchat from the baked dist"
+    dash_bake: >
+      The dashboard SPA (web/) is baked TWICE: the default base=/ build →
+      hermes_cli/web_dist (served at /desktop by the backend, which injects the
+      base path + token server-side); and a base=/dash build →
+      hermes_cli/web_dist_dash for the "Admin Panel" nav item. The /dash bundle
+      is served as a STATIC file_server by the control-plane Caddy (no backend
+      injection), so web/inject-dash-bootstrap.cjs splices a <head> script that
+      reads window.__HERMES_SESSION_TOKEN__ from the #iframe_token hash and pins
+      window.__HERMES_BASE_PATH__="/dash". The provisioner extracts web_dist_dash
+      to <instanceDir>/dash alongside the webchat extract. If upstream ever lets
+      the backend serve the SPA under an arbitrary prefix with rewritten asset
+      paths, this second build can be dropped in favour of a /dash proxy.
     follow_up: >
       Provisioner cutover (control-plane, hermesdeploy-canary → prod): in
       webui-instance-builder.ts drop the `webui:` service and route Caddy `/` to
