@@ -1,12 +1,12 @@
 # Aeon — autonomous upstream-sync agent (v1 BUILT — inert until activated)
 
-> Status: **v1 SHIPPED, INERT.** The canary sync workflow
-> (`.github/workflows/aeon-sync.yml`) is in the repo but runs ONLY when manually
-> dispatched and does nothing destructive without the `AEON_GITHUB_PAT` secret.
-> Ash delegated the design decisions ("u take care of it"); they're recorded
-> below as **made**. Aeon goes live the moment Ash completes the 3 Activation
-> steps. It still touches only Git — never the fleet — so activation cannot
-> disrupt a running agent.
+> Status: **FULL-CHAIN, INERT, lives in GitHub Actions.** The workflow
+> (`.github/workflows/aeon-sync.yml`) runs the complete loop in GitHub's cloud —
+> sync → green-CI-gated merge → image build → fleet auto-pulls — and does nothing
+> until activated (runs only on manual dispatch + does nothing without the
+> `AEON_GITHUB_PAT` secret). **It runs in GitHub, never on a personal machine,
+> and never holds fleet SSH.** Aeon goes live the moment Ash completes the 3
+> Activation steps below (all in the GitHub repo UI).
 
 ## What Aeon is for
 Make HermesOS updates **autonomous**: pull upstream `NousResearch/hermes-agent`
@@ -106,15 +106,29 @@ independent, has GITHUB_TOKEN + GHCR creds, naturally SSH-free).
    every-3h. (Leave it commented to keep triggering runs by hand from the Actions
    tab while you build trust.)
 
-## What ships in v1 vs. follow-ups
-**Shipped (`aeon-sync.yml`, inert):** the canary upstream sync — fetch, merge
-(not rebase, with the `merge=ours` driver), clean→auto-merge PR, conflict→
-`aeon-hold` issue. Session-independent, never touches the fleet.
+## What ships (full chain, in GitHub Actions)
+**`aeon-sync.yml` — the whole loop, in GitHub's cloud, inert until activated.**
+Each scheduled run does the complete chain:
+1. fetch upstream → **merge (NOT squash; `merge=ours` driver)** into a sync branch;
+2. open a PR (label `aeon-sync`) → **wait for green CI** (the seam-guard tests are
+   the safety net) → **merge with a merge commit** (preserves the merge-base);
+3. **dispatch `docker-publish`** → `:stable` → the canary VM **auto-updates itself**
+   (its per-VM updater is already enabled — the existing pull-based path).
+
+Hold-and-alert, never forced: merge conflict → `aeon-hold` issue; CI red →
+PR left open + `aeon-hold` label; an Aeon PR/issue already open → skip the run
+(no stacking). Lives in GitHub — **never on a personal machine, never holds
+fleet SSH.**
+
+**Hard-won gotchas baked in (2026-06-04):**
+- **NEVER squash a sync** — it severs the upstream merge-base and the next run
+  re-conflicts all of history. Always `--merge`.
+- The media-tool-wiring gate runs pytest *inside* the image; upstream dropped
+  pytest from the runtime venv, so the gate now `uv pip install pytest
+  pytest-timeout` ephemerally (no image bloat). See `docker-publish.yml`.
 
 **Follow-ups (each its own careful pass):**
-1. Auto-build trigger after a clean sync merges (so `:canary` is fresh) — gated
-   on whether we want to auto-publish CI-green canary builds.
-2. `aeon-promote-prod.yml` — promote a 3h-soaked clean canary digest to prod
-   `:stable` (alert-then-auto).
-3. The **idle-gated per-VM auto-update** path (Decision C) — the only piece that
-   can touch a running agent; staged/jittered + self-rollback, light images only.
+1. `aeon-promote-prod.yml` — promote a 3h-soaked clean canary digest to the prod
+   fork's `:stable` (alert-then-auto). Prod trails canary by 3h.
+2. Tune the per-VM updater cadence/idle-gating if 3-hourly image churn is too
+   aggressive for a live session (today it auto-pulls on its existing timer).
