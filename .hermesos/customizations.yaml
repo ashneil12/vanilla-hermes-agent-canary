@@ -126,6 +126,24 @@ customizations:
     on_conflict: keep-ours
     note: "If upstream renames the --theme-* / --ui-accent tokens, update installBrandSkin to match the new var names."
 
+  - id: webchat-dark-mode-default
+    status: live
+    files:
+      - path: apps/desktop/src/lib/web-shim.ts
+        ownership: block                 # seedDefaultColorMode() — first-run localStorage seed
+    intent: >
+      Make dark mode "just work" on the hosted web surface. Upstream's theme
+      context (apps/desktop/src/themes/context.tsx) defaults the color mode to
+      'light' when nothing is stored; on the web we seed the FIRST-RUN default to
+      'system' so the rich chat follows the visitor's OS light/dark preference
+      automatically. ADDITIVE — only writes the localStorage key when UNSET, so it
+      never overrides an explicit user choice from the in-app toggle (Cmd+K ->
+      Light/Dark/System, or Settings -> Appearance), which persists under the same
+      key. Pairs with hermesos-brand-skin, whose :root.dark variant re-tints the
+      gold accent for dark. Web-only — native desktop keeps upstream's default.
+    on_conflict: keep-ours
+    note: "Mode key string ('hermes-desktop-mode-v1') is duplicated from MODE_KEY in src/themes/context.tsx — if upstream bumps that version, update HERMES_MODE_KEY in web-shim.ts to match."
+
   - id: health-egress
     status: ported            # agent plugin written; pending canary-build verification + cron repoint
     source_in_webui: "api/health_egress.py  (route: GET /api/health/egress)"

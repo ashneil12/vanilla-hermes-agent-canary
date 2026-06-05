@@ -406,7 +406,33 @@ function installBrandSkin(): void {
   else document.addEventListener('DOMContentLoaded', inject, { once: true })
 }
 
+/**
+ * HermesOS — make dark mode "just work" on the hosted web surface.
+ *
+ * The desktop theme system (src/themes/context.tsx) defaults the color mode to
+ * 'light' when nothing is stored. On the web we instead seed the *first-run*
+ * default to 'system', so the rich chat follows the visitor's OS light/dark
+ * preference automatically. The gold skin already ships a `:root.dark` variant
+ * (installBrandSkin above: warm #E0A82E in dark vs #A67C1A in light), so dark
+ * mode is correctly re-tinted with zero extra work.
+ *
+ * Only set when UNSET — this never overrides an explicit choice from the in-app
+ * toggle (Cmd+K -> Light/Dark/System, or Settings -> Appearance), which persists
+ * under the same key. KEEP IN SYNC with MODE_KEY in src/themes/context.tsx.
+ */
+const HERMES_MODE_KEY = 'hermes-desktop-mode-v1'
+function seedDefaultColorMode(): void {
+  try {
+    if (!window.localStorage.getItem(HERMES_MODE_KEY)) {
+      window.localStorage.setItem(HERMES_MODE_KEY, 'system')
+    }
+  } catch {
+    /* localStorage unavailable (private mode) — fall back to the app default */
+  }
+}
+
 if (typeof window !== 'undefined' && !(window as unknown as { hermesDesktop?: unknown }).hermesDesktop) {
+  seedDefaultColorMode()
   installWebShim()
   installBrandSkin()
 }
