@@ -23,7 +23,8 @@ merges land unattended; only genuine conflicts wait for a human.
 1. **"Auto-rebase is OFF — all syncs are manual and Ash-initiated"** (the
    `track-upstream` workflows were deleted on purpose). Aeon re-introduces
    automation — but *safer* than the old blind auto-rebase: a manifest contract,
-   hold-and-alert on anything non-trivial, canary-first, prod-trails-3h.
+   policy-guided conflict resolution behind a seam-guard CI gate (hold only when
+   that gate can't be satisfied), canary-first, prod-trails-3h.
 2. **Fleet auto-update is DISABLED fleet-wide** (`/etc/hermes/auto-update-disabled`,
    set 2026-06-03 across 637 VMs). Aeon *publishes* images, but they only reach
    VMs if the per-VM updater is re-enabled. **Aeon's value is null unless this is
