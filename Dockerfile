@@ -199,7 +199,16 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 COPY --chown=hermes:hermes . .
 
 # Build browser dashboard and terminal UI assets.
+# The default base=/ build (-> hermes_cli/web_dist) is served at /desktop by the
+# backend (globals injected server-side). HermesOS: a SECOND base=/dash build
+# (-> hermes_cli/web_dist_dash) backs the "Admin Panel" nav item, served as a
+# static file_server by the control-plane Caddy. base-/ assets are absolute
+# (/assets/*) and 404 under /dash, and a relative base breaks SPA deep routes,
+# so /dash needs its own bundle. inject-dash-bootstrap.cjs splices a <head>
+# script supplying the base path + session token from the #iframe_token hash.
 RUN cd web && npm run build && \
+    npx vite build --base=/dash/ --outDir ../hermes_cli/web_dist_dash --emptyOutDir && \
+    node inject-dash-bootstrap.cjs ../hermes_cli/web_dist_dash/index.html && \
     cd ../ui-tui && npm run build
 # HermesOS: drop in the prebuilt rich-chat bundle from the throwaway builder
 # stage (static files only — no node_modules/toolchain). web_server.py's
