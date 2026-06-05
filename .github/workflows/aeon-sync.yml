@@ -68,6 +68,11 @@ jobs:
           # or that marker is a silent no-op and upstream could clobber the pipeline.
           git config merge.ours.driver true
 
+      - name: Ensure Aeon labels exist (idempotent; the guard + hold paths need them)
+        run: |
+          gh label create aeon-sync --repo "$GITHUB_REPOSITORY" --color 1f883d --description "Aeon automated upstream sync" --force || true
+          gh label create aeon-hold --repo "$GITHUB_REPOSITORY" --color d73a4a --description "Aeon held — needs a human" --force || true
+
       - name: Skip if an Aeon PR or hold is already open (don't stack)
         id: guard
         run: |
