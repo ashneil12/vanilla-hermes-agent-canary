@@ -36,9 +36,13 @@ name: Aeon — autonomous upstream sync (canary)
 #      PAT on this repo: Contents:write + Pull-requests:write + Workflows:write.
 #      REQUIRED so the PR Aeon opens actually triggers CI (PRs opened with the
 #      default GITHUB_TOKEN do not trigger workflows).
-#   2. Secrets and variables -> Actions -> add `ANTHROPIC_API_KEY` = an Anthropic
-#      API key (console.anthropic.com). REQUIRED for autonomous conflict
-#      resolution; without it Aeon falls back to hold-and-alert on any conflict.
+#   2. Secrets and variables -> Actions -> add a Claude credential for the
+#      auto-resolver (REQUIRED for autonomous conflict resolution; without it Aeon
+#      safely falls back to hold-and-alert on any conflict). Either:
+#        - `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` (PREFERRED — reuses
+#          the Pro/Max subscription, no pay-as-you-go API spend), or
+#        - `ANTHROPIC_API_KEY` from console.anthropic.com (API billing).
+#      If both are set the API key wins.
 #   3. Repo Settings -> General -> enable "Allow auto-merge".
 #   4. The `schedule:` block below runs every 3h (already active).
 
@@ -62,6 +66,13 @@ env:
   UPSTREAM_BRANCH: main
   BUILD_WORKFLOW: docker-publish.yml
   GH_TOKEN: ${{ secrets.AEON_GITHUB_PAT || github.token }}
+  # Auth for the headless conflict-resolver. EITHER works; CLAUDE_CODE_OAUTH_TOKEN
+  # (from `claude setup-token`, billed to a Pro/Max subscription) is PREFERRED so
+  # Aeon reuses the existing Claude login instead of pay-as-you-go API credits.
+  # NOTE: ANTHROPIC_API_KEY outranks the OAuth token in the CLI's auth precedence,
+  # so the resolver step drops an EMPTY key (GitHub injects "" for an unset secret)
+  # to stop it shadowing the token.
+  CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
 jobs:
@@ -158,8 +169,11 @@ jobs:
             exit 0
           }
 
-          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            hold "Aeon could not auto-resolve upstream ${up_sha}: the ANTHROPIC_API_KEY secret is not set. Add it (Settings -> Secrets and variables -> Actions) and Aeon will self-resolve from the new HEAD next run. Conflicting files: ${files}"
+          # Prefer the subscription OAuth token; drop an EMPTY api key so it can't
+          # shadow the token (ANTHROPIC_API_KEY wins precedence even when blank).
+          [ -z "${ANTHROPIC_API_KEY:-}" ] && unset ANTHROPIC_API_KEY
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            hold "Aeon could not auto-resolve upstream ${up_sha}: no Claude credential is set. Add a CLAUDE_CODE_OAUTH_TOKEN secret (from 'claude setup-token' — reuses the Pro/Max subscription) OR an ANTHROPIC_API_KEY secret, then Aeon self-resolves from the new HEAD next run. Conflicting files: ${files}"
           fi
 
           echo "::group::install Claude CLI"
