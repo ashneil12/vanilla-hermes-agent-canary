@@ -47,9 +47,12 @@ name: Aeon — autonomous upstream sync (canary)
 #   4. The `schedule:` block below runs every 3h (already active).
 
 on:
+  # SUPERSEDED (2026-06-05): the every-3h auto-sync now runs as the `hermes-sync`
+  # skill in the Aeon framework fork (ashneil12/aeon), which already carries
+  # CLAUDE_CODE_OAUTH_TOKEN (the subscription) — so Claude resolves conflicts there
+  # with no per-repo secret. The schedule is removed HERE so the two syncers don't
+  # double-run. This workflow stays dispatch-only as a manual fallback.
   workflow_dispatch: {}
-  schedule:
-    - cron: "17 */3 * * *"   # every 3h (offset to :17 to dodge top-of-hour CI congestion)
 
 permissions:
   contents: write
