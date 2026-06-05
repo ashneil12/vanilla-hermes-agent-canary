@@ -10,24 +10,37 @@ name: Aeon — autonomous upstream sync (canary)
 #
 # FULL CHAIN (each scheduled run):
 #   fetch upstream -> merge (NOT squash; merge=ours driver protects the build
-#   workflow) -> open PR -> WAIT for green CI (the seam-guard tests are the
-#   safety net) -> merge with a MERGE COMMIT -> dispatch the image build
-#   (docker-publish) -> :stable -> the canary VM auto-updates itself.
+#   workflow) -> if conflicts, AUTO-RESOLVE them with Claude (headless `claude -p`,
+#   policy = .hermesos/customizations.yaml) -> open PR -> WAIT for green CI (the
+#   seam-guard tests + full suite are the net that catches a bad resolution) ->
+#   merge with a MERGE COMMIT -> dispatch the image build (docker-publish) ->
+#   :stable -> the canary VM auto-updates itself.
 #
-# HOLD-AND-ALERT (never forces anything):
-#   * merge conflict           -> abort, open an `aeon-hold` issue, stop
-#   * CI red / seam-guard fail  -> leave the PR open + `aeon-hold` label, stop
-#   * an Aeon PR/issue already open -> skip this run (don't stack duplicates)
+# AUTONOMOUS CONFLICT RESOLUTION (the whole point — Aeon does NOT punt routine
+# conflicts to a human):
+#   On a merge conflict Aeon runs `claude -p` to resolve EVERY file per the
+#   customizations manifest, verifies zero conflict markers + zero unmerged paths
+#   remain, completes the merge, and lets CI gate it. CI is the safety net: a
+#   resolution that breaks the build/tests goes red -> Aeon holds (never
+#   force-merges). A human is pulled in ONLY when Claude genuinely cannot resolve,
+#   the build truly breaks, or a credential is missing — not for every conflict.
+#
+# HOLD-AND-ALERT (LAST RESORT only — never forces anything):
+#   * Claude can't resolve (markers/unmerged paths remain) -> open `aeon-hold`
+#   * CI red / seam-guard fail after resolve -> leave PR open + `aeon-hold` label
+#   * ANTHROPIC_API_KEY missing             -> open `aeon-hold` (can't self-resolve)
+#   * an Aeon PR/issue already open          -> skip this run (don't stack)
 #
 # ACTIVATION (Ash — Aeon is INERT until these, all in GitHub, nothing local):
-#   1. Repo Settings -> Secrets and variables -> Actions -> add `AEON_GITHUB_PAT`
-#      = a fine-grained PAT on this repo with Contents:write + Pull-requests:write
-#      + Workflows:write. REQUIRED so the PR Aeon opens actually triggers CI
-#      (PRs opened with the default GITHUB_TOKEN do not trigger workflows).
-#   2. Repo Settings -> General -> enable "Allow auto-merge".
-#   3. Uncomment the `schedule:` block below (every 3h).
-#   Until then it only runs when you click "Run workflow" in the Actions tab —
-#   ideal for watching the first few syncs before handing it the keys.
+#   1. Secrets and variables -> Actions -> add `AEON_GITHUB_PAT` = a fine-grained
+#      PAT on this repo: Contents:write + Pull-requests:write + Workflows:write.
+#      REQUIRED so the PR Aeon opens actually triggers CI (PRs opened with the
+#      default GITHUB_TOKEN do not trigger workflows).
+#   2. Secrets and variables -> Actions -> add `ANTHROPIC_API_KEY` = an Anthropic
+#      API key (console.anthropic.com). REQUIRED for autonomous conflict
+#      resolution; without it Aeon falls back to hold-and-alert on any conflict.
+#   3. Repo Settings -> General -> enable "Allow auto-merge".
+#   4. The `schedule:` block below runs every 3h (already active).
 
 on:
   workflow_dispatch: {}
@@ -49,6 +62,7 @@ env:
   UPSTREAM_BRANCH: main
   BUILD_WORKFLOW: docker-publish.yml
   GH_TOKEN: ${{ secrets.AEON_GITHUB_PAT || github.token }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
 jobs:
   sync:
@@ -110,30 +124,111 @@ jobs:
           git checkout -b "$branch"
           if git merge --no-edit "upstream/${UPSTREAM_BRANCH}"; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "conflicted=false" >> "$GITHUB_OUTPUT"
+            echo "merged cleanly"
           else
+            # DO NOT abort. Leave the conflict markers in the tree — the next
+            # step (auto-resolve) hands them to Claude. Aborting here is exactly
+            # what used to strand the whole sync behind one trivial conflict.
             echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "conflicted=true" >> "$GITHUB_OUTPUT"
             files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
-            git merge --abort
-            body="Aeon could not cleanly merge upstream ${{ steps.delta.outputs.up_sha }} into main. Conflicting files: $files. Resolve with the hermes-upstream-sync skill (check .hermesos/customizations.yaml per file), then merge — Aeon resumes from the new HEAD next run. Aeon never force-merges."
-            gh issue create --repo "$GITHUB_REPOSITORY" --label aeon-hold \
-              --title "Aeon hold: upstream sync ${{ steps.delta.outputs.up_sha }} needs a manual merge" \
-              --body "$body"
-            echo "opened aeon-hold issue; stopping (not an error)"
+            echo "files=$files" >> "$GITHUB_OUTPUT"
+            echo "merge left conflicts in: $files -> handing to the auto-resolver"
           fi
+
+      - name: Auto-resolve conflicts with Claude (headless)
+        id: resolve
+        if: steps.merge.outputs.conflicted == 'true'
+        run: |
+          set -uo pipefail
+          up_sha="${{ steps.delta.outputs.up_sha }}"
+          files="${{ steps.merge.outputs.files }}"
+
+          # Last-resort hand-off. Aborts the merge, opens an aeon-hold issue, and
+          # ends the step SUCCESSFULLY (resolved=false) so the gate step is simply
+          # skipped — Aeon resumes from the new HEAD next run. Never force-merges.
+          hold() {
+            git merge --abort 2>/dev/null || true
+            gh issue create --repo "$GITHUB_REPOSITORY" --label aeon-hold \
+              --title "Aeon hold: upstream sync ${up_sha} needs a human" \
+              --body "$1"
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+            echo "opened aeon-hold issue; stopping (not an error)"
+            exit 0
+          }
+
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            hold "Aeon could not auto-resolve upstream ${up_sha}: the ANTHROPIC_API_KEY secret is not set. Add it (Settings -> Secrets and variables -> Actions) and Aeon will self-resolve from the new HEAD next run. Conflicting files: ${files}"
+          fi
+
+          echo "::group::install Claude CLI"
+          npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || hold "Aeon could not install the Claude CLI to auto-resolve ${up_sha}. Conflicting files: ${files}"
+          claude --version 2>/dev/null || hold "Claude CLI unavailable after install for ${up_sha}. Conflicting files: ${files}"
+          echo "::endgroup::"
+
+          PROMPT="$(cat <<'EOF'
+          You are Aeon's autonomous merge-conflict resolver for the HermesOS canary fork of NousResearch/hermes-agent. A 'git merge upstream/main' is IN PROGRESS and has left conflict markers in the working tree.
+
+          Goal: resolve EVERY conflict so the tree is clean and buildable, then 'git add' each resolved file. Do NOT 'git commit' and do NOT 'git push' — the workflow commits after you exit.
+
+          Policy (priority order):
+          1. Read '.hermesos/customizations.yaml' FIRST. It lists every intentional HermesOS customization and its on_conflict rule (usually keep-ours). NEVER drop, weaken, or revert a listed customization.
+          2. The PURPOSE of tracking upstream is to GAIN upstream's improvements — above all to the chat surface (apps/desktop/**, web/**). For conflicts there, TAKE upstream's changes and re-apply our specific customizations on top (e.g. in apps/desktop/src/lib/web-shim.ts keep installBrandSkin's gold skin, seedDefaultColorMode's 'system' default, and the token/API wiring). Prefer upstream's structure with our additive hooks layered back in.
+          3. For files HermesOS fully owns (e.g. scripts/release.py, our Dockerfile additions, the manifest, provisioner glue): keep our version's intent and only fold in upstream's compatible, non-conflicting hunks (e.g. new dict entries) when harmless.
+          4. For lock/generated files (uv.lock, flake.lock, package-lock.json): prefer upstream's, then re-apply our pins if any.
+          5. Remove ALL '<<<<<<<', '=======', '>>>>>>>' markers. The result must be syntactically valid for its language.
+
+          Procedure: run 'git status' to list conflicted files; for each, inspect ours vs theirs, resolve per policy, then 'git add' it. When 'git diff --name-only --diff-filter=U' is empty you are done — stop.
+
+          If a specific conflict is genuinely ambiguous or unsafe to resolve automatically, LEAVE that file's markers untouched and say which file and why. The workflow detects remaining markers and hands that one case to a human — that is the correct, safe outcome. Do not guess on a load-bearing change.
+          EOF
+          )"
+
+          echo "::group::Claude conflict resolution"
+          claude -p "$PROMPT" \
+            --dangerously-skip-permissions \
+            --max-turns 60 \
+            --model opus 2>&1 | tail -80 || true
+          echo "::endgroup::"
+
+          # SUCCESS is defined by the TREE, not Claude's exit code. Two hard gates:
+          #   (a) no conflict markers remain in any tracked file, and
+          #   (b) no unmerged index paths remain.
+          markers="$(grep -rIlE '^(<<<<<<<|>>>>>>>)' . --exclude-dir=.git 2>/dev/null || true)"
+          if [ -n "$markers" ]; then
+            hold "Aeon's auto-resolver could not fully resolve upstream ${up_sha}; conflict markers remain in: $(echo "$markers" | tr '\n' ' '). A human should finish it (Aeon resumes next run). Original conflicting files: ${files}"
+          fi
+          unmerged="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unmerged" ]; then
+            hold "Aeon's auto-resolver left unmerged paths for upstream ${up_sha}: $(echo "$unmerged" | tr '\n' ' '). Original conflicting files: ${files}"
+          fi
+
+          # Clean tree -> complete the merge commit. The CI gate (next step) is the
+          # safety net that verifies the resolution actually builds + passes tests.
+          git add -A
+          git commit --no-edit -m "Merge upstream/${UPSTREAM_BRANCH} (${up_sha}); Aeon auto-resolved conflicts in: ${files}" 2>&1 | tail -3
+          echo "resolved=true" >> "$GITHUB_OUTPUT"
+          echo "auto-resolved + merge committed"
 
       - name: Open PR + wait for green CI, then merge
         id: gate
-        if: steps.merge.outputs.clean == 'true'
+        if: steps.merge.outputs.clean == 'true' || steps.resolve.outputs.resolved == 'true'
         run: |
           set -o pipefail
           branch="${{ steps.merge.outputs.branch }}"
           up_sha="${{ steps.delta.outputs.up_sha }}"
           behind="${{ steps.delta.outputs.behind }}"
+          resolved="${{ steps.resolve.outputs.resolved }}"
+          note="Merge commit (not squash) preserves the merge-base."
+          if [ "$resolved" = "true" ]; then
+            note="⚠️ Conflicts were AUTO-RESOLVED by Claude in: ${{ steps.merge.outputs.files }}. The CI gate below verifies the resolution builds + passes tests; review the merge commit's diff. $note"
+          fi
           git push origin "$branch"
           gh pr create --repo "$GITHUB_REPOSITORY" --base "$UPSTREAM_BRANCH" --head "$branch" \
             --label aeon-sync \
             --title "Aeon: upstream sync $up_sha" \
-            --body "Automated upstream sync to $up_sha ($behind behind). Merges on green CI; the seam-guard tests gate it. Merge commit (not squash) preserves the merge-base."
+            --body "Automated upstream sync to $up_sha ($behind behind). Merges on green CI; the seam-guard tests gate it. $note"
           # Wait for CI (the seam-guard safety net). Treat no-checks-yet as pending.
           empty=0
           for i in $(seq 1 60); do
