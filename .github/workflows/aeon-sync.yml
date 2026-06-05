@@ -31,8 +31,8 @@ name: Aeon — autonomous upstream sync (canary)
 
 on:
   workflow_dispatch: {}
-  # schedule:
-  #   - cron: "17 */3 * * *"   # every 3h (offset to :17 to dodge top-of-hour CI congestion)
+  schedule:
+    - cron: "17 */3 * * *"   # every 3h (offset to :17 to dodge top-of-hour CI congestion)
 
 permissions:
   contents: write
