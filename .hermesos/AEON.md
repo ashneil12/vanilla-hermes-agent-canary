@@ -1,4 +1,4 @@
-# Aeon — autonomous upstream-sync agent (v1 BUILT — inert until activated)
+# Aeon — autonomous upstream-sync agent (v2 — self-resolves conflicts)
 
 > Status: **FULL-CHAIN, INERT, lives in GitHub Actions.** The workflow
 > (`.github/workflows/aeon-sync.yml`) runs the complete loop in GitHub's cloud —
@@ -31,7 +31,10 @@ merges land unattended; only genuine conflicts wait for a human.
 
 ## Cardinal guardrails (inherited from the manifest `autonomy:` block)
 - `on_ci_red: hold-and-alert` — never ship a red build.
-- `on_low_confidence_merge: hold-and-alert` — never guess a conflict.
+- `on_conflict: auto-resolve-then-CI-gate` — resolve with Claude (manifest
+  policy), then let the seam-guard CI prove it; hold only if it can't be resolved
+  or CI goes red. (Was `on_low_confidence_merge: hold-and-alert`; the CI gate, not
+  a blanket hold, is what prevents a bad merge from shipping.)
 - `rollout: pull-based` — VMs pull their tag; **Aeon never holds fleet SSH** (it
   only touches GitHub + GHCR). This is the hard security boundary.
 - `canary_tag: :canary` (bleeding edge) · `prod_tag: :stable` (promote =
@@ -51,10 +54,15 @@ independent, has GITHUB_TOKEN + GHCR creds, naturally SSH-free).
    enable auto-merge. CI green → merge to `main` → `docker-publish.yml` builds +
    repoints canary `:stable` → canary VMs pull. **This is the only path Aeon
    does unattended.**
-4. **Conflict OR CI red** → abort, open a **draft** PR with the conflict markers,
-   label `aeon-hold`, and alert (GitHub + a dashboard signal). A human (or the
-   `hermes-upstream-sync` skill via a Claude task) resolves it. Aeon never
-   force-merges.
+4. **Conflict** → Aeon **auto-resolves it** in-run: a headless `claude -p` step
+   (auth via `CLAUDE_CODE_OAUTH_TOKEN` — the subscription — or `ANTHROPIC_API_KEY`)
+   resolves every conflicted file per `.hermesos/customizations.yaml` (never drop a
+   customization; prefer upstream for the chat surface and re-apply our hooks),
+   then the merge completes and goes to the SAME green-CI gate. The CI seam-guard
+   suite is the net: a bad resolution fails CI → Aeon **holds** (opens `aeon-hold`,
+   never force-merges). **CI red** → hold as before. Hold is now a LAST RESORT
+   (Claude can't resolve, CI red, or the credential is missing) — not the response
+   to every conflict.
 
 **`aeon-promote-prod.yml`** — every 3h (DISABLED until sign-off):
 - Find the canary digest that has been clean-`:stable` for **≥3h** with a green
@@ -77,12 +85,17 @@ independent, has GITHUB_TOKEN + GHCR creds, naturally SSH-free).
   hold-and-alert even though git didn't conflict).
 
 ## Decisions (Ash delegated — made 2026-06-04)
-- **A — Conflict autonomy → clean-merge-only auto.** Routine clean merges open a
-  PR that self-merges on green CI; conflicts hold-and-alert (an `aeon-hold`
-  issue). The CI **seam-guard tests** (venice/search providers, media-tool
-  wiring, agent-elevation, the webchat bake gate) gate the clean path: an
-  upstream change that silently breaks a customized seam fails CI → auto-merge
-  blocked → the PR sits as a de-facto hold. No semantic-merge guessing.
+- **A — Conflict autonomy → auto-resolve, then CI-gate (UPDATED 2026-06-05).**
+  Originally "clean-merge-only auto; conflicts hold-and-alert (no semantic-merge
+  guessing)." That made one trivial conflict (e.g. upstream adding `AUTHOR_MAP`
+  entries in `scripts/release.py`) strand the whole sync — the fork fell 92
+  commits behind waiting on a human, which defeats the point. Now Aeon resolves
+  conflicts itself with a headless `claude -p` step (policy =
+  `.hermesos/customizations.yaml`) and lets the **seam-guard CI tests**
+  (venice/search providers, media-tool wiring, agent-elevation, the webchat bake
+  gate) prove the resolution. The guessing is no longer blind: it's policy-guided
+  and CI-verified. A resolution that breaks a customized seam fails CI →
+  auto-merge blocked → `aeon-hold`. Hold is the last resort, not the default.
 - **B — Prod promotion → deferred (supply-side first).** v1 keeps the *fork*
   current; building/promoting is left to the existing manual/builderbox-1 lane.
   The `aeon-promote-prod.yml` (alert-then-auto) is a documented follow-up.
@@ -97,14 +110,18 @@ independent, has GITHUB_TOKEN + GHCR creds, naturally SSH-free).
 - **E — Enable cadence → dispatch-only first, then 3h schedule.** Ships inert;
   Ash activates (below) and can watch the first manual runs before the schedule.
 
-## Activation (Ash — Aeon is INERT until these 3 steps)
+## Activation (Ash — Aeon is INERT until these steps)
 1. **Add repo secret `AEON_GITHUB_PAT`** — a fine-grained PAT on this repo with
    Contents:write + Pull-requests:write + Workflows:write. REQUIRED: a PR opened
    with the default `GITHUB_TOKEN` does not trigger CI, so auto-merge would hang.
-2. **Enable "Allow auto-merge"** in repo Settings → General (one-time).
-3. **Uncomment the `schedule:` block** in `aeon-sync.yml` to go from manual to
-   every-3h. (Leave it commented to keep triggering runs by hand from the Actions
-   tab while you build trust.)
+2. **Add repo secret `CLAUDE_CODE_OAUTH_TOKEN`** — mint it locally with
+   `claude setup-token` (reuses the Pro/Max **subscription**, no pay-as-you-go API
+   spend), then `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <this fork>`. Powers
+   the autonomous conflict-resolver. (`ANTHROPIC_API_KEY` also works but bills the
+   API and *outranks* the OAuth token, so don't set an empty one.) Without either,
+   Aeon safely degrades to hold-and-alert on conflict.
+3. **Enable "Allow auto-merge"** in repo Settings → General (one-time).
+4. **The `schedule:` block** in `aeon-sync.yml` runs every 3h (already active).
 
 ## What ships (full chain, in GitHub Actions)
 **`aeon-sync.yml` — the whole loop, in GitHub's cloud, inert until activated.**
@@ -115,10 +132,12 @@ Each scheduled run does the complete chain:
 3. **dispatch `docker-publish`** → `:stable` → the canary VM **auto-updates itself**
    (its per-VM updater is already enabled — the existing pull-based path).
 
-Hold-and-alert, never forced: merge conflict → `aeon-hold` issue; CI red →
-PR left open + `aeon-hold` label; an Aeon PR/issue already open → skip the run
-(no stacking). Lives in GitHub — **never on a personal machine, never holds
-fleet SSH.**
+Auto-resolve then CI-gate, never forced: merge conflict → Claude resolves it
+(manifest policy) → green-CI-gated merge; only if Claude can't resolve, CI goes
+red, or the `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` credential is missing
+does it fall back to an `aeon-hold` issue; an Aeon PR/issue already open → skip
+the run (no stacking). Lives in GitHub — **never on a personal machine, never
+holds fleet SSH.**
 
 **Hard-won gotchas baked in (2026-06-04):**
 - **NEVER squash a sync** — it severs the upstream merge-base and the next run
