@@ -20,6 +20,7 @@ import hmac
 import importlib.util
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -585,19 +586,10 @@ class AudioTranscriptionRequest(BaseModel):
     mime_type: Optional[str] = None
 
 
-class ModelAssignment(BaseModel):
-    """Payload for POST /api/model/set — assign a provider/model to a slot.
-
-    scope="main"        → writes model.provider + model.default
-    scope="auxiliary"   → writes auxiliary.<task>.provider + auxiliary.<task>.model
-    scope="auxiliary" with task=""  → applied to every auxiliary.* slot
-    scope="auxiliary" with task="__reset__"  → resets every slot to provider="auto"
-    """
-
-    scope: str
-    provider: str
-    model: str
-    task: str = ""
+class WebAttachmentUploadRequest(BaseModel):
+    data_url: str
+    name: Optional[str] = None
+    mime_type: Optional[str] = None
 
 
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
@@ -616,11 +608,45 @@ _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
     "video/webm": ".webm",
 }
 _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
+_MAX_WEB_ATTACHMENT_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
 def _audio_extension_for_mime(mime_type: str) -> str:
     normalized = (mime_type or "").split(";", 1)[0].strip().lower()
     return _AUDIO_MIME_EXTENSIONS.get(normalized, ".webm")
+
+
+def _safe_upload_filename(name: str | None, mime_type: str) -> str:
+    raw = (name or "upload").replace("\\", "/")
+    base = Path(raw).name.strip() or "upload"
+    base = _UPLOAD_FILENAME_SAFE_RE.sub("_", base).strip(" .") or "upload"
+    base = base[:120].strip(" .") or "upload"
+    if "." not in base:
+        guessed = mimetypes.guess_extension(mime_type.split(";", 1)[0].strip().lower())
+        if guessed:
+            base = f"{base}{guessed}"
+    return base
+
+
+def _decode_base64_data_url(data_url: str, fallback_mime_type: str) -> tuple[str, bytes]:
+    data_url = (data_url or "").strip()
+    if not data_url.startswith("data:") or "," not in data_url:
+        raise HTTPException(status_code=400, detail="Invalid attachment payload")
+
+    header, encoded = data_url.split(",", 1)
+    if ";base64" not in header:
+        raise HTTPException(
+            status_code=400, detail="Attachment payload must be base64 encoded"
+        )
+
+    mime_type = (fallback_mime_type or header[5:].split(";", 1)[0] or "application/octet-stream").strip()
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Attachment payload is not valid base64")
+
+    return mime_type, payload
 
 
 class ModelAssignment(BaseModel):
@@ -1341,6 +1367,44 @@ async def check_hermes_update(force: bool = False):
         payload["update_available"] = True
 
     return payload
+
+
+@app.post("/api/attachments/upload")
+async def upload_web_attachment(payload: WebAttachmentUploadRequest):
+    mime_type, data = _decode_base64_data_url(
+        payload.data_url,
+        (payload.mime_type or "application/octet-stream").strip(),
+    )
+    if not data:
+        raise HTTPException(status_code=400, detail="Attachment is empty")
+    if len(data) > _MAX_WEB_ATTACHMENT_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Attachment is too large")
+
+    safe_name = _safe_upload_filename(payload.name, mime_type)
+    upload_dir = get_hermes_home() / "uploads" / datetime.now(timezone.utc).strftime("%Y%m%d")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(upload_dir, 0o700)
+    except OSError:
+        pass
+
+    stamp = datetime.now(timezone.utc).strftime("%H%M%S")
+    target = upload_dir / f"{stamp}-{secrets.token_hex(4)}-{safe_name}"
+    try:
+        with open(target, "xb") as fh:
+            fh.write(data)
+        os.chmod(target, 0o600)
+    except OSError as exc:
+        _log.exception("Web attachment upload failed")
+        raise HTTPException(status_code=500, detail=f"Could not save attachment: {exc}")
+
+    return {
+        "ok": True,
+        "path": str(target),
+        "name": safe_name,
+        "size": len(data),
+        "mime_type": mime_type,
+    }
 
 
 @app.post("/api/audio/transcribe")

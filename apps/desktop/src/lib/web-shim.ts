@@ -30,6 +30,212 @@ interface WebRuntimeConfig {
   token: string
 }
 
+interface WebAttachmentUploadResponse {
+  ok?: boolean
+  path?: string
+  name?: string
+  size?: number
+  mime_type?: string
+}
+
+interface WebShimUploadedFile {
+  path: string
+  name: string
+  size: number
+  mimeType?: string
+}
+
+interface WebShimSelectPathsOptions {
+  title?: string
+  defaultPath?: string
+  directories?: boolean
+  multiple?: boolean
+  filters?: Array<{ name: string; extensions: string[] }>
+}
+
+const uploadedPreviewDataUrls = new Map<string, string>()
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+      } else {
+        reject(new Error('Could not read file'))
+      }
+    })
+    reader.addEventListener('error', () => reject(reader.error || new Error('Could not read file')))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function imageMimeForExtension(ext: string): string {
+  switch (ext.replace(/^\./, '').toLowerCase()) {
+    case 'bmp':
+      return 'image/bmp'
+    case 'gif':
+      return 'image/gif'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'svg':
+      return 'image/svg+xml'
+    case 'tif':
+    case 'tiff':
+      return 'image/tiff'
+    case 'webp':
+      return 'image/webp'
+    case 'ico':
+      return 'image/x-icon'
+    default:
+      return 'image/png'
+  }
+}
+
+function acceptFromFilters(filters?: WebShimSelectPathsOptions['filters']): string {
+  const exts = new Set<string>()
+  for (const filter of filters ?? []) {
+    for (const ext of filter.extensions ?? []) {
+      const clean = ext.trim().replace(/^\.+/, '')
+      if (clean) {
+        exts.add(`.${clean}`)
+      }
+    }
+  }
+  return [...exts].join(',')
+}
+
+async function uploadAttachmentDataUrl({
+  dataUrl,
+  mimeType,
+  name
+}: {
+  dataUrl: string
+  mimeType: string
+  name: string
+}): Promise<WebShimUploadedFile> {
+  const result = await fetchJson<WebAttachmentUploadResponse>({
+    path: '/api/attachments/upload',
+    timeoutMs: 120_000,
+    body: {
+      data_url: dataUrl,
+      mime_type: mimeType,
+      name
+    }
+  })
+
+  if (!result?.path) {
+    throw new Error('Attachment upload did not return a server path')
+  }
+
+  return {
+    path: result.path,
+    name: result.name || name,
+    size: result.size ?? 0,
+    mimeType: result.mime_type || mimeType
+  }
+}
+
+async function uploadBrowserFile(file: File): Promise<WebShimUploadedFile> {
+  const dataUrl = await blobToDataUrl(file)
+  const uploaded = await uploadAttachmentDataUrl({
+    dataUrl,
+    mimeType: file.type || 'application/octet-stream',
+    name: file.name || 'upload'
+  })
+
+  if ((file.type || '').startsWith('image/')) {
+    uploadedPreviewDataUrls.set(uploaded.path, dataUrl)
+  }
+
+  return uploaded
+}
+
+function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<string[]> {
+  if (options.directories || typeof document === 'undefined' || !document.body) {
+    return Promise.resolve([])
+  }
+
+  return new Promise(resolve => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = options.multiple !== false
+    input.style.position = 'fixed'
+    input.style.left = '-9999px'
+    input.style.top = '-9999px'
+    input.style.opacity = '0'
+    input.style.pointerEvents = 'none'
+
+    const accept = acceptFromFilters(options.filters)
+    if (accept) {
+      input.accept = accept
+    }
+
+    let settled = false
+    let focusArmed = false
+
+    const cleanup = () => {
+      input.removeEventListener('change', onChange)
+      input.removeEventListener('cancel', onCancel)
+      window.removeEventListener('focus', onWindowFocus)
+      input.remove()
+    }
+
+    const settle = (paths: string[]) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      cleanup()
+      resolve(paths)
+    }
+
+    const onWindowFocus = () => {
+      window.setTimeout(() => {
+        if (!settled && focusArmed && (!input.files || input.files.length === 0)) {
+          settle([])
+        }
+      }, 250)
+    }
+
+    async function onChange() {
+      const files = Array.from(input.files ?? [])
+      if (!files.length) {
+        settle([])
+        return
+      }
+
+      try {
+        const uploaded = await Promise.all(files.map(file => uploadBrowserFile(file)))
+        settle(uploaded.map(file => file.path).filter(Boolean))
+      } catch (err) {
+        console.error('Hermes web attachment upload failed', err)
+        settle([])
+      }
+    }
+
+    function onCancel() {
+      settle([])
+    }
+
+    input.addEventListener('change', onChange)
+    input.addEventListener('cancel', onCancel)
+    window.setTimeout(() => {
+      focusArmed = true
+      window.addEventListener('focus', onWindowFocus)
+    }, 0)
+
+    document.body.appendChild(input)
+    try {
+      input.click()
+    } catch (err) {
+      console.error('Hermes web file picker failed', err)
+      settle([])
+    }
+  })
+}
+
 function resolveConfig(): WebRuntimeConfig {
   const w = window as unknown as {
     __HERMES_WEB_API_BASE__?: string
@@ -219,7 +425,9 @@ function installWebShim(): void {
 
     notify: async (payload: { title?: string; body?: string; silent?: boolean }) => {
       try {
-        if (typeof Notification === 'undefined') return false
+        if (typeof Notification === 'undefined') {
+          return false
+        }
         if (Notification.permission === 'granted') {
           new Notification(payload.title ?? 'Hermes', { body: payload.body, silent: payload.silent })
           return true
@@ -247,12 +455,13 @@ function installWebShim(): void {
       }
     },
 
-    // Local-filesystem reads are not available in the browser. Resolve to
-    // empty/benign values so the (non-chat) preview/files panels degrade
-    // gracefully rather than crash.
-    readFileDataUrl: async () => '',
+    // Local-filesystem reads are not available in the browser. Uploaded browser
+    // files are materialized server-side under ~/.hermes/uploads; image previews
+    // reuse the Data URL captured before upload.
+    readFileDataUrl: async (filePath: string) => uploadedPreviewDataUrls.get(filePath) || '',
     readFileText: async (filePath: string) => ({ path: filePath, text: '', binary: false }),
-    selectPaths: async () => [],
+    selectPaths: selectBrowserFiles,
+    uploadFile: uploadBrowserFile,
     readDir: async () => ({ entries: [] }),
     gitRoot: async () => null,
     normalizePreviewTarget: async () => null,
@@ -280,9 +489,17 @@ function installWebShim(): void {
       }
     },
     saveImageBuffer: async (data: ArrayBuffer | Uint8Array, ext: string) => {
-      const blob = new Blob([data as BlobPart], { type: `image/${ext.replace(/^\./, '')}` })
-      triggerDownload(blob, `image.${ext.replace(/^\./, '')}`)
-      return 'download'
+      const cleanExt = ext.replace(/^\./, '') || 'png'
+      const mimeType = imageMimeForExtension(cleanExt)
+      const blob = new Blob([data as BlobPart], { type: mimeType })
+      const dataUrl = await blobToDataUrl(blob)
+      const uploaded = await uploadAttachmentDataUrl({
+        dataUrl,
+        mimeType,
+        name: `image.${cleanExt}`
+      })
+      uploadedPreviewDataUrls.set(uploaded.path, dataUrl)
+      return uploaded.path
     },
     saveClipboardImage: async () => '',
     getPathForFile: () => '',
@@ -387,7 +604,9 @@ function installWebShim(): void {
  */
 function installBrandSkin(): void {
   const inject = () => {
-    if (document.getElementById('hermesos-skin')) return
+    if (document.getElementById('hermesos-skin')) {
+      return
+    }
     const style = document.createElement('style')
     style.id = 'hermesos-skin'
     style.textContent = [
@@ -402,8 +621,11 @@ function installBrandSkin(): void {
     ].join('')
     document.head.appendChild(style)
   }
-  if (document.head) inject()
-  else document.addEventListener('DOMContentLoaded', inject, { once: true })
+  if (document.head) {
+    inject()
+  } else {
+    document.addEventListener('DOMContentLoaded', inject, { once: true })
+  }
 }
 
 /**

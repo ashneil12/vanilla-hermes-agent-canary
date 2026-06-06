@@ -1,6 +1,7 @@
 """Tests for hermes_cli.web_server and related config utilities."""
 
 import os
+import base64
 import json
 import shutil
 from pathlib import Path
@@ -242,6 +243,38 @@ class TestWebServerEndpoints:
         assert "version" in data
         assert "hermes_home" in data
         assert "active_sessions" in data
+
+    def test_upload_web_attachment_writes_sanitized_file(self):
+        """Browser/iframe chat uploads materialize files into isolated HERMES_HOME storage."""
+        from hermes_constants import get_hermes_home
+
+        body = b"hello from browser iframe"
+        data_url = f"data:text/plain;base64,{base64.b64encode(body).decode('ascii')}"
+
+        resp = self.client.post(
+            "/api/attachments/upload",
+            json={"data_url": data_url, "mime_type": "text/plain", "name": "../evil?.txt"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        saved = Path(data["path"])
+        assert saved.is_file()
+        assert saved.read_bytes() == body
+        assert saved.name.endswith("-evil_.txt")
+        assert saved.is_relative_to(get_hermes_home() / "uploads")
+        assert data["name"] == "evil_.txt"
+        assert data["size"] == len(body)
+        assert data["mime_type"] == "text/plain"
+
+    def test_upload_web_attachment_rejects_invalid_base64(self):
+        resp = self.client.post(
+            "/api/attachments/upload",
+            json={"data_url": "data:text/plain;base64,not-valid!", "name": "bad.txt"},
+        )
+
+        assert resp.status_code == 400
+        assert "base64" in resp.json()["detail"]
 
     def test_get_sessions_uses_only_persisted_cwd(self, monkeypatch):
         """Session rows without persisted cwd must not inherit TERMINAL_CWD.
