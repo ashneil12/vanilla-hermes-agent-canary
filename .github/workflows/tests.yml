@@ -117,20 +117,21 @@ jobs:
         with:
           pattern: test-durations-slice-*
           path: durations
-          merge-multiple: true
 
       - name: Merge into single durations file
         run: |
-          python3 -c "
-          import json, glob, os
+          python3 - <<'PY'
+          import glob
+          import json
+
           merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
-            with open(f) as fh:
-              merged.update(json.load(fh))
+          for path in glob.glob('durations/**/test_durations.json', recursive=True):
+              with open(path) as fh:
+                  merged.update(json.load(fh))
           with open('test_durations.json', 'w') as fh:
-            json.dump(merged, fh, indent=2, sort_keys=True)
+              json.dump(merged, fh, indent=2, sort_keys=True)
           print(f'Merged {len(merged)} file durations')
-          "
+          PY
 
       - name: Save merged duration cache
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
