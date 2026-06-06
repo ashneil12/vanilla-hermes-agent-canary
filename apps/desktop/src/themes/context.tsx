@@ -386,30 +386,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('message', onMessage)
   }, [setMode])
 
-  // Shift+X toggles light/dark anywhere outside an editable field.
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const t = event.target as HTMLElement | null
-
-      const editing =
-        t?.isContentEditable ||
-        t instanceof HTMLInputElement ||
-        t instanceof HTMLTextAreaElement ||
-        t instanceof HTMLSelectElement
-
-      if (editing || event.repeat || event.altKey || event.ctrlKey || event.metaKey) {
-        return
-      }
-
-      if (event.shiftKey && event.code === 'KeyX') {
-        setMode(resolvedMode === 'dark' ? 'light' : 'dark')
-      }
-    }
-
-    window.addEventListener('keydown', onKeyDown)
-
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [resolvedMode, setMode])
+  // The light/dark toggle (Shift+X by default) is owned by the keybind runtime
+  // (`appearance.toggleMode`) so it shows up in the hotkey map and is rebindable.
 
   const value = useMemo<ThemeContextValue>(
     () => ({ theme: activeTheme, themeName, mode, resolvedMode, availableThemes: SKIN_LIST, setTheme, setMode }),

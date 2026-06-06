@@ -74,7 +74,8 @@ AUTHOR_MAP = {
     "alaamohanad169@gmail.com": "Spider-Vers",
     "info@aminvakil.com": "aminvakil",
     "nikpolale@gmail.com": "polnikale",
-    # hermes-fork: 2026-06-06 upstream sync (56236b16e)
+    # hermes-fork: 2026-06-06 upstream sync (ef7e5168b)
+    "chilltulpa@gmail.com": "TheGardenGallery",
     "al@randomsnowflake.me": "randomsnowflake",
     "834740219@qq.com": "ViewWay",
     "naqerl@users.noreply.github.com": "naqerl",  # 2026-06-06 sync
