@@ -67,6 +67,29 @@ const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-
 const normalizeSkin = (name: string | null | undefined): string =>
   name && BUILTIN_THEMES[name] && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
 
+/**
+ * Per-mode default skin, used only when the user hasn't explicitly picked one.
+ * Light reads best on Nous (glass neutrals + blue accent); dark reads best on
+ * Mono (clean grayscale) rather than the saturated Nous-blue dark palette.
+ * Once the user picks a skin it's persisted and overrides this for both modes.
+ */
+const MODE_DEFAULT_SKINS: Record<'light' | 'dark', string> = { light: 'nous', dark: 'mono' }
+
+/** A persisted skin choice, or null when nothing valid is stored (→ auto). */
+function readStoredSkin(): string | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const raw = window.localStorage.getItem(SKIN_KEY)
+
+  return raw && BUILTIN_THEMES[raw] && !RETIRED_SKINS.has(raw) ? raw : null
+}
+
+/** Effective skin name: the explicit choice, else the mode-aware default. */
+const resolveSkin = (stored: string | null, mode: 'light' | 'dark'): string =>
+  stored ?? MODE_DEFAULT_SKINS[mode]
+
 // ─── Color math (for synthesised light variants of dark-only skins) ────────
 
 function hexToRgb(hex: string): [number, number, number] | null {
@@ -270,9 +293,9 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
 
 // Boot-time paint to avoid a flash before <ThemeProvider> mounts.
 if (typeof window !== 'undefined') {
-  const skin = normalizeSkin(window.localStorage.getItem(SKIN_KEY))
   const mode = readInitialMode()
   const resolved = resolveMode(mode)
+  const skin = resolveSkin(readStoredSkin(), resolved)
   applyTheme(deriveTheme(skin, resolved), resolved)
 }
 
@@ -301,21 +324,22 @@ const ThemeContext = createContext<ThemeContextValue>({
 })
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [themeName, setThemeNameState] = useState(() =>
-    typeof window === 'undefined' ? DEFAULT_SKIN_NAME : normalizeSkin(window.localStorage.getItem(SKIN_KEY))
-  )
+  const [storedSkin, setStoredSkin] = useState<string | null>(readStoredSkin)
 
   const [mode, setModeState] = useState<ThemeMode>(readInitialMode)
 
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
   const resolvedMode = resolveMode(mode, systemDark)
+  // Effective skin: an explicit pick wins; otherwise the mode-aware default
+  // (Nous in light, Mono in dark), so it flips with the mode until chosen.
+  const themeName = resolveSkin(storedSkin, resolvedMode)
   const activeTheme = useMemo(() => deriveTheme(themeName, resolvedMode), [themeName, resolvedMode])
 
   useEffect(() => applyTheme(activeTheme, resolvedMode), [activeTheme, resolvedMode])
 
   const setTheme = useCallback((name: string) => {
     const next = normalizeSkin(name)
-    setThemeNameState(next)
+    setStoredSkin(next)
     window.localStorage.setItem(SKIN_KEY, next)
   }, [])
 
