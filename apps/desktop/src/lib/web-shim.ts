@@ -397,14 +397,14 @@ function installWebShim(): void {
     }),
 
     getConnectionConfig: async () => ({
-      envOverride: true,
+      envOverride: false,
       mode: 'remote' as const,
       remoteTokenPreview: null,
       remoteTokenSet: Boolean(config.token),
       remoteUrl: `${window.location.origin}${config.apiBase}`
     }),
     saveConnectionConfig: async (p: unknown) => ({
-      envOverride: true,
+      envOverride: false,
       mode: 'remote' as const,
       remoteTokenPreview: null,
       remoteTokenSet: Boolean(config.token),
