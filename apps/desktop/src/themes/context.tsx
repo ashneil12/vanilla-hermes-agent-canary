@@ -9,86 +9,66 @@
  * The two are persisted independently. Shift+X toggles light/dark.
  */
 
+import { useStore } from '@nanostores/react'
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 import { matchesQuery, useMediaQuery } from '@/hooks/use-media-query'
+import { persistString, persistStringRecord, storedString, storedStringRecord } from '@/lib/storage'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 
 import { BUILTIN_THEME_LIST, BUILTIN_THEMES, DEFAULT_SKIN_NAME, DEFAULT_TYPOGRAPHY, nousTheme } from './presets'
 import type { DesktopTheme, DesktopThemeColors } from './types'
 
+// Legacy global skin (pre per-profile themes). Still the inheritance fallback
+// for any profile without its own assignment, so single-profile users and old
+// installs are unaffected.
 const SKIN_KEY = 'hermes-desktop-theme-v2'
 const MODE_KEY = 'hermes-desktop-mode-v1'
+// Per-profile skin + light/dark mode assignments: { [profileKey]: value }. A
+// profile inherits the global default until it's given its own appearance.
+const PROFILE_SKINS_KEY = 'hermes-desktop-profile-themes-v1'
+const PROFILE_MODES_KEY = 'hermes-desktop-profile-modes-v1'
+// Last active profile, recorded so the boot-time paint can pick that profile's
+// theme before the gateway reports which profile actually launched.
+const LAST_PROFILE_KEY = 'hermes-desktop-active-profile-v1'
 const RETIRED_SKINS = new Set(['nous-light', 'default', 'gold'])
 
-/**
- * Dashboard appearance bridge. When this app is embedded as an iframe in the
- * Hermes dashboard, the dashboard posts {colorScheme: 'light' | 'dark'} on
- * mount and on every light/dark toggle, and pre-encodes ?theme= on the iframe
- * URL so the first paint matches. Mirrors WEBUI_DASHBOARD_APPEARANCE_MESSAGE_TYPE
- * in hermesdeploy/dashboard/src/lib/webui-appearance.ts.
- */
-const DASHBOARD_APPEARANCE_MESSAGE_TYPE = 'hermes-dashboard:appearance'
-
 export type ThemeMode = 'light' | 'dark' | 'system'
-
-/** Mode hint from the dashboard's `?theme=` query param, when in an iframe. */
-function readDashboardModeFromUrl(): ThemeMode | null {
-  if (typeof window === 'undefined' || window === window.parent) {
-    return null
-  }
-
-  const theme = new URLSearchParams(window.location.search).get('theme')
-
-  if (theme === 'dark') return 'dark'
-  if (theme === 'hermesos-light' || theme === 'light') return 'light'
-
-  return null
-}
-
-function readInitialMode(): ThemeMode {
-  if (typeof window === 'undefined') {
-    return 'light'
-  }
-
-  const dashboardMode = readDashboardModeFromUrl()
-
-  if (dashboardMode) {
-    return dashboardMode
-  }
-
-  return (window.localStorage.getItem(MODE_KEY) as ThemeMode) ?? 'light'
-}
 
 const INJECTED_FONT_URLS = new Set<string>()
 
 const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-scheme: dark)')): 'light' | 'dark' =>
   mode === 'system' ? (systemDark ? 'dark' : 'light') : mode
 
-const normalizeSkin = (name: string | null | undefined): string =>
+const normalizeSkin = (name: string | null): string =>
   name && BUILTIN_THEMES[name] && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
 
-/**
- * Per-mode default skin, used only when the user hasn't explicitly picked one.
- * Light reads best on Nous (glass neutrals + blue accent); dark reads best on
- * Mono (clean grayscale) rather than the saturated Nous-blue dark palette.
- * Once the user picks a skin it's persisted and overrides this for both modes.
- */
-const MODE_DEFAULT_SKINS: Record<'light' | 'dark', string> = { light: 'nous', dark: 'mono' }
+const normalizeMode = (value: string | null): ThemeMode =>
+  value === 'light' || value === 'dark' || value === 'system' ? value : 'light'
 
-/** A persisted skin choice, or null when nothing valid is stored (→ auto). */
-function readStoredSkin(): string | null {
-  if (typeof window === 'undefined') {
-    return null
+// ─── Per-profile appearance persistence ─────────────────────────────────────
+// Skin and mode are each stored per profile. "default" isn't a real profile —
+// it *is* the legacy global slot, so it reads/writes the global directly. Named
+// profiles get their own entry and fall back to that global until assigned, so
+// unassigned profiles and pre-per-profile installs stay on the global value.
+const profilePref = <T extends string>(record: string, legacy: string, normalize: (v: string | null) => T) => ({
+  resolve: (profile: string): T => normalize(storedStringRecord(record)[profile] ?? storedString(legacy)),
+  assign: (profile: string, value: T): void => {
+    if (profile === 'default') {
+      persistString(legacy, value)
+    } else {
+      persistStringRecord(record, { ...storedStringRecord(record), [profile]: value })
+    }
   }
+})
 
-  const raw = window.localStorage.getItem(SKIN_KEY)
+export const skinPref = profilePref(PROFILE_SKINS_KEY, SKIN_KEY, normalizeSkin)
+export const modePref = profilePref(PROFILE_MODES_KEY, MODE_KEY, normalizeMode)
 
-  return raw && BUILTIN_THEMES[raw] && !RETIRED_SKINS.has(raw) ? raw : null
-}
-
-/** Effective skin name: the explicit choice, else the mode-aware default. */
-const resolveSkin = (stored: string | null, mode: 'light' | 'dark'): string =>
-  stored ?? MODE_DEFAULT_SKINS[mode]
+// Last active profile — lets the boot paint pick its appearance before the
+// gateway reports which profile actually launched.
+const readBootProfileKey = () => normalizeProfileKey(storedString(LAST_PROFILE_KEY))
+const rememberActiveProfileKey = (profile: string) => persistString(LAST_PROFILE_KEY, profile)
 
 // ─── Color math (for synthesised light variants of dark-only skins) ────────
 
@@ -291,12 +271,13 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
   }
 }
 
-// Boot-time paint to avoid a flash before <ThemeProvider> mounts.
+// Boot-time paint to avoid a flash before <ThemeProvider> mounts. Use the last
+// active profile's appearance so a non-default profile relaunch paints its own
+// skin + light/dark mode.
 if (typeof window !== 'undefined') {
-  const mode = readInitialMode()
-  const resolved = resolveMode(mode)
-  const skin = resolveSkin(readStoredSkin(), resolved)
-  applyTheme(deriveTheme(skin, resolved), resolved)
+  const profile = readBootProfileKey()
+  const resolved = resolveMode(modePref.resolve(profile))
+  applyTheme(deriveTheme(skinPref.resolve(profile), resolved), resolved)
 }
 
 // ─── Context ────────────────────────────────────────────────────────────────
@@ -324,67 +305,47 @@ const ThemeContext = createContext<ThemeContextValue>({
 })
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [storedSkin, setStoredSkin] = useState<string | null>(readStoredSkin)
+  // Skin + mode are assigned per profile; the active profile drives which
+  // appearance shows. Single-profile users only ever see "default", so their
+  // behavior is unchanged.
+  const profileKey = normalizeProfileKey(useStore($activeGatewayProfile))
 
-  const [mode, setModeState] = useState<ThemeMode>(readInitialMode)
+  const [themeName, setThemeNameState] = useState(() =>
+    typeof window === 'undefined' ? DEFAULT_SKIN_NAME : skinPref.resolve(readBootProfileKey())
+  )
+
+  const [mode, setModeState] = useState<ThemeMode>(() =>
+    typeof window === 'undefined' ? 'light' : modePref.resolve(readBootProfileKey())
+  )
+
+  // Follow profile switches: paint the profile's assigned skin + mode and
+  // remember it for the next boot's first paint.
+  useEffect(() => {
+    rememberActiveProfileKey(profileKey)
+    setThemeNameState(skinPref.resolve(profileKey))
+    setModeState(modePref.resolve(profileKey))
+  }, [profileKey])
 
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
   const resolvedMode = resolveMode(mode, systemDark)
-  // Effective skin: an explicit pick wins; otherwise the mode-aware default
-  // (Nous in light, Mono in dark), so it flips with the mode until chosen.
-  const themeName = resolveSkin(storedSkin, resolvedMode)
   const activeTheme = useMemo(() => deriveTheme(themeName, resolvedMode), [themeName, resolvedMode])
 
   useEffect(() => applyTheme(activeTheme, resolvedMode), [activeTheme, resolvedMode])
 
+  // Assign to whichever profile is live right now (read fresh so the callbacks
+  // stay stable across profile switches).
+  const liveProfile = () => normalizeProfileKey($activeGatewayProfile.get())
+
   const setTheme = useCallback((name: string) => {
     const next = normalizeSkin(name)
-    setStoredSkin(next)
-    window.localStorage.setItem(SKIN_KEY, next)
+    setThemeNameState(next)
+    skinPref.assign(liveProfile(), next)
   }, [])
 
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next)
-    window.localStorage.setItem(MODE_KEY, next)
+    modePref.assign(liveProfile(), next)
   }, [])
-
-  // Dashboard ↔ chat color-mode sync. When the dashboard hosts us in an
-  // iframe and the user toggles its light/dark switch, the dashboard posts
-  // an appearance message; we honor the colorScheme to keep the chat in
-  // step. Only mode syncs — the user's theme/skin pick stays untouched.
-  useEffect(() => {
-    if (typeof window === 'undefined' || window === window.parent) {
-      return
-    }
-
-    const onMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent) return
-
-      const data = event.data as
-        | { type?: unknown; source?: unknown; appearance?: { colorScheme?: unknown } }
-        | null
-        | undefined
-
-      if (
-        !data ||
-        typeof data !== 'object' ||
-        data.type !== DASHBOARD_APPEARANCE_MESSAGE_TYPE ||
-        data.source !== 'hermes-dashboard'
-      ) {
-        return
-      }
-
-      const colorScheme = data.appearance?.colorScheme
-
-      if (colorScheme === 'dark' || colorScheme === 'light') {
-        setMode(colorScheme)
-      }
-    }
-
-    window.addEventListener('message', onMessage)
-
-    return () => window.removeEventListener('message', onMessage)
-  }, [setMode])
 
   // The light/dark toggle (Shift+X by default) is owned by the keybind runtime
   // (`appearance.toggleMode`) so it shows up in the hotkey map and is rebindable.
