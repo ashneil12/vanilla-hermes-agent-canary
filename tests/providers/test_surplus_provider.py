@@ -91,3 +91,77 @@ class TestSurplusAuthRegistry:
         monkeypatch.setenv("SURPLUS_BASE_URL", "https://proxy.example.com/v1")
         creds = resolve_api_key_provider_credentials("surplus")
         assert creds["base_url"] == "https://proxy.example.com/v1"
+
+
+class TestSurplusModelOrdering:
+    """The marketplace ``/v1/models`` endpoint lists models in arbitrary
+    seller-availability order, so the picker must sort the live catalog or
+    related variants scatter and read as "missing" (the reported bug:
+    ``claude-opus-4-8-fast`` 60 rows from ``claude-opus-4.6-fast``).
+    """
+
+    def _stub_live_catalog(self, monkeypatch, catalog):
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "inf_live_key",
+                "base_url": (
+                    "https://www.surplusintelligence.ai/api/inference/v1"
+                ),
+                "source": "SURPLUS_API_KEY",
+            },
+        )
+        monkeypatch.setattr(
+            "providers.base.ProviderProfile.fetch_models",
+            lambda self, *, api_key=None, timeout=8.0: list(catalog),
+        )
+
+    def test_live_models_sorted_and_variants_adjacent(self, monkeypatch):
+        from hermes_cli.models import provider_model_ids
+
+        # Arbitrary marketplace order — the two opus variants are far apart.
+        unsorted = [
+            "llama-3.3-70b",
+            "claude-opus-4.6-fast",
+            "gpt-5.4",
+            "claude-opus-4-8-fast",
+            "claude-opus-4.6",
+        ]
+        self._stub_live_catalog(monkeypatch, unsorted)
+
+        result = provider_model_ids("surplus")
+
+        # Sorted case-insensitively (alphabetical family grouping).
+        assert result == sorted(unsorted, key=str.lower)
+        # The variants the user couldn't find are now neighbours.
+        assert (
+            abs(
+                result.index("claude-opus-4-8-fast")
+                - result.index("claude-opus-4.6-fast")
+            )
+            <= 2
+        )
+
+    def test_fallback_models_order_preserved(self, monkeypatch):
+        # When the live fetch yields nothing, the small hand-ordered
+        # ``fallback_models`` curated list is returned verbatim (NOT sorted).
+        from hermes_cli.models import provider_model_ids
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "inf_live_key",
+                "base_url": (
+                    "https://www.surplusintelligence.ai/api/inference/v1"
+                ),
+                "source": "SURPLUS_API_KEY",
+            },
+        )
+        monkeypatch.setattr(
+            "providers.base.ProviderProfile.fetch_models",
+            lambda self, *, api_key=None, timeout=8.0: None,
+        )
+
+        assert provider_model_ids("surplus") == ["claude-opus-4.6", "llama-3.3-70b"]

@@ -2303,7 +2303,15 @@ def get_model_options():
         # affordance instead of hiding the provider entirely.
         return build_models_payload(
             load_picker_context(),
-            max_models=50,
+            # The settings model dropdown is search-filtered client-side, so it
+            # needs the FULL per-provider catalog — not a 50-model preview.
+            # Marketplace providers (Surplus Intelligence) expose 200+ models;
+            # capping at 50 hid everything past index 50 from the filter, so a
+            # model like `claude-opus-4-8-fast` (sorted into the tail) was
+            # unreachable. 1000 covers every real provider while bounding a
+            # pathological aggregator. (Enrichment loops below are per-model
+            # dict lookups — no per-model network — so this stays cheap.)
+            max_models=1000,
             include_unconfigured=True,
             picker_hints=True,
             canonical_order=True,

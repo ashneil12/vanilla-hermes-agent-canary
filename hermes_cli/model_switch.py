@@ -540,6 +540,100 @@ def get_authenticated_provider_slugs(
         return []
 
 
+# Providers that legitimately run without an API key (local / self-hosted
+# OpenAI-compatible servers). Switching to these must never be blocked for a
+# "missing key" reason.
+_NO_AUTH_LOCAL_SLUGS = frozenset({"lmstudio", "local"})
+_LOCAL_BASE_URL_HINTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
+def provider_has_resolvable_credentials(
+    provider: str,
+    *,
+    base_url: str = "",
+    api_key: str = "",
+    user_providers: dict | None = None,
+    custom_providers: list | None = None,
+) -> bool:
+    """Whether ``provider`` can supply credentials to a NEW agent session.
+
+    Mirrors the gate ``agent_init`` applies: a provider written into
+    ``config.yaml`` whose key cannot be resolved makes every future session
+    abort with *"Provider 'X' is set in config.yaml but no API key was
+    found."*. The model-switch / config-update paths call this BEFORE
+    persisting so the picker can't brick a box by selecting a full-catalog
+    model under a provider the box has no key for (e.g. ``gpt-5.5-pro``
+    routing to ``openai-api`` while only ``SURPLUS_API_KEY`` is set).
+
+    Conservative by design — returns ``True`` whenever uncertain for
+    non-api-key providers (OAuth / AWS / external-process), so an
+    exotic-but-working provider is never blocked. The only hard rejection is
+    the precise brick class: a known ``api_key`` provider with no key set.
+    """
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        get_api_key_provider_status,
+        has_usable_secret,
+        LMSTUDIO_NOAUTH_PLACEHOLDER,
+    )
+
+    slug = (provider or "").strip()
+    low = slug.lower()
+    if not low or low == "auto":
+        # No concrete provider to validate (auto-detect resolves at runtime).
+        return True
+
+    # An already-resolved real key/token (covers OAuth logins whose token has
+    # been resolved into ``api_key``) or an intentional no-auth placeholder.
+    if has_usable_secret(api_key) or api_key in (
+        LMSTUDIO_NOAUTH_PLACEHOLDER,
+        "no-key-required",
+    ):
+        return True
+
+    # Local / self-hosted OpenAI-compatible endpoints need no key.
+    if low.startswith("custom") or low in _NO_AUTH_LOCAL_SLUGS:
+        return True
+    if base_url and any(h in base_url for h in _LOCAL_BASE_URL_HINTS):
+        return True
+
+    # User-declared providers carry their own key reference in config.yaml.
+    if user_providers and low in {str(k).lower() for k in user_providers}:
+        return True
+
+    # Fast positive path: a known ``api_key`` provider with its key set in the
+    # environment. Pure env check, no network. Only ever short-circuits to
+    # ``True`` — a *missing* api-key env is NOT a rejection here, because the
+    # same slug may also be authenticated another way (e.g. ``anthropic`` via
+    # OAuth), so we defer the negative case to the authoritative listing below.
+    pcfg = PROVIDER_REGISTRY.get(low) or PROVIDER_REGISTRY.get(slug)
+    if pcfg is not None and pcfg.auth_type == "api_key":
+        try:
+            if get_api_key_provider_status(low).get("configured"):
+                return True
+        except Exception:
+            pass
+
+    # Authoritative check: the same provider-credential listing that powers the
+    # picker's ``authenticated`` flag (covers api-key, OAuth, AWS-SDK, and
+    # user/custom endpoints). Allow when the listing is unavailable so we never
+    # block a provider that may actually have working credentials.
+    try:
+        authed = {
+            s.lower()
+            for s in get_authenticated_provider_slugs(
+                current_provider=low,
+                user_providers=user_providers,
+                custom_providers=custom_providers,
+            )
+        }
+    except Exception:
+        return True
+    if not authed:
+        return True
+    return low in authed
+
+
 def _resolve_alias_fallback(
     raw_input: str,
     authenticated_providers: list[str] = (),
@@ -980,6 +1074,46 @@ def switch_model(
 
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
+
+    # --- Guard: refuse a switch to a provider with no resolvable credentials ---
+    # Without this, the picker can land on a full-catalog model under a provider
+    # the box has no key for (e.g. `gpt-5.5-pro` routing to `openai-api` while
+    # only SURPLUS_API_KEY is set). The switch would "succeed", config.yaml gets
+    # rewritten, and every subsequent session aborts at agent_init with
+    # "Provider 'X' is set in config.yaml but no API key was found." Reject here
+    # so the working provider/model is left untouched. Only gate provider
+    # changes / explicit picks — re-picking a model on the current provider must
+    # never be blocked on a momentary credential-listing hiccup.
+    if (provider_changed or explicit_provider) and not provider_has_resolvable_credentials(
+        target_provider,
+        base_url=base_url,
+        api_key=api_key,
+        user_providers=user_providers,
+        custom_providers=custom_providers,
+    ):
+        from hermes_cli.auth import PROVIDER_REGISTRY as _REG
+        _pcfg = _REG.get(target_provider.lower()) or _REG.get(target_provider)
+        _key_env = (
+            _pcfg.api_key_env_vars[0]
+            if (_pcfg and getattr(_pcfg, "api_key_env_vars", ()))
+            else ""
+        )
+        _hint = (
+            f"Add {_key_env} in Settings → Providers (or run `hermes model`), then switch."
+            if _key_env
+            else "Configure it with `hermes model`, then switch."
+        )
+        return ModelSwitchResult(
+            success=False,
+            new_model=new_model,
+            target_provider=target_provider,
+            provider_label=provider_label,
+            is_global=is_global,
+            error_message=(
+                f"{provider_label} has no API key configured on this box, so "
+                f"switching would break new chats. {_hint}"
+            ),
+        )
 
     # --- Validate ---
     try:
