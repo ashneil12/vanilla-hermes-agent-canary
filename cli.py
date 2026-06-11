@@ -5234,6 +5234,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ),
         }
 
+        service_tier = getattr(self, "service_tier", None)
+        if not service_tier:
+            route["request_overrides"] = None
+            return route
+
+        try:
+            overrides = resolve_fast_mode_overrides(route["model"])
+        except Exception:
+            overrides = None
+        route["request_overrides"] = overrides
+        return route
 
     def _install_tool_callbacks(self) -> None:
         """Install tool callbacks that need the live prompt UI."""
