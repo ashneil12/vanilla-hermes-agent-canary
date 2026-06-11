@@ -1060,7 +1060,39 @@ export function ChatBar({
 
     const candidates = extractDroppedFiles(event.dataTransfer)
 
-    if (!candidates.length) {
+    if (candidates.length === 0) {
+      return
+    }
+
+    // Items that resolved to a real filesystem path — in-app drags (project
+    // tree, source-gutter line refs) and, in the native app, OS file drops
+    // (`getPathForFile` returns a real path) — become inline @refs, exactly as
+    // before. This branch is unchanged for the desktop app.
+    const refs = candidates
+      .map(candidate => droppedFileInlineRef(candidate, cwd))
+      .filter((ref): ref is string => Boolean(ref))
+
+    if (refs.length) {
+      event.preventDefault()
+      event.stopPropagation()
+      resetDragState()
+
+      if (insertInlineRefs(refs)) {
+        triggerHaptic('selection')
+      }
+
+      return
+    }
+
+    // No paths resolved. In the hosted-web build `getPathForFile` returns ''
+    // for browser File drops, so they yield no refs and were silently swallowed
+    // here. Route those File-bearing candidates through the same upload path the
+    // form-level drop and the file picker already use (`onAttachDroppedItems` →
+    // `uploadFile` → POST /api/attachments/upload). Native/in-app drags never
+    // reach this branch (they always resolve a path above).
+    const uploadable = candidates.filter(candidate => candidate.file)
+
+    if (!uploadable.length || !onAttachDroppedItems) {
       return
     }
 
@@ -1068,27 +1100,12 @@ export function ChatBar({
     event.stopPropagation()
     resetDragState()
 
-    // Dropping straight onto the text box used to inline-ref *every* file —
-    // including OS/Finder drops, whose absolute local path a remote gateway
-    // can't read and whose image bytes never reached vision. Split by origin:
-    // in-app drags stay inline refs; OS drops go through the upload pipeline.
-    // (When no upload handler is wired, fall back to inline refs for all.)
-    const attach = onAttachDroppedItems
-    const { inAppRefs, osDrops } = partitionDroppedFiles(candidates)
-    const refs = droppedFileInlineRefs(attach ? inAppRefs : candidates, cwd)
-
-    if (refs.length && insertInlineRefs(refs)) {
-      triggerHaptic('selection')
-    }
-
-    if (attach && osDrops.length) {
-      void Promise.resolve(attach(osDrops)).then(attached => {
-        if (attached) {
-          triggerHaptic('selection')
-          requestMainFocus()
-        }
-      })
-    }
+    void Promise.resolve(onAttachDroppedItems(uploadable)).then(attached => {
+      if (attached) {
+        triggerHaptic('selection')
+        requestMainFocus()
+      }
+    })
   }
 
   const clearDraft = useCallback(() => {
