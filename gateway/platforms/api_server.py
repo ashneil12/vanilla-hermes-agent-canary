@@ -5276,6 +5276,15 @@ class APIServerAdapter(BasePlatformAdapter):
                     reset_current_session_key = _reset_current_session_key
                 except Exception as exc:
                     logger.debug("[api_server] approval session binding unavailable: %s", exc)
+
+            from gateway.session_context import clear_session_vars, set_session_vars
+
+            tokens = set_session_vars(
+                platform="api_server",
+                chat_id=session_id or "",
+                session_key=gateway_session_key or session_id or "",
+                session_id=session_id or "",
+            )
             try:
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
@@ -5302,9 +5311,6 @@ class APIServerAdapter(BasePlatformAdapter):
                         task_id=effective_task_id,
                     )
                 except TypeError as exc:
-                    # Some focused tests patch _create_agent with old-shape fakes;
-                    # keep that compatibility while the real AIAgent path uses
-                    # the modern user_message/task_id signature above.
                     if "unexpected keyword" not in str(exc) and "required positional" not in str(exc):
                         raise
                     result = agent.run_conversation(
@@ -5312,24 +5318,22 @@ class APIServerAdapter(BasePlatformAdapter):
                         conversation_history=conversation_history,
                         persist_user_message=True,
                     )
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                _eff_sid = getattr(agent, "session_id", session_id)
+                if isinstance(_eff_sid, str) and _eff_sid:
+                    result["session_id"] = _eff_sid
+                return result, usage
             finally:
+                clear_session_vars(tokens)
                 if approval_token is not None and reset_current_session_key is not None:
                     try:
                         reset_current_session_key(approval_token)
                     except Exception as exc:
                         logger.debug("[api_server] approval session cleanup failed: %s", exc)
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            # Include the effective session ID in the result so callers
-            # (e.g. X-Hermes-Session-Id header) can track compression-
-            # triggered session rotations. (#16938)
-            _eff_sid = getattr(agent, "session_id", session_id)
-            if isinstance(_eff_sid, str) and _eff_sid:
-                result["session_id"] = _eff_sid
-            return result, usage
 
         future = asyncio.ensure_future(loop.run_in_executor(None, _run))
         return await self._await_runtime_guarded(
