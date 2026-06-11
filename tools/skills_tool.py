@@ -592,6 +592,36 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         return False
 
 
+def _read_bundled_skill_names() -> Set[str]:
+    """Return the set of skill names tracked in the bundled manifest.
+
+    The manifest at ``~/.hermes/skills/.bundled_manifest`` is written by
+    ``tools/skills_sync.py`` and lists every skill that originated from
+    the framework's bundled ``skills/`` directory. Names listed here are
+    surfaced as ``source: "bundled"`` in :func:`_find_all_skills`; anything
+    else is ``source: "custom"``.
+
+    Format: one entry per line, either ``name`` (v1) or ``name:hash`` (v2).
+    Returns an empty set if the manifest is missing or unreadable so that
+    older agents (no sync ever run) gracefully degrade to all-custom.
+    """
+    manifest_path = SKILLS_DIR / ".bundled_manifest"
+    if not manifest_path.exists():
+        return set()
+    try:
+        names: Set[str] = set()
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            name = line.split(":", 1)[0].strip()
+            if name:
+                names.add(name)
+        return names
+    except (OSError, IOError):
+        return set()
+
+
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     """Recursively find all skills in ~/.hermes/skills/ and external dirs.
 
@@ -601,7 +631,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             filters out disabled skills.
 
     Returns:
-        List of skill metadata dicts (name, description, category).
+        List of skill metadata dicts (name, description, category, source).
+        ``source`` is ``"bundled"`` for skills present in the framework's
+        bundled manifest (i.e. shipped with the upstream Hermes Agent) and
+        ``"custom"`` for everything else (user-authored or hub-installed).
     """
     from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
 
@@ -610,6 +643,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
+    bundled_names = _read_bundled_skill_names()
 
     # Scan local dir first, then external dirs (local takes precedence)
     dirs_to_scan = []
@@ -658,6 +692,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     "name": name,
                     "description": description,
                     "category": category,
+                    "source": "bundled" if name in bundled_names else "custom",
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:
@@ -675,6 +710,128 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep every skill listing path ordered the same way."""
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
+
+
+def _load_category_description(category_dir: Path) -> Optional[str]:
+    """
+    Load category description from DESCRIPTION.md if it exists.
+
+    Args:
+        category_dir: Path to the category directory
+
+    Returns:
+        Description string or None if not found
+    """
+    desc_file = category_dir / "DESCRIPTION.md"
+    if not desc_file.exists():
+        return None
+
+    try:
+        content = desc_file.read_text(encoding="utf-8")
+        # Parse frontmatter if present
+        frontmatter, body = _parse_frontmatter(content)
+
+        # Prefer frontmatter description, fall back to first non-header line
+        description = frontmatter.get("description", "")
+        if not description:
+            for line in body.strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    description = line
+                    break
+
+        # Truncate to reasonable length
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
+
+        return description if description else None
+    except (UnicodeDecodeError, PermissionError) as e:
+        logger.debug("Failed to read category description %s: %s", desc_file, e)
+        return None
+    except Exception as e:
+        logger.warning(
+            "Error parsing category description %s: %s", desc_file, e, exc_info=True
+        )
+        return None
+
+
+def skills_categories(verbose: bool = False, task_id: str = None) -> str:
+    """
+    List available skill categories with descriptions (progressive disclosure tier 0).
+
+    Returns category names and descriptions for efficient discovery before drilling down.
+    Categories can have a DESCRIPTION.md file with a description frontmatter field
+    or first paragraph to explain what skills are in that category.
+
+    Args:
+        verbose: If True, include skill counts per category (default: False, but currently always included)
+        task_id: Optional task identifier used to probe the active backend
+
+    Returns:
+        JSON string with list of categories and their descriptions
+    """
+    try:
+        # Use module-level SKILLS_DIR (respects monkeypatching) + external dirs
+        all_dirs = [SKILLS_DIR] if SKILLS_DIR.exists() else []
+        try:
+            from agent.skill_utils import get_external_skills_dirs
+            all_dirs.extend(d for d in get_external_skills_dirs() if d.exists())
+        except Exception:
+            pass
+        if not all_dirs:
+            return json.dumps(
+                {
+                    "success": True,
+                    "categories": [],
+                    "message": "No skills directory found.",
+                },
+                ensure_ascii=False,
+            )
+
+        category_dirs = {}
+        category_counts: Dict[str, int] = {}
+        for scan_dir in all_dirs:
+            for skill_md in scan_dir.rglob("SKILL.md"):
+                if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                    continue
+
+                try:
+                    frontmatter, _ = _parse_frontmatter(
+                        skill_md.read_text(encoding="utf-8")[:4000]
+                    )
+                except Exception:
+                    frontmatter = {}
+
+                if not skill_matches_platform(frontmatter):
+                    continue
+
+                category = _get_category_from_path(skill_md)
+                if category:
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    if category not in category_dirs:
+                        category_dirs[category] = skill_md.parent.parent
+
+        categories = []
+        for name in sorted(category_dirs.keys()):
+            category_dir = category_dirs[name]
+            description = _load_category_description(category_dir)
+
+            cat_entry = {"name": name, "skill_count": category_counts[name]}
+            if description:
+                cat_entry["description"] = description
+            categories.append(cat_entry)
+
+        return json.dumps(
+            {
+                "success": True,
+                "categories": categories,
+                "hint": "If a category is relevant to your task, use skills_list with that category to see available skills",
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as e:
+        return tool_error(str(e), success=False)
 
 
 def skills_list(category: str = None, task_id: str = None) -> str:
@@ -1040,15 +1197,21 @@ def skill_view(
                 if found_skill_md.parent.name == name:
                     _record(found_skill_md.parent, found_skill_md)
                     continue
+
+                # Strategy 3: frontmatter name. Hub-installed skills may live
+                # in a directory whose basename differs from their declared
+                # skill name (for example, bankr-twitter-agent with
+                # `name: twitter-agent`).
                 try:
-                    fm_content = found_skill_md.read_text(encoding="utf-8")
-                    fm, _ = _parse_frontmatter(fm_content)
+                    frontmatter, _ = _parse_frontmatter(
+                        found_skill_md.read_text(encoding="utf-8")[:4000]
+                    )
                 except Exception:
-                    fm = {}
-                if fm.get("name") == name:
+                    continue
+                if frontmatter.get("name") == name:
                     _record(found_skill_md.parent, found_skill_md)
 
-            # Strategy 3: legacy flat <name>.md files anywhere under the dir.
+            # Strategy 4: legacy flat <name>.md files anywhere under the dir.
             for found_md in search_dir.rglob(f"{name}.md"):
                 if found_md.name != "SKILL.md":
                     _record(None, found_md)

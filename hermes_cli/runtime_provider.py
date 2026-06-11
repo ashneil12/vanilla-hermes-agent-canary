@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,19 @@ def _host_derived_api_key(base_url: str) -> str:
         return ""
     env_name = f"{sanitized}_API_KEY"
     return (os.getenv(env_name, "") or "").strip()
+
+
+def _base_url_is_public_host(base_url: str) -> bool:
+    """True only for a public registrable domain host (>=2 labels, last label not
+    numeric, not localhost/IP). Mirrors _host_derived_api_key's host validation so
+    OPENAI_API_KEY is used for configured CLOUD custom endpoints but NEVER leaked to
+    localhost / LAN / IP endpoints (#28660)."""
+    hostname = base_url_hostname(base_url)
+    if not hostname or hostname == "localhost" or ":" in hostname:
+        return False
+    if any(ch.isdigit() for ch in hostname.split(".")[-1]):
+        return False
+    return len([lbl for lbl in hostname.split(".") if lbl]) >= 2
 
 
 def _auto_detect_local_model(base_url: str) -> str:
@@ -710,6 +723,13 @@ def _resolve_named_custom_runtime(
             # who set DEEPSEEK_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY get the
             # intuitive match without configuring `custom_providers` first.
             _host_derived_api_key(base_url),
+            # HermesOS deploy convention: the dashboard stores a configured custom
+            # provider's PER-INSTANCE key in OPENAI_API_KEY alongside its base_url
+            # (venice/groq/gemini/nous/xai/bankr/crof/… reach the LLM as an
+            # OpenAI-compatible "custom" provider). Use it for PUBLIC custom hosts so
+            # those endpoints resolve instead of falling to "no-key-required" (which
+            # 401s on session resume) — but NEVER for localhost/LAN/IP (#28660 leak).
+            (os.getenv("OPENAI_API_KEY", "").strip() if _base_url_is_public_host(base_url) else ""),
         ]
         api_key = next(
             (c for c in api_key_candidates if has_usable_secret(c)),
@@ -766,6 +786,10 @@ def _resolve_named_custom_runtime(
         # Bonus (#28660): derive `<VENDOR>_API_KEY` from the host as a final
         # fallback when key_env wasn't set explicitly.
         _host_derived_api_key(base_url),
+        # HermesOS deploy convention (see direct-alias path): the configured custom
+        # provider's per-instance key lives in OPENAI_API_KEY paired with base_url —
+        # for PUBLIC custom hosts only, never localhost/LAN/IP (#28660 leak).
+        (os.getenv("OPENAI_API_KEY", "").strip() if _base_url_is_public_host(base_url) else ""),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
@@ -1249,6 +1273,59 @@ def _resolve_explicit_runtime(
         }
 
     return None
+
+
+def reresolve_key_if_unusable_for_public_host(
+    api_key: Any,
+    base_url: Optional[str],
+    *,
+    requested_provider: Optional[str] = None,
+    env_reloader: Optional[Callable[[], None]] = None,
+) -> Any:
+    """Recover a transiently-missing key before it reaches a public endpoint.
+
+    The gateway/CLI reload ``~/.hermes/.env`` every turn to pick up rotated
+    credentials. If a turn's reload lands while the dashboard is rewriting that
+    file, ``OPENAI_API_KEY`` is momentarily absent and resolution falls through
+    to the ``no-key-required`` placeholder. That placeholder is only ever valid
+    for keyless *local* servers — a public, key-requiring endpoint (e.g. the
+    managed-Venice proxy) rejects it with 401, which the user sees as a scary,
+    permanent "authentication failed". For a PUBLIC ``base_url`` we reload the
+    env file and re-resolve once before letting an unusable key go out.
+
+    Returns a usable key when re-resolution finds one; otherwise the original
+    value, so genuinely keyless/local endpoints and unconfigured providers keep
+    their existing behaviour (no regression).
+    """
+    if callable(api_key) and not isinstance(api_key, str):
+        # Bearer-token providers (e.g. Azure Foundry Entra ID) supply a callable
+        # the SDK invokes per request — never a missing-key situation.
+        return api_key
+    if has_usable_secret(api_key):
+        return api_key
+    if not base_url or not _base_url_is_public_host(base_url):
+        return api_key
+    if env_reloader is not None:
+        try:
+            env_reloader()
+        except Exception:
+            logger.debug("env reload during key re-resolution failed", exc_info=True)
+    try:
+        reresolved = resolve_runtime_provider(
+            requested=requested_provider,
+            explicit_base_url=base_url,
+        )
+    except Exception:
+        logger.debug("key re-resolution failed for public host", exc_info=True)
+        return api_key
+    candidate = (reresolved or {}).get("api_key")
+    if has_usable_secret(candidate):
+        logger.info(
+            "Recovered usable provider key on per-turn re-resolution for public "
+            "host — transient empty-.env window avoided"
+        )
+        return candidate
+    return api_key
 
 
 def resolve_runtime_provider(

@@ -9,6 +9,7 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import itertools
 import logging
 import os
 import re
@@ -630,10 +631,12 @@ class _ApprovalEntry:
 
     def __init__(self, data: dict):
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        self.data = dict(data)    # command, description, pattern_keys, approval_id, …
+        self.data.setdefault("approval_id", f"approval-{next(_approval_id_counter)}")
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
 
 
+_approval_id_counter = itertools.count(1)
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
 
@@ -664,13 +667,14 @@ def unregister_gateway_notify(session_key: str) -> None:
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
-                             resolve_all: bool = False) -> int:
+                             resolve_all: bool = False,
+                             approval_id: Optional[str] = None) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
     When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    resolved at once (``/approve all``).  Otherwise *approval_id* resolves
+    the matching request when provided, falling back to oldest-first FIFO.
 
     Returns the number of approvals resolved (0 means nothing was pending).
     """
@@ -681,6 +685,15 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if resolve_all:
             targets = list(queue)
             queue.clear()
+        elif approval_id:
+            target = next(
+                (entry for entry in queue if entry.data.get("approval_id") == approval_id),
+                None,
+            )
+            if target is None:
+                return 0
+            queue.remove(target)
+            targets = [target]
         else:
             targets = [queue.pop(0)]
         if not queue:

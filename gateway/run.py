@@ -8456,6 +8456,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if message_text is None:
             return
 
+        runtime_governor = None
+        runtime_lease_id = None
+        runtime_lease_outcome = "agent_error"
+        try:
+            from gateway.runtime_governor import (
+                DEFAULT_UNAVAILABLE_MESSAGE,
+                RuntimeGovernorError,
+                get_runtime_governor,
+            )
+
+            runtime_governor = get_runtime_governor()
+            runtime_decision = runtime_governor.admit(
+                platform=source.platform.value if source.platform else "",
+                session_key=session_key,
+                source_message_id=(
+                    str(event.message_id)
+                    if event.message_id is not None
+                    else str(event.platform_update_id or "")
+                ),
+                message_preview=message_text[:500],
+                user_id=source.user_id or source.user_id_alt or "",
+            )
+            if not runtime_decision.allowed:
+                return runtime_decision.user_message or DEFAULT_UNAVAILABLE_MESSAGE
+
+            runtime_lease_id = runtime_decision.lease_id
+            if runtime_lease_id:
+                try:
+                    runtime_governor.start(runtime_lease_id)
+                except RuntimeGovernorError as exc:
+                    logger.warning(
+                        "Runtime governor start failed closed for session %s: %s",
+                        (session_key or "")[:20],
+                        exc.__class__.__name__,
+                    )
+                    return exc.user_message
+        except Exception as exc:
+            logger.warning(
+                "Runtime governor admission failed closed for session %s: %s",
+                (session_key or "")[:20],
+                exc.__class__.__name__,
+            )
+            try:
+                from gateway.runtime_governor import DEFAULT_UNAVAILABLE_MESSAGE
+                return DEFAULT_UNAVAILABLE_MESSAGE
+            except Exception:
+                return "HermesOS runtime limits could not be verified. Try again in a moment."
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -8489,6 +8537,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                runtime_lease_id=runtime_lease_id,
+            )
+            runtime_lease_outcome = (
+                "runtime_cutoff" if agent_result.get("runtime_cutoff") else "agent_end"
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -8965,6 +9017,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Try again or use /reset to start a fresh session."
             )
         finally:
+            if runtime_lease_id and runtime_governor is not None:
+                try:
+                    if runtime_lease_outcome == "agent_end":
+                        runtime_governor.finish(runtime_lease_id, reason="agent_end")
+                    else:
+                        runtime_governor.fail(
+                            runtime_lease_id,
+                            reason=runtime_lease_outcome or "agent_error",
+                        )
+                except Exception as _runtime_close_err:
+                    logger.warning(
+                        "Runtime governor lease close failed for session %s: %s",
+                        (session_key or "")[:20],
+                        _runtime_close_err.__class__.__name__,
+                    )
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 
@@ -12905,6 +12972,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        runtime_lease_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -13613,13 +13681,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
         _hooks_ref = self.hooks
+        _runtime_governor = None
+        _runtime_cutoff = [False]
+        _runtime_cutoff_message = [""]
+        if runtime_lease_id:
+            try:
+                from gateway.runtime_governor import get_runtime_governor
+                _runtime_governor = get_runtime_governor()
+            except Exception as _e:
+                logger.debug("runtime governor unavailable in _run_agent: %s", _e)
+
+        def _record_runtime_cutoff(user_message: str) -> None:
+            if _runtime_cutoff[0]:
+                return
+            _runtime_cutoff[0] = True
+            _runtime_cutoff_message[0] = (
+                user_message
+                or "HermesOS runtime limit reached. Upgrade or wait for your allowance to reset."
+            )
+            agent = agent_holder[0]
+            if agent is not None and hasattr(agent, "interrupt"):
+                try:
+                    agent.interrupt(_runtime_cutoff_message[0])
+                except Exception as _e:
+                    logger.debug("runtime governor interrupt failed: %s", _e)
+
+        def _heartbeat_runtime_sync() -> None:
+            if (
+                not runtime_lease_id
+                or _runtime_governor is None
+                or _runtime_cutoff[0]
+                or not _run_still_current()
+            ):
+                return
+            try:
+                heartbeat = _runtime_governor.heartbeat(runtime_lease_id)
+            except Exception as _e:
+                logger.warning("Runtime governor heartbeat error: %s", _e.__class__.__name__)
+                _record_runtime_cutoff(
+                    "HermesOS runtime limits could not be verified. Try again in a moment."
+                )
+                return
+            if heartbeat.should_stop:
+                _record_runtime_cutoff(heartbeat.user_message)
 
         def _step_callback_sync(iteration: int, prev_tools: list) -> None:
             if not _run_still_current():
                 return
-            # prev_tools may be list[str] or list[dict] with "name"/"result"
-            # keys.  Normalise to keep "tool_names" backward-compatible for
-            # user-authored hooks that do ', '.join(tool_names)'.
+            _heartbeat_runtime_sync()
             _names: list[str] = []
             for _t in (prev_tools or []):
                 if isinstance(_t, dict):
@@ -13734,6 +13843,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "run_agent resolved: model=%s provider=%s session=%s",
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
+                # Defense-in-depth: if the per-turn .env reload above raced a
+                # dashboard env rewrite, the resolved key can be momentarily
+                # absent. For a public/key-requiring host, reload + re-resolve so
+                # a transient empty key never reaches the wire as
+                # `Bearer no-key-required` (which 401s on the managed proxy).
+                try:
+                    from hermes_cli.runtime_provider import (
+                        reresolve_key_if_unusable_for_public_host as _reresolve_key,
+                    )
+                    runtime_kwargs["api_key"] = _reresolve_key(
+                        runtime_kwargs.get("api_key"),
+                        runtime_kwargs.get("base_url"),
+                        requested_provider=runtime_kwargs.get("provider"),
+                        env_reloader=_reload_runtime_env_preserving_config_authority,
+                    )
+                except Exception:
+                    logger.debug("per-turn key re-resolution skipped", exc_info=True)
             except Exception as exc:
                 return {
                     "final_response": f"⚠️ Provider authentication failed: {exc}",
@@ -13933,7 +14059,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.tool_start_callback = (
                 voice_ack_callback if _voice_ack_guild[0] is not None else None
             )
-            agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+            # hermes-fork: keep `or runtime_lease_id` so the step callback also fires
+            # when a runtime lease is active (not only when hooks are loaded).
+            agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or runtime_lease_id) else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
@@ -14815,6 +14943,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         _notify_task = asyncio.create_task(_notify_long_running())
 
+        async def _check_runtime_cutoff() -> bool:
+            if not runtime_lease_id or _runtime_governor is None or _runtime_cutoff[0]:
+                return _runtime_cutoff[0]
+            await self._run_in_executor_with_context(_heartbeat_runtime_sync)
+            return _runtime_cutoff[0]
+
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -14848,6 +14982,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if done:
                         response = _executor_task.result()
                         break
+                    if await _check_runtime_cutoff():
+                        break
                     # Backup interrupt check: if the monitor task died or
                     # missed the interrupt, catch it here.
                     if not _interrupt_detected.is_set() and session_key:
@@ -14877,6 +15013,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     if done:
                         response = _executor_task.result()
+                        break
+                    if await _check_runtime_cutoff():
                         break
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
@@ -14926,6 +15064,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                             _backup_agent.interrupt(_bp_text)
                             _interrupt_detected.set()
+
+            if _runtime_cutoff[0]:
+                _cutoff_agent = agent_holder[0]
+                _activity = {}
+                if _cutoff_agent and hasattr(_cutoff_agent, "get_activity_summary"):
+                    try:
+                        _activity = _cutoff_agent.get_activity_summary()
+                    except Exception:
+                        pass
+                response = {
+                    "final_response": _runtime_cutoff_message[0]
+                    or "HermesOS runtime limit reached.",
+                    "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
+                    "api_calls": _activity.get("api_call_count", 0),
+                    "tools": tools_holder[0] or [],
+                    "history_offset": 0,
+                    "failed": True,
+                    "runtime_cutoff": True,
+                }
 
             if _inactivity_timeout:
                 # Build a diagnostic summary from the agent's activity tracker.
