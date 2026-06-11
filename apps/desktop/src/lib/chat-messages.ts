@@ -61,9 +61,6 @@ export type GatewayEventPayload = {
   // secret.request (skill credential capture)
   env_var?: string
   prompt?: string
-  // terminal.read.request (GUI agent reading the in-app terminal pane)
-  start?: number
-  count?: number
 }
 
 export function textPart(text: string): ChatMessagePart {

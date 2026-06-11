@@ -1,7 +1,6 @@
 import type { SessionInfo } from '@/types/hermes'
 
 import { sessionTitle } from './chat-runtime'
-import { sessionSourceSearchTerms } from './session-source'
 
 export function sessionMatchesSearch(session: SessionInfo, query: string): boolean {
   const needle = query.trim().toLowerCase()
@@ -15,7 +14,6 @@ export function sessionMatchesSearch(session: SessionInfo, query: string): boole
     session._lineage_root_id ?? '',
     sessionTitle(session),
     session.preview ?? '',
-    session.cwd ?? '',
-    ...sessionSourceSearchTerms(session.source)
+    session.cwd ?? ''
   ].some(value => value.toLowerCase().includes(needle))
 }

@@ -6,7 +6,6 @@ import {
   keybindAction,
   type KeybindBindings
 } from '@/lib/keybinds/actions'
-import { canonicalizeCombo } from '@/lib/keybinds/combo'
 import { arraysEqual, persistString, storedString } from '@/lib/storage'
 
 const STORAGE_KEY = 'hermes.desktop.keybinds'
@@ -60,17 +59,14 @@ export const $bindings = atom<KeybindBindings>(loadBindings())
 $bindings.subscribe(persistBindings)
 
 // Reverse lookup combo → actionId for dispatch. First action wins on conflict;
-// the panel/edit overlay surface conflicts so users can resolve them. Keys go
-// through `canonicalizeCombo` so a `ctrl+…` binding resolves everywhere.
+// the panel/edit overlay surface conflicts so users can resolve them.
 export const $comboIndex = computed($bindings, bindings => {
   const index = new Map<string, string>()
 
   for (const id of KEYBIND_ACTION_IDS) {
     for (const combo of bindings[id] ?? []) {
-      const key = canonicalizeCombo(combo)
-
-      if (!index.has(key)) {
-        index.set(key, id)
+      if (!index.has(combo)) {
+        index.set(combo, id)
       }
     }
   }

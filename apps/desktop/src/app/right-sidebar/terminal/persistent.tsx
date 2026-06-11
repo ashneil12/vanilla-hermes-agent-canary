@@ -2,6 +2,8 @@ import { useStore } from '@nanostores/react'
 import { atom } from 'nanostores'
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
+import { TERMINAL_BG } from './selection'
+
 import { TerminalTab } from './index'
 
 /**
@@ -105,9 +107,7 @@ export function PersistentTerminal({ cwd, onAddSelectionToChat }: PersistentTerm
     visibility: visible ? 'visible' : 'hidden',
     pointerEvents: visible ? 'auto' : 'none',
     zIndex: 4,
-    // Match the live skin surface so the header strip (transparent) and body
-    // read as one cohesive pane instead of revealing a near-black slab behind.
-    backgroundColor: 'var(--ui-editor-surface-background)',
+    backgroundColor: TERMINAL_BG,
     contain: 'layout size paint'
   }
 

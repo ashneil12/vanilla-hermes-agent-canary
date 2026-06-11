@@ -446,9 +446,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
 
       try {
         if (isImage) {
-          // Prefer bytes the caller already handed us (a pasted/dropped
-          // screenshot) over re-reading a path that may be transient/unreadable.
-          const dataUrl = target.dataUrl || (await window.hermesDesktop.readFileDataUrl(filePath))
+          const dataUrl = await window.hermesDesktop.readFileDataUrl(filePath)
 
           if (active) {
             setState({ dataUrl, loading: false })
@@ -486,7 +484,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     return () => {
       active = false
     }
-  }, [blockedByTarget, filePath, forcePreview, isImage, isText, reloadKey, target.dataUrl, target.language])
+  }, [blockedByTarget, filePath, forcePreview, isImage, isText, reloadKey, target.language])
 
   if (state.loading) {
     return <PageLoader label={t.preview.loading} />

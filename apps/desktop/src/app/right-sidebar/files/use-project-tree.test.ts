@@ -106,7 +106,7 @@ describe('useProjectTree', () => {
     expect(readDir).toHaveBeenCalledTimes(1)
   })
 
-  it('captures per-folder error code and shows an error placeholder child', async () => {
+  it('captures per-folder error code and leaves the folder expandable but empty', async () => {
     readDir.mockResolvedValueOnce(ok([{ name: 'priv', path: '/p/priv', isDirectory: true }]))
     readDir.mockResolvedValueOnce({ entries: [], error: 'EACCES' })
 
@@ -119,14 +119,7 @@ describe('useProjectTree', () => {
     })
 
     expect(result.current.data[0].error).toBe('EACCES')
-    expect(result.current.data[0].children).toEqual([
-      {
-        id: '/p/priv::__error__',
-        isDirectory: false,
-        name: 'Unable to read (EACCES)',
-        placeholder: 'error'
-      }
-    ])
+    expect(result.current.data[0].children).toEqual([])
   })
 
   it('dedupes concurrent loadChildren calls for the same id', async () => {

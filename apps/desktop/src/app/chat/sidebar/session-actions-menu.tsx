@@ -21,7 +21,6 @@ import { triggerHaptic } from '@/lib/haptics'
 import { exportSession } from '@/lib/session-export'
 import { notify, notifyError } from '@/store/notifications'
 import { setSessions } from '@/store/session'
-import { canOpenSessionWindow, openSessionInNewWindow } from '@/store/windows'
 
 interface SessionActions {
   sessionId: string
@@ -69,19 +68,6 @@ function useSessionActions({ sessionId, title, pinned = false, profile, onPin, o
         void writeClipboardText(sessionId).catch(err => notifyError(err, r.copyIdFailed))
       }
     },
-    ...(canOpenSessionWindow()
-      ? [
-          {
-            disabled: !sessionId,
-            icon: 'link-external',
-            label: r.newWindow,
-            onSelect: () => {
-              triggerHaptic('selection')
-              void openSessionInNewWindow(sessionId)
-            }
-          }
-        ]
-      : []),
     {
       disabled: !sessionId,
       icon: 'cloud-download',
