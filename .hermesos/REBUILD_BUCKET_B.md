@@ -22,3 +22,10 @@ These are frontend polish; the agent backend is fully functional without them.
 Apply + validate against the full TS typecheck as the final pre-cutover step.
 
 ## Next: full-suite + typecheck + nix validation, then cutover to canary main.
+
+## Cosmetic follow-up (dropped, low priority)
+- hermesos-brand-skin + webchat-dark-mode-default: upstream REWROTE desktop
+  theming to per-profile (skinPref/modePref/readBootProfileKey); the fork's old
+  global skin system (resolveSkin/readStoredSkin) is incompatible and was dropped
+  in favor of upstream's. Re-add the HermesOS brand skin as a BUILTIN_THEME +
+  default on upstream's new system when desired (small, isolated).
