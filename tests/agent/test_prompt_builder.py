@@ -18,6 +18,8 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    build_bankr_wallet_prompt,
+    build_environment_hints,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -47,6 +49,32 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+
+class TestBankrWalletPrompt:
+    def test_empty_when_wallet_env_is_missing(self, monkeypatch):
+        monkeypatch.delenv("BANKR_API_KEY", raising=False)
+        monkeypatch.delenv("BANKR_AGENT_API_KEY", raising=False)
+        monkeypatch.delenv("BANKR_WALLET_ADDRESS", raising=False)
+        monkeypatch.delenv("BANKR_AGENT_WALLET_ADDRESS", raising=False)
+
+        assert build_bankr_wallet_prompt() == ""
+
+    def test_adds_light_runtime_guidance_without_revealing_api_key(self, monkeypatch):
+        monkeypatch.setenv("BANKR_API_KEY", "bk_agent_secret")
+        monkeypatch.setenv("BANKR_WALLET_ADDRESS", "0x000000000000000000000000000000000000ba5e")
+
+        prompt = build_bankr_wallet_prompt()
+
+        assert "# Bankr wallet" in prompt
+        assert "Bankr-managed wallet on Base" in prompt
+        assert "BANKR_API_KEY" in prompt
+        assert "BANKR_WALLET_ADDRESS" in prompt
+        assert "0x000000000000000000000000000000000000ba5e" in prompt
+        assert "load the relevant wallet or Bankr skill" in prompt
+        assert "Do not include API key values" in prompt
+        assert "Base-only" in prompt
+        assert "bk_agent_secret" not in prompt
 
 
 # =========================================================================
@@ -1316,5 +1344,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

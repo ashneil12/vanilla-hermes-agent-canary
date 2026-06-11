@@ -87,7 +87,7 @@ MINIMAX_OAUTH_CN_BASE = "https://api.minimaxi.com"
 MINIMAX_OAUTH_GLOBAL_INFERENCE = "https://api.minimax.io/anthropic"
 MINIMAX_OAUTH_CN_INFERENCE = "https://api.minimaxi.com/anthropic"
 MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
-DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
+DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
@@ -439,6 +439,51 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
+    # HermesOS Cloud first-class OpenAI-compatible aggregators. Adding
+    # these so resolve_provider_client("venice"|"crof"|"bankr"|"cometapi")
+    # finds a base_url + key, instead of failing with "Provider X is set
+    # in config.yaml but no API key was found." when the WebUI's model
+    # picker sets one of these as the active provider.
+    "venice": ProviderConfig(
+        id="venice",
+        name="Venice",
+        auth_type="api_key",
+        inference_base_url="https://api.venice.ai/api/v1",
+        api_key_env_vars=("VENICE_API_KEY",),
+        base_url_env_var="VENICE_BASE_URL",
+    ),
+    "surplus": ProviderConfig(
+        id="surplus",
+        name="Surplus Intelligence",
+        auth_type="api_key",
+        inference_base_url="https://www.surplusintelligence.ai/api/inference/v1",
+        api_key_env_vars=("SURPLUS_API_KEY",),
+        base_url_env_var="SURPLUS_BASE_URL",
+    ),
+    "crof": ProviderConfig(
+        id="crof",
+        name="CrofAI",
+        auth_type="api_key",
+        inference_base_url="https://crof.ai/v1",
+        api_key_env_vars=("CROF_API_KEY",),
+        base_url_env_var="CROF_BASE_URL",
+    ),
+    "bankr": ProviderConfig(
+        id="bankr",
+        name="Bankr",
+        auth_type="api_key",
+        inference_base_url="https://gateway.bankr.bot/v1",
+        api_key_env_vars=("BANKR_API_KEY",),
+        base_url_env_var="BANKR_BASE_URL",
+    ),
+    "cometapi": ProviderConfig(
+        id="cometapi",
+        name="CometAPI",
+        auth_type="api_key",
+        inference_base_url="https://api.cometapi.com/v1",
+        api_key_env_vars=("COMETAPI_API_KEY", "COMET_API_KEY"),
+        base_url_env_var="COMETAPI_BASE_URL",
+    ),
 }
 
 # Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
@@ -545,6 +590,13 @@ _PLACEHOLDER_SECRET_VALUES = {
     "dummy",
     "null",
     "none",
+    # Sentinel the resolver assigns to keyless/local endpoints so the OpenAI SDK
+    # accepts a non-empty api_key. It is NOT a real secret: if it ever lands in an
+    # explicit/candidate slot (e.g. propagated to self._explicit_api_key via a
+    # model switch) it must NOT preempt a real env-derived key (e.g. VENICE_API_KEY),
+    # otherwise resumed sessions send `Bearer no-key-required` and 401.
+    "no-key-required",
+    "no-key",
 }
 
 
@@ -2013,6 +2065,7 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             },
             data={
                 "grant_type": "refresh_token",

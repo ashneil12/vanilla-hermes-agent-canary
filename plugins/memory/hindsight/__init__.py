@@ -762,7 +762,9 @@ class HindsightMemoryProvider(MemoryProvider):
             val = input(f"  LLM model [{current_model}]: ").strip()
             provider_config["llm_model"] = val or current_model
 
-            sys.stdout.write("  LLM API key: ")
+            existing_llm_key = _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
+            prompt_suffix = " (blank to keep)" if existing_llm_key else ""
+            sys.stdout.write(f"  LLM API key{prompt_suffix}: ")
             sys.stdout.flush()
             llm_key = masked_secret_prompt("") if sys.stdin.isatty() else sys.stdin.readline().strip()
             if llm_key:

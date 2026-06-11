@@ -97,6 +97,22 @@ class TestDirHash:
         (dir_b / "SKILL.md").write_text("# Version 2")
         assert _dir_hash(dir_a) != _dir_hash(dir_b)
 
+    def test_ignores_runtime_artifacts(self, tmp_path):
+        """Runtime artifacts (__pycache__/.pyc/.bak/.log/.DS_Store) must not change
+        the hash — otherwise an unmodified skill drifts after first run and gets
+        falsely flagged user-modified, permanently blocking bundled updates."""
+        d = tmp_path / "skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text("# Test")
+        (d / "main.py").write_text("print(1)")
+        clean = _dir_hash(d)
+        (d / "__pycache__").mkdir()
+        (d / "__pycache__" / "main.cpython-311.pyc").write_bytes(b"\x00junk")
+        (d / "run.log").write_text("noise")
+        (d / ".DS_Store").write_bytes(b"junk")
+        (d / "SKILL.md.bak").write_text("# Test")
+        assert _dir_hash(d) == clean
+
     def test_empty_dir(self, tmp_path):
         d = tmp_path / "empty"
         d.mkdir()
@@ -774,11 +790,13 @@ class TestResetBundledSkill:
         manifest_file.write_text("google-workspace:STALEHASH000000000000000000000000\n")
 
         with self._patches(bundled, skills_dir, manifest_file):
-            # Sanity check: without reset, sync would flag it user_modified
+            # The artifact-aware sync now AUTO-HEALS this case: the on-disk copy
+            # already equals the current bundle, so it's re-baselined instead of
+            # being flagged user_modified (the old stuck-flag bug).
             pre = sync_skills(quiet=True)
-            assert "google-workspace" in pre["user_modified"]
+            assert "google-workspace" not in pre["user_modified"]
 
-            # Reset (no --restore) should clear the manifest entry and re-baseline
+            # reset is still a valid explicit escape hatch; it clears + re-baselines.
             result = reset_bundled_skill("google-workspace", restore=False)
 
             assert result["ok"] is True

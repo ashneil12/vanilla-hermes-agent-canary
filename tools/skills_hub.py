@@ -2992,8 +2992,16 @@ class OptionalSkillSource(SkillSource):
         if not files:
             return None
 
-        # Determine category from directory structure
-        name = skill_dir.name
+        skill_md_content = files.get("SKILL.md")
+        frontmatter = {}
+        if isinstance(skill_md_content, bytes):
+            try:
+                frontmatter = self._parse_frontmatter(
+                    skill_md_content.decode("utf-8")
+                )
+            except UnicodeDecodeError:
+                frontmatter = {}
+        name = frontmatter.get("name", skill_dir.name)
 
         return SkillBundle(
             name=name,
@@ -3008,9 +3016,14 @@ class OptionalSkillSource(SkillSource):
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         rel = identifier.split("/", 1)[-1] if identifier.startswith("official/") else identifier
         skill_name = rel.rsplit("/", 1)[-1]
+        official_identifier = f"official/{rel}"
 
         for meta in self._scan_all():
-            if meta.name == skill_name:
+            if (
+                meta.name == skill_name
+                or meta.identifier == official_identifier
+                or meta.path == rel
+            ):
                 return meta
         return None
 
@@ -3024,6 +3037,12 @@ class OptionalSkillSource(SkillSource):
             if is_excluded_skill_path(skill_md):
                 continue
             if skill_md.parent.name == name:
+                return skill_md.parent
+            try:
+                fm = self._parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+            except (OSError, UnicodeDecodeError):
+                continue
+            if fm.get("name") == name:
                 return skill_md.parent
         return None
 

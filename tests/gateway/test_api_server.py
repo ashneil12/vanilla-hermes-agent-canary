@@ -18,6 +18,7 @@ import os
 import stat
 import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -419,6 +420,16 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
     return app
+
+
+class _DenyRuntimeGovernor:
+    def admit(self, **kwargs):
+        return SimpleNamespace(
+            allowed=False,
+            reason="daily_cap",
+            user_message="Runtime limit reached in test.",
+            lease_id=None,
+        )
 
 
 @pytest.fixture
@@ -1349,6 +1360,31 @@ class TestChatCompletionsEndpoint:
             assert data["choices"][0]["message"]["content"] == "Hello! How can I help you today?"
             assert data["choices"][0]["finish_reason"] == "stop"
             assert "usage" in data
+
+    @pytest.mark.asyncio
+    async def test_runtime_denial_returns_assistant_message_without_running_agent(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch("gateway.runtime_governor.get_runtime_governor", return_value=_DenyRuntimeGovernor()),
+                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
+            ):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "hermes-agent",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                    },
+                )
+
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["choices"][0]["message"]["content"] == "Runtime limit reached in test."
+            assert data["choices"][0]["finish_reason"] == "error"
+            assert data["hermes"]["failed"] is True
+            assert data["hermes"]["error_code"] == "agent_error"
+            assert data["usage"]["total_tokens"] == 0
+            mock_run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_system_prompt_extracted(self, adapter):

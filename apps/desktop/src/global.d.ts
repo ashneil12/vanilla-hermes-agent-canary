@@ -43,6 +43,8 @@ declare global {
       readFileDataUrl: (filePath: string) => Promise<string>
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+      /** Browser-hosted web shim only: upload a File into the agent VM and return its server path. */
+      uploadFile?: (file: File) => Promise<HermesUploadedFile>
       writeClipboard: (text: string) => Promise<boolean>
       saveImageFromUrl: (url: string) => Promise<boolean>
       saveImageBuffer: (data: ArrayBuffer | Uint8Array, ext: string) => Promise<string>
@@ -448,6 +450,13 @@ export interface HermesPreviewFileChanged {
   id: string
   path: string
   url: string
+}
+
+export interface HermesUploadedFile {
+  path: string
+  name: string
+  size: number
+  mimeType?: string
 }
 
 export interface HermesSelectPathsOptions {

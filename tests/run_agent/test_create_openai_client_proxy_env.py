@@ -21,6 +21,7 @@ transport is still installed on the no-proxy default path.
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from run_agent import AIAgent, _get_proxy_from_env, _get_proxy_for_base_url
 
@@ -40,6 +41,45 @@ def _make_agent():
 def _extract_http_client(client_kwargs: dict):
     """_create_openai_client calls ``OpenAI(**client_kwargs)``; grab the injected client."""
     return client_kwargs.get("http_client")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_agent_construction(monkeypatch):
+    """Keep ``AIAgent`` construction fully offline for these proxy-mount tests.
+
+    Two construction-time paths reach the network. With the intentionally dead
+    ``HTTPS_PROXY`` these tests set, both route through the dead proxy and — in
+    CI, where the loopback connect is *dropped*, not refused — block until
+    pytest-timeout fires. That is the >30s hang this file was skipped for. The
+    keepalive ``httpx.Client`` is NOT involved (it is lazy; constructing it with
+    a proxy never connects).
+
+    1. Tool registration runs each tool's ``check_fn``;
+       ``check_tts_requirements`` -> ``_import_elevenlabs`` -> ``lazy_deps.ensure``
+       pip-installs the (CI-absent) ElevenLabs SDK via a ``subprocess`` that
+       honors the proxy. Disable lazy installs so ``ensure`` raises
+       ``FeatureUnavailable`` instead; the check then degrades to "TTS
+       unavailable" (it already swallows ``ImportError``).
+    2. ``ContextCompressor`` resolves a codex-OAuth model's context window via a
+       live ``GET chatgpt.com/backend-api/codex/models``
+       (``model_metadata._fetch_codex_oauth_context_lengths``), which fires when
+       the on-disk cache is cold (it always is under the hermetic ``HOME``).
+       Stub it to ``{}`` so resolution uses the hardcoded fallback table.
+    """
+    from tools.registry import invalidate_check_fn_cache
+
+    monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
+    monkeypatch.setattr(
+        "agent.model_metadata._fetch_codex_oauth_context_lengths",
+        lambda *a, **k: {},
+    )
+    # Tool-availability check_fns are memoized process-wide (TTL cache). Drop it
+    # so the check re-runs under HERMES_DISABLE_LAZY_INSTALLS rather than reusing
+    # a value computed before this fixture set the env var; clear again on exit
+    # so a value computed under our env doesn't leak into other test files.
+    invalidate_check_fn_cache()
+    yield
+    invalidate_check_fn_cache()
 
 
 def test_get_proxy_from_env_prefers_https_then_http_then_all(monkeypatch):

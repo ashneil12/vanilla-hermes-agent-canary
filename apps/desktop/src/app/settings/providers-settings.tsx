@@ -6,7 +6,8 @@ import {
   FeaturedProviderRow,
   KeyProviderRow,
   ProviderRow,
-  sortProviders
+  sortProviders,
+  VeniceRecommendedCard
 } from '@/components/desktop-onboarding-overlay'
 import { Button } from '@/components/ui/button'
 import { listOAuthProviders } from '@/hermes'
@@ -123,7 +124,8 @@ function OAuthPicker({ onWantApiKey, providers }: { onWantApiKey: () => void; pr
       <p className="-mt-2 mb-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
         {p.intro}
       </p>
-      {featured && <FeaturedProviderRow onSelect={select} provider={featured} />}
+      <VeniceRecommendedCard onWantApiKey={onWantApiKey} />
+      {featured && <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} />}
       {connected.length > 0 && (
         <>
           <p className="mt-1 px-0.5 text-[length:var(--conversation-caption-font-size)] font-medium text-(--ui-text-tertiary)">

@@ -80,11 +80,13 @@ VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
             "image_url": {
                 "type": "string",
                 "description": (
-                    "Optional public URL of a still image. When provided, "
-                    "the active backend routes to its image-to-video "
-                    "endpoint (animate the image); when omitted, it routes "
-                    "to text-to-video. Pass either a URL the user supplied "
-                    "or a path/URL from the conversation."
+                    "Optional source still image to animate. Accepts an HTTPS "
+                    "URL, a data: URL, OR a LOCAL FILE PATH (e.g. an image you "
+                    "just generated/edited) — local paths are auto-encoded for "
+                    "you, so to 'turn this image into a video' just pass the "
+                    "image value verbatim. When provided, the backend routes to "
+                    "image-to-video; when omitted, text-to-video. Do NOT shell "
+                    "out to build a data URL yourself."
                 ),
             },
             "reference_image_urls": {
@@ -307,10 +309,51 @@ def _normalize_reference_images(value: Any) -> Optional[List[str]]:
     return out or None
 
 
+def _coerce_image_to_data_url(ref: str, *, budget: int = 3_000_000) -> str:
+    """Make an image reference safe to send as Venice video ``image_url``.
+
+    HTTP(S) URLs and existing ``data:`` URLs pass through untouched. A LOCAL
+    file path (or raw base64) — e.g. an image the agent just generated — is
+    read, downscaled to fit the managed-proxy request cap, and returned as a
+    ``data:image/...;base64,`` URL. This is what lets "turn this image into a
+    video" work without the agent hand-building a data URL in the terminal.
+    Best-effort: anything we can't resolve is returned unchanged so the provider
+    surfaces a meaningful error.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return ref
+    low = ref.lower()
+    if low.startswith("http://") or low.startswith("https://") or low.startswith("data:"):
+        return ref
+    try:
+        import base64 as _b64
+
+        from tools.image_edit_tool import _open_image_for_upload, _shrink_image_bytes
+
+        data, _name = _open_image_for_upload(ref)
+        data = _shrink_image_bytes(data, budget)
+        if data[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            mime = "image/png"
+        return f"data:{mime};base64," + _b64.b64encode(data).decode("ascii")
+    except Exception:
+        return ref
+
+
 def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     prompt = (args.get("prompt") or "").strip()
     image_url = (args.get("image_url") or "").strip() or None
+    if image_url:
+        image_url = _coerce_image_to_data_url(image_url)
     reference_image_urls = _normalize_reference_images(args.get("reference_image_urls"))
+    if reference_image_urls:
+        reference_image_urls = [_coerce_image_to_data_url(r) for r in reference_image_urls]
     duration = _coerce_int(args.get("duration"))
     aspect_ratio = (args.get("aspect_ratio") or DEFAULT_ASPECT_RATIO).strip() or DEFAULT_ASPECT_RATIO
     resolution = (args.get("resolution") or DEFAULT_RESOLUTION).strip() or DEFAULT_RESOLUTION
@@ -413,15 +456,25 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
 
 _GENERIC_DESCRIPTION = (
     "Generate a video from a text prompt (text-to-video) or animate a "
-    "still image (image-to-video) using the user's configured video "
-    "generation backend. Pass `image_url` to animate that image; omit it "
-    "to generate from text alone. The backend auto-routes to the right "
-    "endpoint. The backend and model family are user-configured via "
-    "`hermes tools` → Video Generation; the agent does not pick them. "
-    "Long-running generations may take 30 seconds to several minutes — "
-    "the call blocks until the video is ready. Returns either an HTTP "
-    "URL or an absolute file path in the `video` field; display it with "
-    "markdown ![description](url-or-path) and the gateway will deliver it."
+    "still image (image-to-video). ALWAYS USE THIS TOOL for any video "
+    "generation request. Do NOT use shell, curl, bash, fetch, or any "
+    "terminal-side approach to hit video APIs directly — that bypasses "
+    "the user's configured provider (Venice / FAL / xAI), bypasses "
+    "billing/credentials, and produces output the chat UI cannot "
+    "auto-render. Pass `image_url` to animate that image; omit it to "
+    "generate from text alone. The backend auto-routes to the right "
+    "endpoint and auto-pairs to whichever provider has a key — you do "
+    "not need to pick. Long-running generations take 30 seconds to "
+    "several minutes; the call blocks until the video is ready. Returns "
+    "{success, video, model, provider, ...} where `video` is an HTTPS "
+    "URL or absolute file path. After calling this tool, ALWAYS render "
+    "the returned `video` value in your reply using markdown image "
+    "syntax with a MEDIA: prefix: "
+    "`![brief description](MEDIA:<video_value>)`. Use the `video` "
+    "value VERBATIM (full path, no trimming) — the MEDIA: prefix is "
+    "what tells the chat UI to fetch and inline-play the video. "
+    "Without `MEDIA:` (or without the `![]()` wrapper), the path "
+    "renders as broken markdown text instead of an inline player."
 )
 
 
@@ -510,6 +563,26 @@ def _build_dynamic_video_schema() -> Dict[str, Any]:
     if active_model:
         line += f" · model: {active_model}"
     parts.append(line)
+
+    # Switchable model menu — lets the agent honor "use Kling/Wan/Veo" by
+    # passing model=<family> for ONE request (explicit arg overrides the
+    # configured default). Sourced from the provider's live catalog so the ids
+    # are always current; the right text/image/reference variant is auto-picked.
+    try:
+        families = (
+            provider.list_model_families()
+            if hasattr(provider, "list_model_families")
+            else []
+        )
+    except Exception:
+        families = []
+    if families:
+        shown = ", ".join(families[:16])
+        parts.append(
+            "- to switch model for ONE request, pass `model=` a family id: "
+            f"{shown}. The configured model is only the default; the matching "
+            "text/image/reference-to-video variant is selected automatically."
+        )
 
     # Model-specific caveats (the high-signal stuff)
     for c in _format_model_caveats(model_meta, caps):

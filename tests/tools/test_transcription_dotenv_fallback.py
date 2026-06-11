@@ -33,6 +33,20 @@ def isolate_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_stt_lazy_install(monkeypatch):
+    """Pin upstream's faster-whisper lazy-install off (see test_transcription_tools).
+
+    These auto-detect tests mock ``_HAS_FASTER_WHISPER=False`` to force the
+    dotenv cloud-fallback path; ``_try_lazy_install_stt`` would otherwise see the
+    really-installed faster-whisper via ``find_spec`` and short-circuit to
+    "local", hiding the dotenv lookup under test.
+    """
+    monkeypatch.setattr(
+        "tools.transcription_tools._try_lazy_install_stt", lambda: False, raising=True
+    )
+
+
 class TestProviderSelectionGate:
     """``_get_provider`` picks the STT backend. If it only consulted
     ``os.environ`` a user with keys in ``~/.hermes/.env`` would be told

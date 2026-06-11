@@ -178,6 +178,19 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+MEDIA_GENERATION_GUIDANCE = (
+    "# Media generation\n"
+    "To create images, video, music, audio, songs, jingles, ambient tracks, or "
+    "sound effects, you MUST use the dedicated cloud generation tools in your "
+    "toolset — image_generate, video_generate, and audio_generate. They are "
+    "hosted (no local setup) and return a ready media file. Do NOT write code, "
+    "run the terminal, install packages (torch, audiocraft, MusicGen, ffmpeg, "
+    "scipy, soundfile, …), or open the audiocraft / heartmula / songwriting "
+    "skills to synthesize media yourself — that path is slower, lower quality, "
+    "and usually fails here. Example: for \"generate some background music\" or "
+    "\"make a 10s track\", call audio_generate directly with the prompt."
+)
+
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from "
@@ -925,6 +938,35 @@ def build_environment_hints() -> str:
         hints.append(extra)
 
     return "\n\n".join(hints)
+
+
+def build_bankr_wallet_prompt() -> str:
+    """Return Bankr wallet guidance when dashboard-provisioned wallet env exists."""
+    api_key_present = bool(
+        (os.getenv("BANKR_API_KEY") or os.getenv("BANKR_AGENT_API_KEY") or "").strip()
+    )
+    wallet_address = (
+        os.getenv("BANKR_WALLET_ADDRESS")
+        or os.getenv("BANKR_AGENT_WALLET_ADDRESS")
+        or ""
+    ).strip()
+
+    if not api_key_present and not wallet_address:
+        return ""
+
+    address_line = f" Address: {wallet_address}." if wallet_address else ""
+    return (
+        "# Bankr wallet\n"
+        "This agent has a Bankr-managed wallet on Base "
+        "when BANKR_API_KEY/BANKR_AGENT_API_KEY and "
+        "BANKR_WALLET_ADDRESS/BANKR_AGENT_WALLET_ADDRESS are present."
+        f"{address_line}\n"
+        "Use the installed Bankr skills selectively. For wallet, crypto, x402, "
+        "token, deposit, transfer, or Base questions, load the relevant wallet "
+        "or Bankr skill with skill_view and follow it. "
+        "Do not load wallet skills unless they are relevant.\n"
+        "Do not include API key values in responses. V1 wallet support is Base-only."
+    )
 
 
 CONTEXT_FILE_MAX_CHARS = 20_000

@@ -48,29 +48,40 @@ jobs:
     concurrency:
       group: auto-fix-main
       cancel-in-progress: true
+    env:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
     steps:
+      - name: Skip auto-fix when GitHub App secrets are missing
+        if: ${{ env.APP_ID == '' || env.APP_PRIVATE_KEY == '' }}
+        run: echo "Skipping Nix lockfile auto-fix because APP_ID/APP_PRIVATE_KEY are not configured."
+
       - name: Generate GitHub App token
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' }}
         id: app-token
         uses: actions/create-github-app-token@7bfa3a4717ef143a604ee0a99d859b8886a96d00  # v1.9.3
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' }}
         with:
           ref: main
           token: ${{ steps.app-token.outputs.token }}
 
       - uses: ./.github/actions/nix-setup
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' }}
         with:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Apply lockfile hashes
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' }}
         id: apply
         run: nix run .#fix-lockfiles -- --apply
 
       - name: Commit & push
-        if: steps.apply.outputs.changed == 'true'
+        if: ${{ env.APP_ID != '' && env.APP_PRIVATE_KEY != '' && steps.apply.outputs.changed == 'true' }}
         shell: bash
         run: |
           set -euo pipefail

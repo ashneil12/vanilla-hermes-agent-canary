@@ -299,6 +299,31 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.default_soul import DEFAULT_SOUL_MD
 
 
+def apply_bankr_env_from_config(config: Dict[str, Any]) -> None:
+    """Expose dashboard-provisioned Bankr wallet config as process env vars."""
+    bankr = config.get("bankr")
+    if not isinstance(bankr, dict):
+        return
+
+    wallet_address = bankr.get("walletAddress")
+    api_key = bankr.get("apiKey")
+    wallet_id = bankr.get("walletId")
+    withdrawal_destination = bankr.get("withdrawalDestination")
+
+    mappings = {
+        "BANKR_AGENT_WALLET_ADDRESS": wallet_address,
+        "BANKR_WALLET_ADDRESS": wallet_address,
+        "BANKR_AGENT_API_KEY": api_key,
+        "BANKR_API_KEY": api_key,
+        "BANKR_AGENT_WALLET_ID": wallet_id,
+        "BANKR_AGENT_WITHDRAWAL_DESTINATION": withdrawal_destination,
+    }
+
+    for key, value in mappings.items():
+        if isinstance(value, str) and value.strip():
+            os.environ[key] = value.strip()
+
+
 # =============================================================================
 # Managed mode (NixOS declarative config)
 # =============================================================================
@@ -2786,7 +2811,7 @@ OPTIONAL_ENV_VARS = {
         "advanced": True,
     },
     "HERMES_QWEN_BASE_URL": {
-        "description": "Qwen Portal base URL override (default: https://portal.qwen.ai/v1)",
+        "description": "Qwen Portal base URL override (default: https://dashscope.aliyuncs.com/compatible-mode/v1)",
         "prompt": "Qwen Portal base URL (leave empty for default)",
         "url": None,
         "password": False,
@@ -5337,7 +5362,9 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
         cached = _LOAD_CONFIG_CACHE.get(path_key)
         if cached is not None and cache_key is not None and cached[:2] == cache_key:
-            return copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
+            result = copy.deepcopy(cached[2]) if want_deepcopy else cached[2]
+            apply_bankr_env_from_config(result)
+            return result
 
         config = copy.deepcopy(DEFAULT_CONFIG)
 
@@ -5379,6 +5406,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         # canonical "freshly-built mutable result" the function has always
         # returned. For the deepcopy=False path with no cache (e.g. config
         # file missing), it's also fine — callers get an isolated object.
+        apply_bankr_env_from_config(expanded)
         return expanded
 
 
@@ -5499,6 +5527,7 @@ def save_config(config: Dict[str, Any]):
         )
         _secure_file(config_path)
         _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+        apply_bankr_env_from_config(_expand_env_vars(current_normalized))
 
 
 def load_env() -> Dict[str, str]:

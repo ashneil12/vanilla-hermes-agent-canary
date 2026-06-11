@@ -1,6 +1,6 @@
 ---
 name: heartmula
-description: "HeartMuLa: Suno-like song generation from lyrics + tags."
+description: "Local/offline HeartMuLa song synthesis. For normal song or music generation use the audio_generate TOOL instead (cloud, instant, no install) — only use this skill when the user explicitly requires local/offline synthesis."
 version: 1.0.0
 platforms: [linux, macos, windows]
 metadata:

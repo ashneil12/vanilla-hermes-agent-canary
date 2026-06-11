@@ -37,9 +37,11 @@ import hmac
 import json
 import logging
 import os
+import queue as _queue
 import socket as _socket
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -58,6 +60,11 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from hermes_cli.config import load_config, save_config
+from hermes_cli.models import curated_models_for_provider, list_available_providers
+from hermes_state import SessionDB
+from tools.memory_tool import MemoryStore
+from tools.skills_tool import skill_view, skills_categories, skills_list
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +90,26 @@ def _hermes_version() -> str:
     except Exception:
         return "dev"
 
+CHAT_STREAM_HEARTBEAT_SECONDS = 15.0
+RUNTIME_GOVERNOR_POLL_SECONDS = 5.0
+RUNTIME_GOVERNOR_UNAVAILABLE_MESSAGE = (
+    "HermesOS runtime limits could not be verified. Try again in a moment."
+)
+RUNTIME_GOVERNOR_LIMIT_MESSAGE = (
+    "HermesOS runtime limit reached. Upgrade or wait for your allowance to reset."
+)
+
+
+def _encode_dashboard_sse(event_name: str, payload: Dict[str, Any]) -> bytes:
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 # Default settings
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
-MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
+MAX_REQUEST_BYTES = int(
+    os.getenv("MAX_REQUEST_BYTES", "10000000")
+)  # 10 MB default limit for POST bodies / long agent conversations
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
@@ -756,6 +777,8 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # WebUI-style dashboard chat streams: stream_id -> backend-owned run state.
+        self._chat_streams: Dict[str, Dict[str, Any]] = {}
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
@@ -765,7 +788,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # resolves requests by session key, while API clients address the
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
-        self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._session_db: Optional[SessionDB] = None
+        self._memory_store: Optional[MemoryStore] = None
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -831,6 +855,243 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         return "*" in self._cors_origins or origin in self._cors_origins
+
+    @staticmethod
+    def _runtime_limit_result(message: str, *, reason: str = "runtime_limit") -> Dict[str, Any]:
+        text = message or RUNTIME_GOVERNOR_LIMIT_MESSAGE
+        return {
+            "final_response": text,
+            "messages": [],
+            "api_calls": 0,
+            "completed": False,
+            "partial": True,
+            "interrupted": True,
+            "failed": True,
+            "runtime_cutoff": True,
+            "runtime_reason": reason,
+        }
+
+    @staticmethod
+    def _zero_usage() -> Dict[str, int]:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    @staticmethod
+    def _runtime_session_key(surface: str, session_id: Optional[str]) -> str:
+        safe_surface = str(surface or "api").strip() or "api"
+        safe_session = str(session_id or "default").strip() or "default"
+        return f"api_server:{safe_surface}:{safe_session}"
+
+    def _admit_runtime_governor(
+        self,
+        *,
+        surface: str,
+        session_id: Optional[str],
+        source_message_id: str,
+        message_preview: str,
+    ) -> Dict[str, Any]:
+        try:
+            from gateway.runtime_governor import (
+                DEFAULT_UNAVAILABLE_MESSAGE,
+                RuntimeGovernorError,
+                get_runtime_governor,
+            )
+
+            governor = get_runtime_governor()
+            decision = governor.admit(
+                platform="web" if surface.startswith("session") else "api_server",
+                session_key=self._runtime_session_key(surface, session_id),
+                source_message_id=source_message_id,
+                message_preview=message_preview[:500],
+            )
+            if not decision.allowed:
+                return {
+                    "allowed": False,
+                    "governor": governor,
+                    "lease_id": None,
+                    "reason": decision.reason or "denied",
+                    "user_message": decision.user_message or DEFAULT_UNAVAILABLE_MESSAGE,
+                }
+            lease_id = decision.lease_id
+            if lease_id:
+                try:
+                    governor.start(lease_id)
+                except RuntimeGovernorError as exc:
+                    return {
+                        "allowed": False,
+                        "governor": governor,
+                        "lease_id": None,
+                        "reason": "policy_unavailable",
+                        "user_message": exc.user_message,
+                    }
+            return {
+                "allowed": True,
+                "governor": governor,
+                "lease_id": lease_id,
+                "reason": decision.reason or "allowed",
+                "user_message": "",
+            }
+        except Exception as exc:
+            logger.warning(
+                "[api_server] runtime governor admission failed closed for %s/%s: %s",
+                surface,
+                session_id or "",
+                exc.__class__.__name__,
+            )
+            return {
+                "allowed": False,
+                "governor": None,
+                "lease_id": None,
+                "reason": "policy_unavailable",
+                "user_message": RUNTIME_GOVERNOR_UNAVAILABLE_MESSAGE,
+            }
+
+    @staticmethod
+    def _runtime_heartbeat(
+        *,
+        governor: Any,
+        lease_id: Optional[str],
+        agent_ref: List[Any],
+        cutoff_state: Dict[str, Any],
+    ) -> None:
+        if not governor or not lease_id or cutoff_state.get("cutoff"):
+            return
+        try:
+            heartbeat = governor.heartbeat(lease_id)
+            should_stop = bool(getattr(heartbeat, "should_stop", False))
+            user_message = str(getattr(heartbeat, "user_message", "") or "")
+            reason = str(getattr(heartbeat, "reason", "") or "")
+        except Exception as exc:
+            logger.warning("[api_server] runtime governor heartbeat failed closed: %s", exc.__class__.__name__)
+            should_stop = True
+            user_message = RUNTIME_GOVERNOR_UNAVAILABLE_MESSAGE
+            reason = "policy_unavailable"
+        if not should_stop:
+            return
+        cutoff_state["cutoff"] = True
+        cutoff_state["message"] = user_message or RUNTIME_GOVERNOR_LIMIT_MESSAGE
+        cutoff_state["reason"] = reason or "runtime_cutoff"
+        agent = agent_ref[0] if agent_ref else None
+        if agent is not None and hasattr(agent, "interrupt"):
+            try:
+                agent.interrupt(cutoff_state["message"])
+            except Exception as exc:
+                logger.debug("[api_server] runtime governor interrupt failed: %s", exc)
+
+    def _install_runtime_step_callback(
+        self,
+        agent: Any,
+        *,
+        governor: Any,
+        lease_id: Optional[str],
+        agent_ref: List[Any],
+        cutoff_state: Dict[str, Any],
+    ) -> None:
+        if not governor or not lease_id:
+            return
+        previous = getattr(agent, "step_callback", None)
+
+        def _runtime_step_callback(iteration, prev_tools):
+            self._runtime_heartbeat(
+                governor=governor,
+                lease_id=lease_id,
+                agent_ref=agent_ref,
+                cutoff_state=cutoff_state,
+            )
+            if callable(previous):
+                return previous(iteration, prev_tools)
+            return None
+
+        try:
+            agent.step_callback = _runtime_step_callback
+        except Exception as exc:
+            logger.debug("[api_server] failed to install runtime step callback: %s", exc)
+
+    async def _await_runtime_guarded(
+        self,
+        future: "asyncio.Future",
+        *,
+        governor: Any,
+        lease_id: Optional[str],
+        agent_ref: List[Any],
+        cutoff_state: Dict[str, Any],
+        cutoff_factory: Optional[Any] = None,
+    ) -> Any:
+        if not governor or not lease_id:
+            return await future
+
+        while True:
+            done, _ = await asyncio.wait({future}, timeout=RUNTIME_GOVERNOR_POLL_SECONDS)
+            if done:
+                return future.result()
+            self._runtime_heartbeat(
+                governor=governor,
+                lease_id=lease_id,
+                agent_ref=agent_ref,
+                cutoff_state=cutoff_state,
+            )
+            if cutoff_state.get("cutoff"):
+                cutoff_result = self._runtime_limit_result(
+                    str(cutoff_state.get("message") or ""),
+                    reason=str(cutoff_state.get("reason") or "runtime_cutoff"),
+                )
+                if cutoff_factory is not None:
+                    return cutoff_factory(cutoff_result)
+                return (cutoff_result, self._zero_usage())
+
+    @staticmethod
+    def _close_runtime_lease(governor: Any, lease_id: Optional[str], *, result: Optional[Dict[str, Any]], error: bool = False) -> None:
+        if not governor or not lease_id:
+            return
+        try:
+            if result and result.get("runtime_cutoff"):
+                governor.fail(lease_id, reason=str(result.get("runtime_reason") or "runtime_cutoff"))
+            elif error or (result and result.get("failed")):
+                governor.fail(lease_id, reason="agent_error")
+            else:
+                governor.finish(lease_id, reason="agent_end")
+        except Exception as exc:
+            logger.warning("[api_server] runtime governor lease close failed: %s", exc.__class__.__name__)
+
+    async def _run_agent_with_runtime(
+        self,
+        *,
+        surface: str,
+        runtime_session_id: Optional[str],
+        source_message_id: str,
+        message_preview: str,
+        **run_kwargs,
+    ) -> tuple:
+        admission = self._admit_runtime_governor(
+            surface=surface,
+            session_id=runtime_session_id,
+            source_message_id=source_message_id,
+            message_preview=message_preview,
+        )
+        if not admission.get("allowed"):
+            return (
+                self._runtime_limit_result(
+                    str(admission.get("user_message") or ""),
+                    reason=str(admission.get("reason") or "denied"),
+                ),
+                self._zero_usage(),
+            )
+
+        governor = admission.get("governor")
+        lease_id = admission.get("lease_id")
+        result: Optional[Dict[str, Any]] = None
+        try:
+            result, usage = await self._run_agent(
+                **run_kwargs,
+                runtime_governor=governor,
+                runtime_lease_id=lease_id,
+            )
+            return result, usage
+        except Exception:
+            self._close_runtime_lease(governor, lease_id, result=result, error=True)
+            raise
+        finally:
+            if result is not None:
+                self._close_runtime_lease(governor, lease_id, result=result)
 
     @staticmethod
     def _clean_log_value(value: Any, *, max_len: int = 200) -> str:
@@ -983,6 +1244,113 @@ class APIServerAdapter(BasePlatformAdapter):
     # Session DB helper
     # ------------------------------------------------------------------
 
+    def _get_session_db(self) -> SessionDB:
+        """Create the session DB lazily."""
+        if self._session_db is None:
+            self._session_db = SessionDB()
+        return self._session_db
+
+    def _get_memory_store(self) -> MemoryStore:
+        """Create the memory store lazily."""
+        if self._memory_store is None:
+            self._memory_store = MemoryStore()
+            self._memory_store.load_from_disk()
+        return self._memory_store
+
+    @staticmethod
+    def _normalize_session_record(session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Parse serialized session fields into API-friendly JSON."""
+        if session is None:
+            return None
+        normalized = dict(session)
+        model_config = normalized.get("model_config")
+        if model_config:
+            try:
+                normalized["model_config"] = json.loads(model_config)
+            except (TypeError, json.JSONDecodeError):
+                pass
+        return normalized
+
+    @staticmethod
+    def _current_model_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract model/provider/base_url/api_mode from config.yaml."""
+        model_cfg = config.get("model")
+        if isinstance(model_cfg, dict):
+            return {
+                "model": str(model_cfg.get("default") or model_cfg.get("model") or "").strip(),
+                "provider": str(model_cfg.get("provider") or "").strip(),
+                "api_mode": str(model_cfg.get("api_mode") or "").strip(),
+                "base_url": str(model_cfg.get("base_url") or "").strip(),
+            }
+        if isinstance(model_cfg, str):
+            return {
+                "model": model_cfg.strip(),
+                "provider": "",
+                "api_mode": "",
+                "base_url": "",
+            }
+        return {"model": "", "provider": "", "api_mode": "", "base_url": ""}
+
+    @staticmethod
+    def _parse_int(value: Any, default: int, minimum: int = 0) -> int:
+        """Parse an integer query parameter with bounds."""
+        if value in (None, ""):
+            return default
+        parsed = int(value)
+        if parsed < minimum:
+            raise ValueError(f"Value must be >= {minimum}")
+        return parsed
+
+    @staticmethod
+    def _build_user_content(
+        text: str, attachments: Optional[List[Dict[str, Any]]] = None
+    ) -> tuple:
+        """Build multimodal content from text + image attachments.
+
+        Returns (user_content, persist_text) where user_content is either
+        a plain string or a list of content parts for multimodal input.
+        """
+        if not attachments:
+            return text, text
+
+        image_parts: List[Dict[str, Any]] = []
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+            mime = ""
+            for key in ("contentType", "mimeType", "mediaType"):
+                val = att.get(key)
+                if isinstance(val, str) and val.strip():
+                    mime = val.strip()
+                    break
+            if not mime.startswith("image/"):
+                continue
+            content = ""
+            for key in ("content", "base64", "data"):
+                val = att.get(key)
+                if isinstance(val, str) and val.strip():
+                    content = val.strip()
+                    break
+            if not content:
+                data_url = att.get("dataUrl", "")
+                if isinstance(data_url, str) and data_url.startswith("data:"):
+                    content = data_url.split(",", 1)[-1] if "," in data_url else ""
+            if not content:
+                continue
+            image_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{content}"},
+            })
+
+        if not image_parts:
+            return text, text
+
+        content_parts: List[Dict[str, Any]] = []
+        if text.strip():
+            content_parts.append({"type": "text", "text": text})
+        content_parts.extend(image_parts)
+        return content_parts, text
+
     def _ensure_session_db(self):
         """Lazily initialise and return the shared SessionDB instance.
 
@@ -991,7 +1359,6 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         if self._session_db is None:
             try:
-                from hermes_state import SessionDB
                 self._session_db = SessionDB()
             except Exception as e:
                 logger.debug("SessionDB unavailable for API server: %s", e)
@@ -1009,6 +1376,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        thinking_callback=None,
+        reasoning_callback=None,
+        status_callback=None,
         gateway_session_key: Optional[str] = None,
     ) -> Any:
         """
@@ -1057,6 +1427,9 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            thinking_callback=thinking_callback,
+            reasoning_callback=reasoning_callback,
+            status_callback=status_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
@@ -1066,6 +1439,1342 @@ class APIServerAdapter(BasePlatformAdapter):
 
     # ------------------------------------------------------------------
     # HTTP Handlers
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Dashboard REST API handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions — list sessions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            limit = self._parse_int(request.query.get("limit"), 50)
+            offset = self._parse_int(request.query.get("offset"), 0)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        source = (request.query.get("source") or "").strip() or None
+        db = self._get_session_db()
+        items = [
+            self._normalize_session_record(item)
+            for item in db.list_sessions_rich(source=source, limit=limit, offset=offset)
+        ]
+        total = db.session_count(source=source)
+        return web.json_response({"items": items, "total": total})
+
+    async def _handle_create_session(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions — create a new session."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        title = body.get("title")
+        source = str(body.get("source") or "api_server").strip() or "api_server"
+        model = body.get("model")
+        system_prompt = body.get("system_prompt")
+        session_id = f"sess_{uuid.uuid4().hex}"
+        db = self._get_session_db()
+
+        try:
+            db.create_session(
+                session_id=session_id,
+                source=source,
+                model=model,
+                system_prompt=system_prompt,
+            )
+            if title is not None:
+                db.set_session_title(session_id, str(title))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        session = self._normalize_session_record(db.get_session(session_id))
+        return web.json_response({"session": session})
+
+    async def _handle_search_sessions(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/search — search messages across sessions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        query = (request.query.get("q") or "").strip()
+        if not query:
+            return web.json_response({"error": "Missing query parameter: q"}, status=400)
+        try:
+            limit = self._parse_int(request.query.get("limit"), 20)
+            offset = self._parse_int(request.query.get("offset"), 0)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        results = self._get_session_db().search_messages(query=query, limit=limit, offset=offset)
+        return web.json_response({"query": query, "count": len(results), "results": results})
+
+    async def _handle_get_session(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id} — fetch one session."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        session = self._normalize_session_record(self._get_session_db().get_session(session_id))
+        if session is None:
+            return web.json_response({"error": "Session not found"}, status=404)
+        return web.json_response({"session": session})
+
+    async def _handle_get_session_messages(self, request: "web.Request") -> "web.Response":
+        """GET /api/sessions/{session_id}/messages — fetch session messages."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        if db.get_session(session_id) is None:
+            db.ensure_session(session_id, source="web")
+        items = db.get_messages(session_id)
+        return web.json_response({"items": items, "total": len(items)})
+
+    async def _handle_update_session(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/sessions/{session_id} — update a session."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        if db.get_session(session_id) is None:
+            return web.json_response({"error": "Session not found"}, status=404)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        try:
+            if "title" in body:
+                db.set_session_title(session_id, body.get("title"))
+            if "system_prompt" in body:
+                db.update_system_prompt(session_id, body.get("system_prompt"))
+            if "end_reason" in body:
+                db.end_session(session_id, str(body.get("end_reason") or "updated"))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        session = self._normalize_session_record(db.get_session(session_id))
+        return web.json_response({"session": session})
+
+    async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/sessions/{session_id} — delete a session."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        deleted = self._get_session_db().delete_session(session_id)
+        if not deleted:
+            return web.json_response({"error": "Session not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/fork — clone a session and its messages."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        original = db.get_session(session_id)
+        if original is None:
+            return web.json_response({"error": "Session not found"}, status=404)
+
+        forked_id = f"sess_{uuid.uuid4().hex}"
+        try:
+            db.create_session(
+                session_id=forked_id,
+                source=original.get("source") or "api_server",
+                model=original.get("model"),
+                system_prompt=original.get("system_prompt"),
+                user_id=original.get("user_id"),
+                parent_session_id=session_id,
+            )
+            messages = db.get_messages(session_id)
+            for message in messages:
+                db.append_message(
+                    session_id=forked_id,
+                    role=message.get("role"),
+                    content=message.get("content"),
+                    tool_name=message.get("tool_name"),
+                    tool_calls=message.get("tool_calls"),
+                    tool_call_id=message.get("tool_call_id"),
+                    token_count=message.get("token_count"),
+                    finish_reason=message.get("finish_reason"),
+                    reasoning=message.get("reasoning"),
+                )
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        session = self._normalize_session_record(db.get_session(forked_id))
+        return web.json_response({"session": session, "forked_from": session_id})
+
+    async def _handle_session_chat(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/chat — run a session-aware chat turn."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        session = self._normalize_session_record(db.get_session(session_id))
+        if session is None:
+            db.ensure_session(session_id, source="web")
+            session = self._normalize_session_record(db.get_session(session_id)) or {}
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        message = body.get("message")
+        if not isinstance(message, str):
+            return web.json_response({"error": "Missing or invalid 'message' field"}, status=400)
+
+        raw_attachments_sync = body.get("attachments")
+        if raw_attachments_sync:
+            logger.debug("[chat] Received %d attachment(s): %s",
+                         len(raw_attachments_sync),
+                         [(a.get("name"), a.get("contentType"), len(a.get("content", "") or a.get("base64", "") or "")) for a in raw_attachments_sync if isinstance(a, dict)])
+        user_content, persist_text = self._build_user_content(message, raw_attachments_sync)
+        if isinstance(user_content, list):
+            logger.debug("[chat] Built multimodal content with %d parts", len(user_content))
+
+        model = body.get("model") or session.get("model") or "hermes-agent"
+        system_message = body.get("system_message")
+        history = db.get_messages_as_conversation(session_id)
+        loop = asyncio.get_event_loop()
+        run_id = f"run_{uuid.uuid4().hex}"
+        admission = self._admit_runtime_governor(
+            surface="session_chat",
+            session_id=session_id,
+            source_message_id=run_id,
+            message_preview=message,
+        )
+
+        def _run():
+            agent = self._create_agent(
+                ephemeral_system_prompt=system_message,
+                session_id=session_id,
+            )
+            agent._session_db = db
+            agent_ref[0] = agent
+            self._install_runtime_step_callback(
+                agent,
+                governor=governor,
+                lease_id=lease_id,
+                agent_ref=agent_ref,
+                cutoff_state=cutoff_state,
+            )
+            result = agent.run_conversation(
+                user_content,
+                conversation_history=history,
+                persist_user_message=persist_text,
+            )
+            usage = {
+                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+            }
+            return result, usage
+
+        if not admission.get("allowed"):
+            result = self._runtime_limit_result(
+                str(admission.get("user_message") or ""),
+                reason=str(admission.get("reason") or "denied"),
+            )
+            usage = self._zero_usage()
+        else:
+            governor = admission.get("governor")
+            lease_id = admission.get("lease_id")
+            agent_ref: List[Any] = [None]
+            cutoff_state: Dict[str, Any] = {}
+            result: Optional[Dict[str, Any]] = None
+            try:
+                future = asyncio.ensure_future(loop.run_in_executor(None, _run))
+                result, usage = await self._await_runtime_guarded(
+                    future,
+                    governor=governor,
+                    lease_id=lease_id,
+                    agent_ref=agent_ref,
+                    cutoff_state=cutoff_state,
+                )
+            except Exception as e:
+                self._close_runtime_lease(governor, lease_id, result=result, error=True)
+                logger.error("Error running session chat for %s: %s", session_id, e, exc_info=True)
+                return web.json_response({"error": str(e)}, status=500)
+            finally:
+                if result is not None:
+                    self._close_runtime_lease(governor, lease_id, result=result)
+
+        return web.json_response({
+            "session_id": session_id,
+            "run_id": run_id,
+            "model": model,
+            "final_response": result.get("final_response"),
+            "completed": result.get("completed", False),
+            "partial": result.get("partial", False),
+            "interrupted": result.get("interrupted", False),
+            "api_calls": result.get("api_calls", 0),
+            "messages": result.get("messages", []),
+            "last_reasoning": result.get("last_reasoning"),
+            "response_previewed": result.get("response_previewed", False),
+            "usage": usage,
+        })
+
+    async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
+        """POST /api/sessions/{session_id}/chat/stream — stream a session chat turn over SSE.
+
+        This composes the upstream session-API streaming contract (multimodal
+        payload normalization, _run_agent patchability, session-key headers)
+        with the HermesOS fork's gateway approval notifications.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        gateway_session_key, key_err = self._parse_session_key_header(request)
+        if key_err is not None:
+            return key_err
+
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        session = self._normalize_session_record(db.get_session(session_id))
+        if session is None:
+            db.ensure_session(session_id, source="web")
+            session = self._normalize_session_record(db.get_session(session_id)) or {}
+
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        user_message, err = _session_chat_user_message(body)
+        if err is not None:
+            return err
+        system_prompt = body.get("system_message") or body.get("instructions")
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
+        message_id = f"msg_{uuid.uuid4().hex}"
+        run_id = f"run_{uuid.uuid4().hex}"
+        seq = 0
+
+        def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+            nonlocal seq
+            seq += 1
+            payload.setdefault("session_id", session_id)
+            payload.setdefault("run_id", run_id)
+            payload.setdefault("seq", seq)
+            payload.setdefault("ts", time.time())
+            return name, payload
+
+        def _enqueue(name: str, payload: Dict[str, Any]) -> None:
+            event = _event_payload(name, payload)
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            try:
+                if running_loop is loop:
+                    queue.put_nowait(event)
+                else:
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except RuntimeError:
+                pass
+
+        def _delta(delta: str) -> None:
+            if delta:
+                _enqueue("assistant.delta", {"message_id": message_id, "delta": delta})
+
+        def _tool_progress(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs) -> None:
+            if event_type == "reasoning.available":
+                _enqueue("tool.progress", {"message_id": message_id, "tool_name": tool_name or "_thinking", "delta": preview or ""})
+            elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
+                _enqueue(event_type, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+            elif event_type == "_thinking":
+                _enqueue("tool.progress", {"message_id": message_id, "tool_name": "_thinking", "delta": preview or ""})
+
+        def _on_approval_request(approval_data):
+            if not isinstance(approval_data, dict):
+                approval_data = {"description": str(approval_data)}
+            payload = {
+                "message_id": message_id,
+                "approval_id": str(approval_data.get("approval_id") or approval_data.get("id") or ""),
+                "command": str(approval_data.get("command") or "")[:8000],
+                "description": str(approval_data.get("description") or "Command approval required")[:1000],
+                "pattern_key": str(approval_data.get("pattern_key") or ""),
+                "pattern_keys": approval_data.get("pattern_keys") if isinstance(approval_data.get("pattern_keys"), list) else [],
+            }
+            _enqueue("approval", payload)
+
+        async def _run_and_signal() -> None:
+            unregister_gateway_notify = None
+            try:
+                from tools.approval import (
+                    register_gateway_notify,
+                    unregister_gateway_notify as _unregister_gateway_notify,
+                )
+                register_gateway_notify(session_id, _on_approval_request)
+                unregister_gateway_notify = _unregister_gateway_notify
+            except Exception as exc:
+                logger.debug("[chat/stream] Approval callbacks unavailable: %s", exc)
+
+            try:
+                await queue.put(_event_payload("session.created", {"title": session.get("title") or "New Chat"}))
+                await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
+                await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
+                history = self._conversation_history_for_session(session_id)
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=history,
+                    ephemeral_system_prompt=system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_delta,
+                    tool_progress_callback=_tool_progress,
+                    gateway_session_key=gateway_session_key,
+                )
+                final_response = result.get("final_response", "") if isinstance(result, dict) else ""
+                effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
+                await queue.put(_event_payload("assistant.completed", {
+                    "session_id": effective_session_id,
+                    "message_id": message_id,
+                    "content": final_response,
+                    "completed": bool(result.get("completed", True)) if isinstance(result, dict) else True,
+                    "partial": bool(result.get("partial", False)) if isinstance(result, dict) else False,
+                    "interrupted": bool(result.get("interrupted", False)) if isinstance(result, dict) else False,
+                }))
+                turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
+                await queue.put(_event_payload("run.completed", {
+                    "session_id": effective_session_id,
+                    "message_id": message_id,
+                    "completed": bool(result.get("completed", True)) if isinstance(result, dict) else True,
+                    "messages": turn_messages,
+                    "usage": usage,
+                }))
+            except Exception as exc:
+                logger.exception("[api_server] session chat stream failed")
+                await queue.put(_event_payload("error", {"message": str(exc)}))
+            finally:
+                if unregister_gateway_notify is not None:
+                    try:
+                        unregister_gateway_notify(session_id)
+                    except Exception as exc:
+                        logger.debug("[chat/stream] Approval callback cleanup failed: %s", exc)
+                await queue.put(_event_payload("done", {}))
+                await queue.put(None)
+
+        task = asyncio.create_task(_run_and_signal())
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
+
+        headers = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Hermes-Session-Id": session_id,
+        }
+        if gateway_session_key:
+            headers["X-Hermes-Session-Key"] = gateway_session_key
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+        if cors:
+            headers.update(cors)
+
+        response = web.StreamResponse(status=200, headers=headers)
+        await response.prepare(request)
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    continue
+                if item is None:
+                    break
+                name, payload = item
+                await response.write(f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            task.cancel()
+            raise
+        except Exception as exc:
+            logger.debug("[api_server] session SSE stream error: %s", exc)
+        return response
+
+    async def _handle_session_chat_start(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/chat/start — start a backend-owned WebUI-style stream."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        session_id = request.match_info["session_id"]
+        db = self._get_session_db()
+        session = self._normalize_session_record(db.get_session(session_id))
+        if session is None:
+            db.ensure_session(session_id, source="web")
+            session = self._normalize_session_record(db.get_session(session_id)) or {}
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        message = body.get("message")
+        if not isinstance(message, str):
+            return web.json_response({"error": "Missing or invalid 'message' field"}, status=400)
+
+        raw_attachments = body.get("attachments")
+        user_content, persist_text = self._build_user_content(message, raw_attachments)
+        system_message = body.get("system_message")
+        history = db.get_messages_as_conversation(session_id)
+
+        import queue as _q
+        stream_id = uuid.uuid4().hex
+        run_id = f"run_{uuid.uuid4().hex}"
+        assistant_message_id = f"msg_asst_{uuid.uuid4().hex}"
+        user_message_id = f"msg_user_{uuid.uuid4().hex}"
+        stream_q: _q.Queue = _q.Queue()
+        agent_ref: List[Any] = [None]
+        loop = asyncio.get_event_loop()
+        stream_state: Dict[str, Any] = {}
+
+        def _encode_sse(event_name: str, payload: Dict[str, Any]) -> bytes:
+            return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        def _queue_event(event_name: str, payload: Dict[str, Any]) -> None:
+            _record_runtime_event(event_name, payload)
+            stream_q.put(_encode_sse(event_name, payload))
+
+        def _record_runtime_event(event_name: str, payload: Dict[str, Any]) -> None:
+            if not stream_state:
+                return
+            lock = stream_state.get("lock")
+
+            def _record() -> None:
+                stream_state["last_event_at"] = time.time()
+                events = stream_state.setdefault("events", [])
+                events.append({"event": event_name, "payload": payload})
+                del events[:-200]
+
+            if lock is not None:
+                with lock:
+                    _record()
+            else:
+                _record()
+
+        def _snapshot_args(args: Any) -> Dict[str, str]:
+            if not isinstance(args, dict):
+                return {}
+            args_snap: Dict[str, str] = {}
+            for key, value in list(args.items())[:4]:
+                value_text = str(value)
+                args_snap[key] = value_text[:120] + ("..." if len(value_text) > 120 else "")
+            return args_snap
+
+        def _tool_context(name: Any, args: Any) -> str:
+            try:
+                from agent.display import build_tool_preview
+                preview = build_tool_preview(str(name or "tool"), args if isinstance(args, dict) else {}, max_len=80)
+                if preview:
+                    return str(preview)
+            except Exception as exc:
+                logger.debug("[chat/start] Tool preview builder unavailable: %s", exc)
+            if isinstance(args, dict):
+                command = args.get("command")
+                if command:
+                    return str(command)
+            return ""
+
+        def _update_runtime(mutator) -> None:
+            lock = stream_state.get("lock")
+            if lock is not None:
+                with lock:
+                    mutator()
+            else:
+                mutator()
+
+        def _tool_map(messages: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+            mapping: Dict[str, Dict[str, Any]] = {}
+            for item in messages:
+                if item.get("role") != "assistant":
+                    continue
+                for index, tool_call in enumerate(item.get("tool_calls") or []):
+                    tool_id = tool_call.get("id")
+                    if not tool_id:
+                        continue
+                    fn = tool_call.get("function") or {}
+                    raw_args = fn.get("arguments")
+                    try:
+                        parsed_args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.strip() else {}
+                    except json.JSONDecodeError:
+                        parsed_args = raw_args
+                    mapping[tool_id] = {
+                        "tool_name": fn.get("name") or item.get("tool_name") or f"tool_{index + 1}",
+                        "args": parsed_args,
+                    }
+            return mapping
+
+        def _result_preview(content: Any, limit: int = 4000) -> str:
+            text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            return text[:limit] + ("..." if len(text) > limit else "")
+
+        def _on_delta(delta):
+            if delta:
+                def _mutate() -> None:
+                    stream_state["assistant_content"] = str(stream_state.get("assistant_content") or "") + str(delta)
+
+                _update_runtime(_mutate)
+                _queue_event(
+                    "token",
+                    {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "message_id": assistant_message_id, "text": delta},
+                )
+                _queue_event(
+                    "message.delta",
+                    {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "message_id": assistant_message_id, "text": delta},
+                )
+
+        def _on_thinking(text):
+            text = str(text or "")
+
+            def _mutate() -> None:
+                stream_state["thinking"] = text
+
+            _update_runtime(_mutate)
+            _queue_event(
+                "thinking.delta",
+                {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "message_id": assistant_message_id, "text": text},
+            )
+
+        def _on_reasoning(text):
+            text = str(text or "")
+            if not text:
+                return
+
+            def _mutate() -> None:
+                stream_state["reasoning"] = str(stream_state.get("reasoning") or "") + text
+
+            _update_runtime(_mutate)
+            _queue_event(
+                "reasoning.delta",
+                {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "message_id": assistant_message_id, "text": text},
+            )
+
+        def _on_status(kind, text=None):
+            body = str(text if text is not None else kind).strip()
+            if not body:
+                return
+            payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "kind": str(kind if text is not None else "status"),
+                "text": body,
+            }
+
+            def _mutate() -> None:
+                stream_state["status"] = {"kind": payload["kind"], "text": body}
+
+            _update_runtime(_mutate)
+            _queue_event("status.update", payload)
+
+        def _on_tool_start(tool_call_id, name, args):
+            tool_id = str(tool_call_id or f"tool_{uuid.uuid4().hex[:8]}")
+            tool_name = str(name or "tool")
+            context = _tool_context(tool_name, args)
+            args_snap = _snapshot_args(args)
+            tui_payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "tool_id": tool_id,
+                "name": tool_name,
+                "context": context,
+            }
+            compat_payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "tool_call_id": tool_id,
+                "event_type": "tool.started",
+                "name": tool_name,
+                "preview": context,
+                "args": args_snap,
+            }
+
+            def _mutate() -> None:
+                active_tools = [
+                    tool for tool in stream_state.setdefault("active_tools", [])
+                    if tool.get("tool_id") != tool_id
+                ]
+                active_tools.append({"tool_id": tool_id, "name": tool_name, "context": context})
+                stream_state["active_tools"] = active_tools
+
+            _update_runtime(_mutate)
+            _queue_event("tool.start", tui_payload)
+            _queue_event("tool", compat_payload)
+
+        def _on_tool_complete(tool_call_id, name, args, result):
+            tool_id = str(tool_call_id or "")
+            tool_name = str(name or "tool")
+            context = _tool_context(tool_name, args)
+            result_preview = _result_preview(result)
+            args_snap = _snapshot_args(args)
+            tui_payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "tool_id": tool_id,
+                "name": tool_name,
+                "summary": result_preview,
+            }
+            compat_payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "tool_call_id": tool_id,
+                "tool_name": tool_name,
+                "name": tool_name,
+                "args": args_snap,
+                "result_preview": result_preview,
+                "preview": context,
+            }
+
+            def _mutate() -> None:
+                stream_state["active_tools"] = [
+                    tool for tool in stream_state.setdefault("active_tools", [])
+                    if tool.get("tool_id") != tool_id
+                ]
+
+            _update_runtime(_mutate)
+            _queue_event("tool.complete", tui_payload)
+            _queue_event("tool.completed", compat_payload)
+
+        def _on_tool_progress(*cb_args, **cb_kwargs):
+            event_type = None
+            name = None
+            preview = None
+            args = None
+            if len(cb_args) >= 4:
+                event_type, name, preview, args = cb_args[:4]
+            elif len(cb_args) == 3:
+                name, preview, args = cb_args
+                event_type = "tool.started"
+            elif len(cb_args) == 2:
+                event_type, name = cb_args
+            elif len(cb_args) == 1:
+                name = cb_args[0]
+                event_type = "tool.started"
+            if event_type in ("reasoning.available", "_thinking"):
+                reason_text = preview if event_type == "reasoning.available" else name
+                if reason_text:
+                    _queue_event("reasoning", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "text": str(reason_text)})
+                return
+            args_snap = _snapshot_args(args)
+            if event_type in (None, "tool.started"):
+                _queue_event(
+                    "tool",
+                    {
+                        "session_id": session_id,
+                        "stream_id": stream_id,
+                        "run_id": run_id,
+                        "message_id": assistant_message_id,
+                        "event_type": event_type or "tool.started",
+                        "name": name,
+                        "preview": preview,
+                        "args": args_snap,
+                    },
+                )
+            elif event_type == "tool.completed":
+                _queue_event(
+                    "tool_complete",
+                    {
+                        "session_id": session_id,
+                        "stream_id": stream_id,
+                        "run_id": run_id,
+                        "message_id": assistant_message_id,
+                        "event_type": event_type,
+                        "name": name,
+                        "preview": preview,
+                        "args": args_snap,
+                        "duration": cb_kwargs.get("duration"),
+                        "is_error": bool(cb_kwargs.get("is_error", False)),
+                    },
+                )
+
+        def _on_approval_request(approval_data):
+            if not isinstance(approval_data, dict):
+                approval_data = {"description": str(approval_data)}
+            payload = {
+                "session_id": session_id,
+                "stream_id": stream_id,
+                "run_id": run_id,
+                "message_id": assistant_message_id,
+                "approval_id": str(approval_data.get("approval_id") or approval_data.get("id") or ""),
+                "command": str(approval_data.get("command") or "")[:8000],
+                "description": str(approval_data.get("description") or "Command approval required")[:1000],
+                "pattern_key": str(approval_data.get("pattern_key") or ""),
+                "pattern_keys": approval_data.get("pattern_keys") if isinstance(approval_data.get("pattern_keys"), list) else [],
+            }
+
+            def _mutate() -> None:
+                stream_state["pending_approval"] = payload
+                stream_state["status"] = {"kind": "approval", "text": payload["description"]}
+
+            _update_runtime(_mutate)
+            _queue_event("approval.request", payload)
+            _queue_event("approval", payload)
+
+        # Mirrors the TUI runtime state in memory so web refresh/reconnect can render active work.
+        stream_state.update({
+            "session_id": session_id,
+            "stream_id": stream_id,
+            "run_id": run_id,
+            "message_id": assistant_message_id,
+            "queue": stream_q,
+            "agent_ref": agent_ref,
+            "created_at": time.time(),
+            "last_event_at": time.time(),
+            "assistant_content": "",
+            "reasoning": "",
+            "thinking": "",
+            "status": {"kind": "status", "text": "running"},
+            "active_tools": [],
+            "pending_approval": None,
+            "events": [],
+            "lock": threading.Lock(),
+            "active": True,
+        })
+        self._chat_streams[stream_id] = stream_state
+
+        _queue_event("session.created", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "title": session.get("title") or "New Chat"})
+        _queue_event("run.started", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "user_message": {"id": user_message_id, "role": "user", "content": message}})
+        _queue_event("message.started", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "message": {"id": assistant_message_id, "role": "assistant"}})
+
+        async def _run_agent_task():
+            admission = self._admit_runtime_governor(
+                surface="session_chat_start",
+                session_id=session_id,
+                source_message_id=run_id,
+                message_preview=message,
+            )
+            if not admission.get("allowed"):
+                return self._runtime_limit_result(
+                    str(admission.get("user_message") or ""),
+                    reason=str(admission.get("reason") or "denied"),
+                )
+
+            governor = admission.get("governor")
+            lease_id = admission.get("lease_id")
+            cutoff_state: Dict[str, Any] = {}
+            result: Optional[Dict[str, Any]] = None
+
+            def _run():
+                approval_token = None
+                reset_current_session_key = None
+                unregister_gateway_notify = None
+                try:
+                    from tools.approval import (
+                        register_gateway_notify,
+                        reset_current_session_key as _reset_current_session_key,
+                        set_current_session_key,
+                        unregister_gateway_notify as _unregister_gateway_notify,
+                    )
+                    approval_token = set_current_session_key(session_id)
+                    reset_current_session_key = _reset_current_session_key
+                    unregister_gateway_notify = _unregister_gateway_notify
+                    register_gateway_notify(session_id, _on_approval_request)
+                except Exception as exc:
+                    logger.debug("[chat/start] Approval callbacks unavailable: %s", exc)
+
+                try:
+                    agent = self._create_agent(
+                        ephemeral_system_prompt=system_message,
+                        session_id=session_id,
+                        stream_delta_callback=_on_delta,
+                        tool_progress_callback=_on_tool_progress,
+                        tool_start_callback=_on_tool_start,
+                        tool_complete_callback=_on_tool_complete,
+                        thinking_callback=_on_thinking,
+                        reasoning_callback=_on_reasoning,
+                        status_callback=_on_status,
+                    )
+                    agent._session_db = db
+                    agent_ref[0] = agent
+                    self._install_runtime_step_callback(
+                        agent,
+                        governor=governor,
+                        lease_id=lease_id,
+                        agent_ref=agent_ref,
+                        cutoff_state=cutoff_state,
+                    )
+                    return agent.run_conversation(
+                        user_content,
+                        conversation_history=history,
+                        persist_user_message=persist_text,
+                    )
+                finally:
+                    if unregister_gateway_notify is not None:
+                        try:
+                            unregister_gateway_notify(session_id)
+                        except Exception as exc:
+                            logger.debug("[chat/start] Approval callback cleanup failed: %s", exc)
+                    if approval_token is not None and reset_current_session_key is not None:
+                        try:
+                            reset_current_session_key(approval_token)
+                        except Exception as exc:
+                            logger.debug("[chat/start] Approval session cleanup failed: %s", exc)
+
+            try:
+                future = asyncio.ensure_future(loop.run_in_executor(None, _run))
+                result = await self._await_runtime_guarded(
+                    future,
+                    governor=governor,
+                    lease_id=lease_id,
+                    agent_ref=agent_ref,
+                    cutoff_state=cutoff_state,
+                    cutoff_factory=lambda cutoff_result: cutoff_result,
+                )
+                return result
+            except Exception:
+                self._close_runtime_lease(governor, lease_id, result=result, error=True)
+                raise
+            finally:
+                if result is not None:
+                    self._close_runtime_lease(governor, lease_id, result=result)
+
+        async def _finish_stream():
+            try:
+                result = await _run_agent_task()
+                tools = _tool_map(result.get("messages") or [])
+                for item in result.get("messages") or []:
+                    if item.get("role") != "tool":
+                        continue
+                    tool_id = item.get("tool_call_id")
+                    tool_meta = tools.get(tool_id, {})
+                    _queue_event("tool_complete", {
+                        "session_id": session_id,
+                        "stream_id": stream_id,
+                        "run_id": run_id,
+                        "tool_call_id": tool_id,
+                        "tool_name": tool_meta.get("tool_name") or item.get("tool_name") or "unknown",
+                        "args": tool_meta.get("args"),
+                        "result_preview": _result_preview(item.get("content")),
+                    })
+                _queue_event("assistant.completed", {
+                    "session_id": session_id,
+                    "stream_id": stream_id,
+                    "run_id": run_id,
+                    "message_id": assistant_message_id,
+                    "content": result.get("final_response") or "",
+                    "completed": result.get("completed", False),
+                    "partial": result.get("partial", False),
+                    "interrupted": result.get("interrupted", False),
+                })
+                _queue_event("message.complete", {
+                    "session_id": session_id,
+                    "stream_id": stream_id,
+                    "run_id": run_id,
+                    "message_id": assistant_message_id,
+                    "text": result.get("final_response") or "",
+                    "status": "interrupted" if result.get("interrupted") else "complete",
+                })
+                _queue_event("run.completed", {
+                    "session_id": session_id,
+                    "stream_id": stream_id,
+                    "run_id": run_id,
+                    "message_id": assistant_message_id,
+                    "completed": result.get("completed", False),
+                    "partial": result.get("partial", False),
+                    "interrupted": result.get("interrupted", False),
+                    "api_calls": result.get("api_calls"),
+                })
+                _queue_event("done", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "state": "final"})
+            except Exception as exc:
+                logger.error("Backend-owned session stream failed for %s: %s", session_id, exc, exc_info=True)
+                _on_status("error", "stream failed")
+                _queue_event("error", {"session_id": session_id, "stream_id": stream_id, "run_id": run_id, "error": str(exc)})
+            finally:
+                def _mutate() -> None:
+                    stream_state["active"] = False
+                    stream_state["active_tools"] = []
+                    stream_state["pending_approval"] = None
+                    stream_state["completed_at"] = time.time()
+
+                _update_runtime(_mutate)
+                stream_q.put(None)
+
+        stream_state["task"] = asyncio.ensure_future(_finish_stream())
+
+        return web.json_response({"stream_id": stream_id, "session_id": session_id, "run_id": run_id})
+
+    async def _handle_chat_stream_status(self, request: "web.Request") -> "web.Response":
+        """GET /api/chat/stream/status — report whether a backend-owned chat stream is alive."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        stream_id = request.query.get("stream_id", "")
+        if not stream_id:
+            return web.json_response({"error": "stream_id required"}, status=400)
+        stream_state = self._chat_streams.get(stream_id)
+        if not stream_state:
+            return web.json_response({"active": False, "stream_id": stream_id})
+        return web.json_response({
+            "active": bool(stream_state.get("active")),
+            "stream_id": stream_id,
+            "session_id": stream_state.get("session_id"),
+            "run_id": stream_state.get("run_id"),
+        })
+
+    async def _handle_chat_stream_snapshot(self, request: "web.Request") -> "web.Response":
+        """GET /api/chat/stream/snapshot — return reconnect-safe live chat runtime state."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        stream_id = request.query.get("stream_id", "")
+        if not stream_id:
+            return web.json_response({"error": "stream_id required"}, status=400)
+        if len(stream_id) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", stream_id):
+            return web.json_response({"error": "invalid stream_id"}, status=400)
+        stream_state = self._chat_streams.get(stream_id)
+        if not stream_state:
+            return web.json_response({"error": "stream not found", "active": False, "stream_id": stream_id}, status=404)
+
+        def _snapshot() -> Dict[str, Any]:
+            return {
+                "active": bool(stream_state.get("active")),
+                "stream_id": stream_state.get("stream_id"),
+                "session_id": stream_state.get("session_id"),
+                "run_id": stream_state.get("run_id"),
+                "message_id": stream_state.get("message_id"),
+                "created_at": stream_state.get("created_at"),
+                "last_event_at": stream_state.get("last_event_at"),
+                "status": dict(stream_state.get("status") or {"kind": "status", "text": "running"}),
+                "thinking": str(stream_state.get("thinking") or ""),
+                "reasoning": str(stream_state.get("reasoning") or ""),
+                "assistant_content": str(stream_state.get("assistant_content") or ""),
+                "active_tools": [
+                    {
+                        "tool_id": str(tool.get("tool_id") or ""),
+                        "name": str(tool.get("name") or "tool"),
+                        "context": str(tool.get("context") or ""),
+                    }
+                    for tool in list(stream_state.get("active_tools") or [])
+                    if isinstance(tool, dict)
+                ],
+                "pending_approval": stream_state.get("pending_approval"),
+                "events": list(stream_state.get("events") or [])[-50:],
+            }
+
+        lock = stream_state.get("lock")
+        if lock is not None:
+            with lock:
+                payload = _snapshot()
+        else:
+            payload = _snapshot()
+        return web.json_response(payload)
+
+    async def _handle_chat_stream_attach(self, request: "web.Request") -> "web.StreamResponse":
+        """GET /api/chat/stream — attach to a backend-owned WebUI-style chat stream."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        stream_id = request.query.get("stream_id", "")
+        if not stream_id:
+            return web.json_response({"error": "stream_id required"}, status=400)
+        stream_state = self._chat_streams.get(stream_id)
+        if not stream_state:
+            return web.json_response({"error": "stream not found"}, status=404)
+
+        headers = {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+        if cors:
+            headers.update(cors)
+        response = web.StreamResponse(status=200, headers=headers)
+        await response.prepare(request)
+
+        stream_q = stream_state["queue"]
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                try:
+                    frame = await loop.run_in_executor(
+                        None,
+                        lambda: stream_q.get(timeout=CHAT_STREAM_HEARTBEAT_SECONDS),
+                    )
+                except _queue.Empty:
+                    if not stream_state.get("active"):
+                        break
+                    await response.write(_encode_dashboard_sse("heartbeat", {
+                        "stream_id": stream_id,
+                        "session_id": stream_state.get("session_id"),
+                        "run_id": stream_state.get("run_id"),
+                        "active": True,
+                        "elapsed_seconds": int(time.time() - float(stream_state.get("created_at") or time.time())),
+                    }))
+                    continue
+                if frame is None:
+                    break
+                await response.write(frame)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            logger.info("Chat stream client detached without cancelling stream %s", stream_id)
+        return response
+
+    async def _handle_chat_stream_cancel(self, request: "web.Request") -> "web.Response":
+        """POST /api/chat/cancel — cancel a backend-owned chat stream."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        stream_id = request.query.get("stream_id", "")
+        if not stream_id:
+            return web.json_response({"error": "stream_id required"}, status=400)
+        stream_state = self._chat_streams.get(stream_id)
+        if not stream_state:
+            return web.json_response({"ok": True, "cancelled": False, "stream_id": stream_id})
+        agent_ref = stream_state.get("agent_ref") or []
+        agent = agent_ref[0] if agent_ref else None
+        if agent is not None:
+            try:
+                agent.interrupt("stream cancelled")
+            except Exception as exc:
+                logger.debug("Failed to interrupt chat stream %s: %s", stream_id, exc)
+        stream_state["active"] = False
+        return web.json_response({"ok": True, "cancelled": True, "stream_id": stream_id})
+
+    async def _handle_approval_respond(self, request: "web.Request") -> "web.Response":
+        """POST /api/approval/respond — resolve one blocking approval request."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        session_id = body.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return web.json_response({"error": "session_id is required"}, status=400)
+        session_id = session_id.strip()
+
+        choice = body.get("choice", "deny")
+        if choice not in ("once", "session", "always", "deny"):
+            return web.json_response({"error": f"Invalid choice: {choice}"}, status=400)
+
+        approval_id = body.get("approval_id")
+        if approval_id is not None and not isinstance(approval_id, str):
+            return web.json_response({"error": "approval_id must be a string"}, status=400)
+        approval_id = approval_id.strip() if isinstance(approval_id, str) and approval_id.strip() else None
+
+        try:
+            from tools.approval import resolve_gateway_approval
+        except ImportError:
+            return web.json_response({"error": "Approval system unavailable"}, status=503)
+
+        resolved = resolve_gateway_approval(session_id, choice, resolve_all=False, approval_id=approval_id)
+        return web.json_response({"ok": True, "choice": choice, "resolved": resolved})
+
+    async def _handle_get_memory(self, request: "web.Request") -> "web.Response":
+        """GET /api/memory — read current memory state."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        target = (request.query.get("target") or "all").strip().lower()
+        if target not in {"all", "memory", "user"}:
+            return web.json_response({"error": "target must be one of: all, memory, user"}, status=400)
+
+        store = self._get_memory_store()
+        store.load_from_disk()
+        targets = []
+        if target in {"all", "memory"}:
+            targets.append({
+                "target": "memory",
+                "entries": store.memory_entries,
+                "entry_count": len(store.memory_entries),
+            })
+        if target in {"all", "user"}:
+            targets.append({
+                "target": "user",
+                "entries": store.user_entries,
+                "entry_count": len(store.user_entries),
+            })
+        return web.json_response({"targets": targets})
+
+    async def _handle_add_memory(self, request: "web.Request") -> "web.Response":
+        """POST /api/memory — add a memory entry."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        target = str(body.get("target") or "").strip().lower()
+        content = str(body.get("content") or "")
+        if target not in {"memory", "user"}:
+            return web.json_response({"error": "target must be 'memory' or 'user'"}, status=400)
+        result = self._get_memory_store().add(target, content)
+        status = 200 if result.get("success") else 400
+        return web.json_response(result, status=status)
+
+    async def _handle_replace_memory(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/memory — replace a memory entry."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        target = str(body.get("target") or "").strip().lower()
+        old_text = str(body.get("old_text") or "")
+        content = str(body.get("content") or "")
+        if target not in {"memory", "user"}:
+            return web.json_response({"error": "target must be 'memory' or 'user'"}, status=400)
+        result = self._get_memory_store().replace(target, old_text, content)
+        status = 200 if result.get("success") else 400
+        return web.json_response(result, status=status)
+
+    async def _handle_delete_memory(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/memory — delete a memory entry."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        target = str(body.get("target") or "").strip().lower()
+        old_text = str(body.get("old_text") or "")
+        if target not in {"memory", "user"}:
+            return web.json_response({"error": "target must be 'memory' or 'user'"}, status=400)
+        result = self._get_memory_store().remove(target, old_text)
+        status = 200 if result.get("success") else 400
+        return web.json_response(result, status=status)
+
+    async def _handle_list_skills(self, request: "web.Request") -> "web.Response":
+        """GET /api/skills — list skills."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        category = (request.query.get("category") or "").strip() or None
+        return web.json_response(json.loads(skills_list(category=category)))
+
+    async def _handle_skill_categories(self, request: "web.Request") -> "web.Response":
+        """GET /api/skills/categories — list skill categories."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return web.json_response(json.loads(skills_categories()))
+
+    async def _handle_view_skill(self, request: "web.Request") -> "web.Response":
+        """GET /api/skills/{name} — fetch skill details."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        name = request.match_info["name"]
+        file_path = (request.query.get("file_path") or "").strip() or None
+        return web.json_response(json.loads(skill_view(name, file_path=file_path)))
+
+    async def _handle_get_config(self, request: "web.Request") -> "web.Response":
+        """GET /api/config — fetch the current config."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        config = load_config()
+        current = self._current_model_settings(config)
+        return web.json_response({
+            "model": current["model"],
+            "provider": current["provider"],
+            "api_mode": current["api_mode"],
+            "base_url": current["base_url"],
+            "config": config,
+        })
+
+    async def _handle_update_config(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/config — update model/provider/base_url settings."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        config = load_config()
+        model_cfg = config.get("model")
+        if isinstance(model_cfg, dict):
+            updated_model_cfg = dict(model_cfg)
+        elif isinstance(model_cfg, str) and model_cfg.strip():
+            updated_model_cfg = {"default": model_cfg.strip()}
+        else:
+            updated_model_cfg = {}
+
+        if "model" in body:
+            updated_model_cfg["default"] = str(body.get("model") or "").strip()
+        if "provider" in body:
+            updated_model_cfg["provider"] = str(body.get("provider") or "").strip()
+        if "base_url" in body:
+            updated_model_cfg["base_url"] = str(body.get("base_url") or "").strip()
+
+        config["model"] = updated_model_cfg
+        try:
+            save_config(config)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        current = self._current_model_settings(config)
+        return web.json_response({
+            "ok": True,
+            "model": current["model"],
+            "provider": current["provider"],
+            "base_url": current["base_url"],
+        })
+
+    async def _handle_available_models(self, request: "web.Request") -> "web.Response":
+        """GET /api/available-models — list provider models and available providers."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        config = load_config()
+        current = self._current_model_settings(config)
+        provider = (request.query.get("provider") or current["provider"] or "openrouter").strip()
+        models = [
+            {"id": model_id, "description": description}
+            for model_id, description in curated_models_for_provider(provider)
+        ]
+        providers = list_available_providers()
+        return web.json_response({"provider": provider, "models": models, "providers": providers})
+
+    # ------------------------------------------------------------------
+    # Upstream HTTP Handlers
     # ------------------------------------------------------------------
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
@@ -1580,17 +3289,26 @@ class APIServerAdapter(BasePlatformAdapter):
         )
 
     async def _handle_session_chat_stream(self, request: "web.Request") -> "web.StreamResponse":
-        """POST /api/sessions/{session_id}/chat/stream — SSE wrapper over _run_agent."""
+        """POST /api/sessions/{session_id}/chat/stream — stream a session chat turn over SSE.
+
+        This composes the upstream session-API streaming contract (multimodal
+        payload normalization, _run_agent patchability, session-key headers)
+        with the HermesOS fork's gateway approval notifications.
+        """
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+
         session_id = request.match_info["session_id"]
-        _, err = self._get_existing_session_or_404(session_id)
-        if err:
-            return err
+        db = self._get_session_db()
+        session = self._normalize_session_record(db.get_session(session_id))
+        if session is None:
+            db.ensure_session(session_id, source="web")
+            session = self._normalize_session_record(db.get_session(session_id)) or {}
+
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -1638,11 +3356,37 @@ class APIServerAdapter(BasePlatformAdapter):
             if event_type == "reasoning.available":
                 _enqueue("tool.progress", {"message_id": message_id, "tool_name": tool_name or "_thinking", "delta": preview or ""})
             elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
-                event_name = event_type.replace("tool.", "tool.")
-                _enqueue(event_name, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+                _enqueue(event_type, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+            elif event_type == "_thinking":
+                _enqueue("tool.progress", {"message_id": message_id, "tool_name": "_thinking", "delta": preview or ""})
+
+        def _on_approval_request(approval_data):
+            if not isinstance(approval_data, dict):
+                approval_data = {"description": str(approval_data)}
+            payload = {
+                "message_id": message_id,
+                "approval_id": str(approval_data.get("approval_id") or approval_data.get("id") or ""),
+                "command": str(approval_data.get("command") or "")[:8000],
+                "description": str(approval_data.get("description") or "Command approval required")[:1000],
+                "pattern_key": str(approval_data.get("pattern_key") or ""),
+                "pattern_keys": approval_data.get("pattern_keys") if isinstance(approval_data.get("pattern_keys"), list) else [],
+            }
+            _enqueue("approval", payload)
 
         async def _run_and_signal() -> None:
+            unregister_gateway_notify = None
             try:
+                from tools.approval import (
+                    register_gateway_notify,
+                    unregister_gateway_notify as _unregister_gateway_notify,
+                )
+                register_gateway_notify(session_id, _on_approval_request)
+                unregister_gateway_notify = _unregister_gateway_notify
+            except Exception as exc:
+                logger.debug("[chat/stream] Approval callbacks unavailable: %s", exc)
+
+            try:
+                await queue.put(_event_payload("session.created", {"title": session.get("title") or "New Chat"}))
                 await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
                 history = self._conversation_history_for_session(session_id)
@@ -1657,19 +3401,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
-                turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
                 await queue.put(_event_payload("assistant.completed", {
                     "session_id": effective_session_id,
                     "message_id": message_id,
                     "content": final_response,
-                    "completed": True,
-                    "partial": False,
-                    "interrupted": False,
+                    "completed": bool(result.get("completed", True)) if isinstance(result, dict) else True,
+                    "partial": bool(result.get("partial", False)) if isinstance(result, dict) else False,
+                    "interrupted": bool(result.get("interrupted", False)) if isinstance(result, dict) else False,
                 }))
+                turn_messages = self._turn_transcript_messages(history, user_message, result) if isinstance(result, dict) else []
                 await queue.put(_event_payload("run.completed", {
                     "session_id": effective_session_id,
                     "message_id": message_id,
-                    "completed": True,
+                    "completed": bool(result.get("completed", True)) if isinstance(result, dict) else True,
                     "messages": turn_messages,
                     "usage": usage,
                 }))
@@ -1677,6 +3421,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 logger.exception("[api_server] session chat stream failed")
                 await queue.put(_event_payload("error", {"message": str(exc)}))
             finally:
+                if unregister_gateway_notify is not None:
+                    try:
+                        unregister_gateway_notify(session_id)
+                    except Exception as exc:
+                        logger.debug("[chat/stream] Approval callback cleanup failed: %s", exc)
                 await queue.put(_event_payload("done", {}))
                 await queue.put(None)
 
@@ -1691,29 +3440,31 @@ class APIServerAdapter(BasePlatformAdapter):
         headers = {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
             "X-Hermes-Session-Id": session_id,
         }
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+        if cors:
+            headers.update(cors)
+
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
-        last_write = time.monotonic()
         try:
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS)
                 except asyncio.TimeoutError:
                     await response.write(b": keepalive\n\n")
-                    last_write = time.monotonic()
                     continue
                 if item is None:
                     break
                 name, payload = item
-                data = json.dumps(payload, ensure_ascii=False)
-                await response.write(f"event: {name}\ndata: {data}\n\n".encode("utf-8"))
-                last_write = time.monotonic()
-        except (asyncio.CancelledError, ConnectionResetError):
+                await response.write(f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8"))
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             task.cancel()
             raise
         except Exception as exc:
@@ -1910,7 +3661,11 @@ class APIServerAdapter(BasePlatformAdapter):
             # The structured callbacks are strictly richer (they carry the
             # tool_call id), so they own the chat-completions SSE channel.
             agent_ref = [None]
-            agent_task = asyncio.ensure_future(self._run_agent(
+            agent_task = asyncio.ensure_future(self._run_agent_with_runtime(
+                surface="chat_completions_stream",
+                runtime_session_id=session_id,
+                source_message_id=completion_id,
+                message_preview=str(user_message),
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
@@ -1933,7 +3688,11 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
         async def _compute_completion():
-            return await self._run_agent(
+            return await self._run_agent_with_runtime(
+                surface="chat_completions",
+                runtime_session_id=session_id,
+                source_message_id=completion_id,
+                message_preview=str(user_message),
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
@@ -2138,11 +3897,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            err_msg = None
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
+                if isinstance(result, dict) and "error" in result:
+                    err_msg = str(result["error"])
             except Exception as exc:
+                err_msg = str(exc)
                 logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
+
+            if err_msg:
+                # Provide a visual cue that the agent crashed natively in the chat
+                error_delta = f"\n\n[Agent Error: {err_msg}]"
+                await _emit(error_delta)
 
             # Finish chunk
             finish_chunk = {
@@ -2905,6 +4673,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # agent runs so frontends can render text deltas and tool
             # calls in real time.  See _write_sse_responses for details.
             import queue as _q
+            response_id = f"resp_{uuid.uuid4().hex[:28]}"
             _stream_q: _q.Queue = _q.Queue()
 
             def _on_delta(delta):
@@ -2941,7 +4710,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 }))
 
             agent_ref = [None]
-            agent_task = asyncio.ensure_future(self._run_agent(
+            agent_task = asyncio.ensure_future(self._run_agent_with_runtime(
+                surface="responses_stream",
+                runtime_session_id=session_id,
+                source_message_id=response_id,
+                message_preview=str(user_message),
                 user_message=user_message,
                 conversation_history=conversation_history,
                 ephemeral_system_prompt=instructions,
@@ -2957,7 +4730,6 @@ class APIServerAdapter(BasePlatformAdapter):
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
 
-            response_id = f"resp_{uuid.uuid4().hex[:28]}"
             model_name = body.get("model", self._model_name)
             created_at = int(time.time())
 
@@ -2979,7 +4751,11 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         async def _compute_response():
-            return await self._run_agent(
+            return await self._run_agent_with_runtime(
+                surface="responses",
+                runtime_session_id=session_id,
+                source_message_id=f"resp_{uuid.uuid4().hex[:28]}",
+                message_preview=str(user_message),
                 user_message=user_message,
                 conversation_history=conversation_history,
                 ephemeral_system_prompt=instructions,
@@ -3494,6 +5270,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
+        runtime_governor=None,
+        runtime_lease_id: Optional[str] = None,
         gateway_session_key: Optional[str] = None,
     ) -> tuple:
         """
@@ -3508,8 +5286,23 @@ class APIServerAdapter(BasePlatformAdapter):
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        effective_agent_ref = agent_ref if agent_ref is not None else [None]
+        cutoff_state: Dict[str, Any] = {"cutoff": False, "message": "", "reason": ""}
 
         def _run():
+            approval_token = None
+            reset_current_session_key = None
+            if session_id:
+                try:
+                    from tools.approval import (
+                        reset_current_session_key as _reset_current_session_key,
+                        set_current_session_key,
+                    )
+                    approval_token = set_current_session_key(session_id)
+                    reset_current_session_key = _reset_current_session_key
+                except Exception as exc:
+                    logger.debug("[api_server] approval session binding unavailable: %s", exc)
+
             from gateway.session_context import clear_session_vars, set_session_vars
 
             tokens = set_session_vars(
@@ -3528,14 +5321,29 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                 )
-                if agent_ref is not None:
-                    agent_ref[0] = agent
-                effective_task_id = session_id or str(uuid.uuid4())
-                result = agent.run_conversation(
-                    user_message=user_message,
-                    conversation_history=conversation_history,
-                    task_id=effective_task_id,
+                effective_agent_ref[0] = agent
+                self._install_runtime_step_callback(
+                    agent,
+                    governor=runtime_governor,
+                    lease_id=runtime_lease_id,
+                    agent_ref=effective_agent_ref,
+                    cutoff_state=cutoff_state,
                 )
+                effective_task_id = session_id or str(uuid.uuid4())
+                try:
+                    result = agent.run_conversation(
+                        user_message=user_message,
+                        conversation_history=conversation_history,
+                        task_id=effective_task_id,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword" not in str(exc) and "required positional" not in str(exc):
+                        raise
+                    result = agent.run_conversation(
+                        user_message,
+                        conversation_history=conversation_history,
+                        persist_user_message=True,
+                    )
                 usage = {
                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -3550,8 +5358,20 @@ class APIServerAdapter(BasePlatformAdapter):
                 return result, usage
             finally:
                 clear_session_vars(tokens)
+                if approval_token is not None and reset_current_session_key is not None:
+                    try:
+                        reset_current_session_key(approval_token)
+                    except Exception as exc:
+                        logger.debug("[api_server] approval session cleanup failed: %s", exc)
 
-        return await loop.run_in_executor(None, _run)
+        future = asyncio.ensure_future(loop.run_in_executor(None, _run))
+        return await self._await_runtime_guarded(
+            future,
+            governor=runtime_governor,
+            lease_id=runtime_lease_id,
+            agent_ref=effective_agent_ref,
+            cutoff_state=cutoff_state,
+        )
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -4196,6 +6016,23 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
             self._app.router.add_post("/v1/runs/{run_id}/approval", self._handle_run_approval)
             self._app.router.add_post("/v1/runs/{run_id}/stop", self._handle_stop_run)
+            # Dashboard REST API extensions not covered by the native session-control routes above.
+            self._app.router.add_get("/api/sessions/search", self._handle_search_sessions)
+            self._app.router.add_post("/api/sessions/{session_id}/chat/start", self._handle_session_chat_start)
+            self._app.router.add_get("/api/chat/stream", self._handle_chat_stream_attach)
+            self._app.router.add_get("/api/chat/stream/snapshot", self._handle_chat_stream_snapshot)
+            self._app.router.add_get("/api/chat/stream/status", self._handle_chat_stream_status)
+            self._app.router.add_post("/api/chat/cancel", self._handle_chat_stream_cancel)
+            self._app.router.add_post("/api/approval/respond", self._handle_approval_respond)
+            self._app.router.add_get("/api/memory", self._handle_get_memory)
+            self._app.router.add_post("/api/memory", self._handle_add_memory)
+            self._app.router.add_patch("/api/memory", self._handle_replace_memory)
+            self._app.router.add_delete("/api/memory", self._handle_delete_memory)
+            self._app.router.add_get("/api/skills/categories", self._handle_skill_categories)
+            self._app.router.add_get("/api/skills/{name}", self._handle_view_skill)
+            self._app.router.add_get("/api/config", self._handle_get_config)
+            self._app.router.add_patch("/api/config", self._handle_update_config)
+            self._app.router.add_get("/api/available-models", self._handle_available_models)
             # Store the adapter after native routes are registered. Local Hermes-Relay
             # bootstrap shims use this key as a feature-detection hook; registering
             # native routes first lets those shims no-op instead of shadowing the

@@ -139,9 +139,9 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
     is_local_endpoint,
 )
-from agent.usage_pricing import normalize_usage
-# Re-exported for tests that monkeypatch these symbols on run_agent.
 from agent.context_compressor import ContextCompressor  # noqa: F401
+from agent.subdirectory_hints import SubdirectoryHintTracker
+from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff  # noqa: F401
 from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock.patch("run_agent.<name>") / from run_agent import <name>
     DEFAULT_AGENT_IDENTITY,
@@ -149,8 +149,14 @@ from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock
     build_context_files_prompt,
     build_environment_hints,
     build_nous_subscription_prompt,
+    build_bankr_wallet_prompt,
     load_soul_md,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
 )
+from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
 from agent.message_sanitization import (  # noqa: F401
     _SURROGATE_RE,
@@ -267,14 +273,15 @@ def _pool_may_recover_from_rate_limit(
 
 def _qwen_portal_headers() -> dict:
     """Return default HTTP headers required by Qwen Portal API."""
-    import platform as _plat
-
-    _ua = f"QwenCode/{_QWEN_CODE_VERSION} ({_plat.system().lower()}; {_plat.machine()})"
+    _ua = "QwenCode/0.11.1 (linux; x64)"
     return {
         "User-Agent": _ua,
         "X-DashScope-CacheControl": "enable",
         "X-DashScope-UserAgent": _ua,
         "X-DashScope-AuthType": "qwen-oauth",
+        "X-Stainless-Arch": "x64",
+        "X-Stainless-Lang": "js",
+        "X-Stainless-Os": "Linux",
     }
 
 
@@ -3820,7 +3827,11 @@ class AIAgent:
             self._client_kwargs["default_headers"] = copilot_default_headers()
         elif base_url_host_matches(base_url, "api.kimi.com"):
             self._client_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
-        elif base_url_host_matches(base_url, "portal.qwen.ai"):
+        elif (
+            base_url_host_matches(base_url, "portal.qwen.ai")
+            or base_url_host_matches(base_url, "dashscope.aliyuncs.com")
+            or getattr(self, "provider", "") == "qwen-oauth"
+        ):
             self._client_kwargs["default_headers"] = _qwen_portal_headers()
         elif base_url_host_matches(base_url, "chatgpt.com"):
             from agent.auxiliary_client import _codex_cloudflare_headers
@@ -4401,6 +4412,9 @@ class AIAgent:
                 str(msg.get("role", "user") or "user"),
             )
         return transformed
+
+    def _is_qwen_portal_url(self) -> bool:
+        return "portal.qwen.ai" in self._base_url_lower or "dashscope.aliyuncs.com" in self._base_url_lower
 
     def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
         """Strip native image parts when the active model lacks vision.

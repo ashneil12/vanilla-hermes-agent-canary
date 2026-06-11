@@ -75,7 +75,9 @@ describe('onboarding Picker', () => {
     expect(screen.getByText('Anthropic API Key')).toBeTruthy()
     expect(screen.getByText('OpenAI OAuth (ChatGPT)')).toBeTruthy()
     expect(screen.queryByText('Other sign-in options')).toBeNull()
-    expect(screen.queryByText('Recommended')).toBeNull()
+    // HermesOS: the Venice card holds the Recommended slot at the top of the
+    // picker unconditionally, so the badge is present even when Nous is absent.
+    expect(screen.getByText('Recommended')).toBeTruthy()
   })
 
   it('offers "choose later" on first run and persists the skip', () => {

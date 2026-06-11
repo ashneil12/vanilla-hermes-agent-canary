@@ -15,6 +15,7 @@ from tools.skills_tool import (
     _get_category_from_path,
     _find_all_skills,
     skill_matches_platform,
+    skills_categories,
     skills_list,
     skill_view,
     MAX_DESCRIPTION_LENGTH,
@@ -233,6 +234,38 @@ class TestFindAllSkills:
         assert len(skills) == 1
         assert skills[0]["category"] == "mlops"
 
+    def test_source_marks_bundled_when_in_manifest(self, tmp_path):
+        """Skills listed in .bundled_manifest are tagged source='bundled'."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "from-bundle")
+            _make_skill(tmp_path, "user-authored")
+            (tmp_path / ".bundled_manifest").write_text(
+                "from-bundle:abc123\n",
+                encoding="utf-8",
+            )
+            skills = {s["name"]: s for s in _find_all_skills()}
+        assert skills["from-bundle"]["source"] == "bundled"
+        assert skills["user-authored"]["source"] == "custom"
+
+    def test_source_defaults_to_custom_without_manifest(self, tmp_path):
+        """When the manifest is missing, every skill is source='custom'."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "lone")
+            skills = _find_all_skills()
+        assert len(skills) == 1
+        assert skills[0]["source"] == "custom"
+
+    def test_source_handles_v1_manifest_format(self, tmp_path):
+        """Pre-v2 manifest entries (no hash) still mark skills as bundled."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "legacy")
+            (tmp_path / ".bundled_manifest").write_text(
+                "legacy\n",  # v1 format: name only, no colon
+                encoding="utf-8",
+            )
+            skills = _find_all_skills()
+        assert skills[0]["source"] == "bundled"
+
     def test_description_from_body_when_missing(self, tmp_path):
         """If no description in frontmatter, first non-header line is used."""
         skill_dir = tmp_path / "no-desc"
@@ -306,6 +339,36 @@ class TestFindAllSkills:
 
         assert [s["name"] for s in skills] == ["knowledge-brain"]
         assert skills[0]["category"] == "linked"
+
+
+# ---------------------------------------------------------------------------
+# skills_categories
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsCategories:
+    def test_lists_categories_with_counts_and_descriptions(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            qa_dir = _make_skill(tmp_path, "dogfood", category="qa").parent
+            (qa_dir / "DESCRIPTION.md").write_text(
+                "---\n"
+                "description: Quality assurance workflows.\n"
+                "---\n"
+            )
+            _make_skill(tmp_path, "lint", category="qa")
+            _make_skill(tmp_path, "deploy", category="devops")
+            raw = skills_categories()
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["categories"] == [
+            {"name": "devops", "skill_count": 1},
+            {
+                "name": "qa",
+                "skill_count": 2,
+                "description": "Quality assurance workflows.",
+            },
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +936,33 @@ class TestFindAllSkillsSecureSetup:
 
 
 class TestSkillViewPrerequisites:
+    def test_skill_view_resolves_frontmatter_name_when_directory_differs(self, tmp_path):
+        skill_dir = tmp_path / "bankr" / "bankr-twitter-agent"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            """\
+---
+name: twitter-agent
+description: Bankr Twitter agent.
+---
+
+# Twitter Agent
+
+Use Bankr Twitter tools.
+""",
+            encoding="utf-8",
+        )
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            listed = json.loads(skills_list())
+            raw = skill_view("twitter-agent")
+
+        result = json.loads(raw)
+        assert listed["skills"][0]["name"] == "twitter-agent"
+        assert result["success"] is True
+        assert result["name"] == "twitter-agent"
+        assert "Use Bankr Twitter tools." in result["content"]
+
     def test_legacy_prerequisites_expose_required_env_setup_metadata(
         self, tmp_path, monkeypatch
     ):

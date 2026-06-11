@@ -242,7 +242,8 @@ class SearchResult:
     total_count: int = 0
     truncated: bool = False
     error: Optional[str] = None
-    
+    note: Optional[str] = None
+
     def to_dict(self) -> dict:
         result = {"total_count": self.total_count}
         if self.matches:
@@ -258,6 +259,8 @@ class SearchResult:
             result["truncated"] = True
         if self.error:
             result["error"] = self.error
+        if self.note:
+            result["note"] = self.note
         return result
 
 
@@ -2022,24 +2025,40 @@ class ShellFileOperations(FileOperations):
             glob_pattern = pattern
 
         fetch_limit = limit + offset
-        # Try mtime-sorted first (rg 13+); fall back to unsorted if not supported.
-        cmd_sorted = (
-            f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} "
-            f"{self._escape_shell_arg(path)} 2>/dev/null "
-            f"| head -n {fetch_limit}"
-        )
-        result = self._exec(cmd_sorted, timeout=60)
-        all_files = [f for f in result.stdout.strip().split('\n') if f]
+        glob_arg = self._escape_shell_arg(glob_pattern)
+        path_arg = self._escape_shell_arg(path)
 
-        if not all_files:
-            # --sortr may have failed on older rg; retry without it.
-            cmd_plain = (
-                f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
-                f"{self._escape_shell_arg(path)} 2>/dev/null "
-                f"| head -n {fetch_limit}"
+        def _list_files(extra_flags: str) -> List[str]:
+            # Try mtime-sorted first (rg 13+); fall back to unsorted if the
+            # installed rg is too old to support --sortr.
+            cmd_sorted = (
+                f"rg --files --sortr=modified {extra_flags} -g {glob_arg} "
+                f"{path_arg} 2>/dev/null | head -n {fetch_limit}"
             )
-            result = self._exec(cmd_plain, timeout=60)
-            all_files = [f for f in result.stdout.strip().split('\n') if f]
+            out = self._exec(cmd_sorted, timeout=60).stdout
+            files = [f for f in out.strip().split('\n') if f]
+            if not files:
+                cmd_plain = (
+                    f"rg --files {extra_flags} -g {glob_arg} "
+                    f"{path_arg} 2>/dev/null | head -n {fetch_limit}"
+                )
+                out = self._exec(cmd_plain, timeout=60).stdout
+                files = [f for f in out.strip().split('\n') if f]
+            return files
+
+        all_files = _list_files("")
+
+        # rg --files also respects .gitignore, so a path pointed at a venv /
+        # site-packages / build dir can come back empty -- e.g. the `*`
+        # .gitignore that `python -m venv` writes ignores the whole tree. Retry
+        # with VCS ignore rules disabled when the default pass finds nothing.
+        # --no-ignore-vcs disables .gitignore but keeps .ignore/.rgignore and
+        # hidden-dir exclusion, so the #1558 skills-hub-cache prompt-injection
+        # fix (an `.ignore` of `*`) is preserved even on explicit .hub searches.
+        broadened = False
+        if not all_files:
+            all_files = _list_files("--no-ignore-vcs")
+            broadened = bool(all_files)
 
         page = all_files[offset:offset + limit]
 
@@ -2047,6 +2066,11 @@ class ShellFileOperations(FileOperations):
             files=page,
             total_count=len(all_files),
             truncated=len(all_files) >= fetch_limit,
+            note=(
+                "No files under ripgrep's default filters; retried with "
+                "--no-ignore-vcs (.gitignore rules disabled). Results may "
+                "include git-ignored files (e.g. packages under a venv)."
+            ) if broadened else None,
         )
     
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
@@ -2069,39 +2093,44 @@ class ShellFileOperations(FileOperations):
     def _search_with_rg(self, pattern: str, path: str, file_glob: Optional[str],
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Search using ripgrep."""
-        cmd_parts = ["rg", "--line-number", "--no-heading", "--with-filename"]
-        
-        # Add context if requested
-        if context > 0:
-            cmd_parts.extend(["-C", str(context)])
-        
-        # Add file glob filter (must be quoted to prevent shell expansion)
-        if file_glob:
-            cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
-        
-        # Output mode handling
-        if output_mode == "files_only":
-            cmd_parts.append("-l")  # Files only
-        elif output_mode == "count":
-            cmd_parts.append("-c")  # Count per file
-        
-        # Add pattern and path
-        cmd_parts.append(self._escape_shell_arg(pattern))
-        cmd_parts.append(self._escape_shell_arg(path))
-        
-        # Fetch extra rows so we can report the true total before slicing.
-        # For context mode, rg emits separator lines ("--") between groups,
-        # so we grab generously and filter in Python.
         fetch_limit = limit + offset + 200 if context > 0 else limit + offset
-        cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
-        
-        # `set -o pipefail` so rg's exit status propagates through `| head`.
-        # Without it the pipeline reports head's status (0), masking rg's
-        # error code (2) and making the guard below unreachable. rg handles a
-        # truncating head cleanly (exit 0 on SIGPIPE), so pipefail does not
-        # introduce false errors on a successful-but-truncated search.
-        cmd = "set -o pipefail; " + " ".join(cmd_parts)
-        result = self._exec(cmd, timeout=60)
+
+        def _run(extra_flags: List[str]):
+            cmd_parts = ["rg", "--line-number", "--no-heading", "--with-filename"]
+            cmd_parts.extend(extra_flags)
+
+            # Add context if requested
+            if context > 0:
+                cmd_parts.extend(["-C", str(context)])
+
+            # Add file glob filter (must be quoted to prevent shell expansion)
+            if file_glob:
+                cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
+
+            # Output mode handling
+            if output_mode == "files_only":
+                cmd_parts.append("-l")  # Files only
+            elif output_mode == "count":
+                cmd_parts.append("-c")  # Count per file
+
+            # Add pattern and path
+            cmd_parts.append(self._escape_shell_arg(pattern))
+            cmd_parts.append(self._escape_shell_arg(path))
+
+            # Fetch extra rows so we can report the true total before slicing.
+            # For context mode, rg emits separator lines ("--") between groups,
+            # so we grab generously and filter in Python.
+            cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
+
+            # `set -o pipefail` so rg's exit status propagates through `| head`.
+            # Without it the pipeline reports head's status (0), masking rg's
+            # error code (2) and making the guard below unreachable. rg handles a
+            # truncating head cleanly (exit 0 on SIGPIPE), so pipefail does not
+            # introduce false errors on a successful-but-truncated search.
+            cmd = "set -o pipefail; " + " ".join(cmd_parts)
+            return self._exec(cmd, timeout=60)
+
+        result = _run([])
 
         # _exec merges stderr into stdout (stderr=subprocess.STDOUT), so rg's
         # diagnostic lines ("rg: <file>: <error>", "rg: regex parse error:")
@@ -2117,6 +2146,29 @@ class ShellFileOperations(FileOperations):
             error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
 
+        # ripgrep respects .gitignore by default, which silently returns zero
+        # matches when the search is pointed at an installed package, a venv, or
+        # a build dir -- e.g. `python -m venv` writes a `.gitignore` containing
+        # `*` at the venv root, so every file under it is ignored. When the
+        # default pass finds nothing, retry with VCS ignore rules disabled so
+        # explicit-path searches still work. --no-ignore-vcs disables .gitignore
+        # but KEEPS .ignore/.rgignore respected and hidden dirs excluded, so the
+        # #1558 fix (an `.ignore` of `*` in the skills-hub cache) still hides the
+        # adversarial catalog -- even when that path is searched explicitly.
+        broadened = False
+        if result.exit_code != 2 and not payload.strip():
+            retry_result = _run(["--no-ignore-vcs"])
+            _retry_diag, retry_payload = _split_tool_diagnostics(retry_result.stdout)
+            if retry_result.exit_code != 2 and retry_payload.strip():
+                payload = retry_payload
+                broadened = True
+
+        broaden_note = (
+            "No matches under ripgrep's default filters; retried with "
+            "--no-ignore-vcs (.gitignore rules disabled). Results may include "
+            "git-ignored files (e.g. packages installed under a venv)."
+        ) if broadened else None
+
         # Parse the diagnostic-free payload so error text never becomes a match.
         stdout = payload
         # Parse results based on output mode
@@ -2124,8 +2176,8 @@ class ShellFileOperations(FileOperations):
             all_files = [f for f in stdout.strip().split('\n') if f]
             total = len(all_files)
             page = all_files[offset:offset + limit]
-            return SearchResult(files=page, total_count=total)
-        
+            return SearchResult(files=page, total_count=total, note=broaden_note)
+
         elif output_mode == "count":
             counts = {}
             for line in stdout.strip().split('\n'):
@@ -2136,8 +2188,8 @@ class ShellFileOperations(FileOperations):
                             counts[parts[0]] = int(parts[1])
                         except ValueError:
                             pass
-            return SearchResult(counts=counts, total_count=sum(counts.values()))
-        
+            return SearchResult(counts=counts, total_count=sum(counts.values()), note=broaden_note)
+
         else:
             # Parse content matches and context lines.
             # rg match lines:   "file:lineno:content"  (colon separator)
@@ -2150,7 +2202,7 @@ class ShellFileOperations(FileOperations):
             for line in stdout.strip().split('\n'):
                 if not line or line == "--":
                     continue
-                
+
                 # Try match line first (colon-separated: file:line:content)
                 m = _match_re.match(line)
                 if m:
@@ -2160,7 +2212,7 @@ class ShellFileOperations(FileOperations):
                         content=m.group(4)[:500]
                     ))
                     continue
-                
+
                 # Try context line (dash-separated: file-line-content)
                 # Only attempt if context was requested to avoid false positives
                 if context > 0:
@@ -2171,13 +2223,14 @@ class ShellFileOperations(FileOperations):
                             line_number=parsed[1],
                             content=parsed[2][:500]
                         ))
-            
+
             total = len(matches)
             page = matches[offset:offset + limit]
             return SearchResult(
                 matches=page,
                 total_count=total,
-                truncated=total > offset + limit
+                truncated=total > offset + limit,
+                note=broaden_note
             )
     
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],

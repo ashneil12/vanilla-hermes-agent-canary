@@ -83,6 +83,7 @@ class TestBundledPluginsRegister:
             "parallel",
             "searxng",
             "tavily",
+            "venice",  # hermes-fork: Venice augment/search provider
             "xai",
         ]
 

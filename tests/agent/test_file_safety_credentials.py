@@ -156,7 +156,13 @@ def test_read_file_tool_blocks_relative_path_under_terminal_cwd(
 
     out = json.loads(ft.read_file_tool("auth.json"))
     assert "error" in out
-    assert "credential store" in out["error"]
+    # hermes-fork: read_file_tool hits the fork's stronger _check_credential_path
+    # gate (tools/file_tools.py) first, which blocks auth.json by name with its
+    # own elevation-aware wording ("credential file … terminal tool with sudo")
+    # before upstream's file_safety "credential store" path. Same security
+    # property (read refused); assert the shared "credential" token, not the
+    # upstream-specific phrase.
+    assert "credential" in out["error"]
 
 
 def test_read_file_tool_blocks_nested_google_oauth_path(

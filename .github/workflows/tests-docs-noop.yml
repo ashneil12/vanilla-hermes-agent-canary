@@ -1,0 +1,46 @@
+# Companion no-op to tests.yml.
+#
+# Branch protection on main REQUIRES the contexts "test (1)".."test (6)"
+# (GitHub Actions app) with enforce_admins=true, but tests.yml skips
+# entirely on docs/markdown-only PRs via paths-ignore. Without this file,
+# such PRs can never report the required contexts and can never merge
+# (hit 2026-06-10 by PR #77, which needed enforce_admins temporarily
+# toggled off). This is GitHub's documented fix ("Handling skipped but
+# required checks"): a same-named workflow/job/matrix that triggers on
+# the INVERSE paths and succeeds instantly, so doc-only PRs get green
+# "test (N)" contexts legitimately.
+#
+# KNOWN CAVEAT: `paths` and `paths-ignore` are not exact inverses for
+# MIXED PRs (e.g. one that touches both a .md file and source code).
+# Both workflows then run and report check runs under the SAME context
+# names "test (N)". Branch protection resolves a context by its latest
+# check run, so the real suite still gates correctness in practice, but
+# don't be surprised to see duplicate "test (N)" entries on mixed PRs.
+#
+# Keep workflow name, job name, and matrix EXACTLY in sync with tests.yml,
+# and keep this file's `paths` the mirror image of tests.yml's
+# `paths-ignore` — if one changes, change the other.
+
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [1, 2, 3, 4, 5, 6]
+    steps:
+      - name: No-op (docs-only change, real suite skipped via paths-ignore)
+        run: 'echo "Docs-only PR: reporting required context test (${{ matrix.slice }}) as success."'

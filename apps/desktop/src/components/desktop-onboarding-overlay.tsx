@@ -8,8 +8,9 @@ import { Codicon } from '@/components/ui/codicon'
 import { ErrorIcon } from '@/components/ui/error-state'
 import { Input } from '@/components/ui/input'
 import { Loader } from '@/components/ui/loader'
-import { getGlobalModelOptions } from '@/hermes'
+import { getGlobalModelOptions, getStatus } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { openExternalLink } from '@/lib/external-link'
 import {
   Check,
   ChevronDown,
@@ -18,6 +19,7 @@ import {
   ExternalLink,
   KeyRound,
   Loader2,
+  Sparkles,
   Terminal
 } from '@/lib/icons'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
@@ -65,6 +67,17 @@ export interface ApiKeyOption {
 }
 
 const API_KEY_OPTIONS: ApiKeyOption[] = [
+  // HermesOS: Venice leads the picker — the recommended provider. With managed
+  // Venice, the key is injected for you (no paste needed); self-serve users can
+  // bring their own Venice key. Reached as an OpenAI-compatible endpoint.
+  {
+    id: 'venice',
+    name: 'Venice',
+    short: 'recommended · private frontier models',
+    envKey: 'VENICE_API_KEY',
+    description: 'Private, uncensored frontier models. Managed by HermesOS when enabled — otherwise paste your own Venice key.',
+    docsUrl: 'https://venice.ai/settings/api'
+  },
   {
     id: 'openrouter',
     name: 'OpenRouter',
@@ -469,7 +482,8 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   return (
     <div className="grid gap-2">
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
-        {featured ? <FeaturedProviderRow onSelect={select} provider={featured} /> : null}
+        <VeniceRecommendedCard onWantApiKey={() => setOnboardingMode('apikey')} />
+        {featured ? <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} /> : null}
         {showRest ? (
           <>
             {rest.map(p => (
@@ -530,9 +544,13 @@ function ChooseLaterLink() {
 }
 
 export function FeaturedProviderRow({
+  hideRecommendedBadge = false,
   onSelect,
   provider
 }: {
+  // HermesOS: when the Venice card holds the "Recommended" slot above this row,
+  // suppress this provider's own Recommended badge so there's only one.
+  hideRecommendedBadge?: boolean
   onSelect: (provider: OAuthProvider) => void
   provider: OAuthProvider
 }) {
@@ -554,7 +572,7 @@ export function FeaturedProviderRow({
           </span>
           {loggedIn ? (
             <ConnectedTag />
-          ) : (
+          ) : hideRecommendedBadge ? null : (
             <span className="inline-flex items-center gap-1.5 bg-primary px-2 py-0.5 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-primary-foreground">
               <span aria-hidden="true" className="dither inline-block size-2 shrink-0" />
               {t.onboarding.recommended}
@@ -562,6 +580,66 @@ export function FeaturedProviderRow({
           )}
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">{t.onboarding.featuredPitch}</p>
+      </div>
+      <ChevronRight className="size-4 shrink-0 text-primary transition group-hover:translate-x-0.5" />
+    </button>
+  )
+}
+
+// HermesOS: the recommended way to run a managed agent. Venice isn't an OAuth
+// provider — it's the managed service HermesOS runs for you (server-side proxy
+// key, billed to your dashboard wallet). Enabling it is a dashboard flow (Clerk
+// + wallet), not an in-app browser sign-in, so this card deep-links there. The
+// dashboard origin comes from /api/status (HERMES_DASHBOARD_URL). If it's
+// missing (e.g. local dev), the card falls back to the API-key path so it's
+// never a dead end.
+const MANAGED_VENICE_PITCH = 'Managed by HermesOS — private frontier models, no API key to copy'
+
+const managedVeniceEnableUrl = (dashboardUrl: string) =>
+  `${dashboardUrl.replace(/\/+$/, '')}/dashboard/billing?managedVenice=deposit&wallet=hermesos`
+
+export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => void }) {
+  // Fetch the control-plane dashboard origin directly (no react-query) so this
+  // card renders in any context — including the onboarding Picker unit tests,
+  // which mount without a QueryClientProvider. The try/catch also absorbs a
+  // synchronous throw when the desktop bridge isn't installed (web preview).
+  const [dashboardUrl, setDashboardUrl] = useState<null | string>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const s = await getStatus()
+        if (!cancelled) setDashboardUrl(s.dashboard_url ?? null)
+      } catch {
+        /* status unavailable — leave null; click falls back to the API-key path */
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <button
+      className="group relative flex w-full items-center justify-between gap-4 rounded-[8px] bg-primary/[0.06] px-3 py-2.5 text-left transition-colors hover:bg-primary/10"
+      onClick={() => (dashboardUrl ? openExternalLink(managedVeniceEnableUrl(dashboardUrl)) : onWantApiKey())}
+      type="button"
+    >
+      <span aria-hidden className="arc-border arc-reverse arc-nous" />
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="grid size-5 shrink-0 place-items-center rounded bg-primary/15 text-primary">
+            <Sparkles className="size-3.5" />
+          </span>
+          <span className="text-[length:var(--conversation-text-font-size)] font-semibold">Venice</span>
+          <span className="inline-flex items-center gap-1.5 bg-primary px-2 py-0.5 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-primary-foreground">
+            <span aria-hidden="true" className="dither inline-block size-2 shrink-0" />
+            Recommended
+          </span>
+        </div>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{MANAGED_VENICE_PITCH}</p>
       </div>
       <ChevronRight className="size-4 shrink-0 text-primary transition group-hover:translate-x-0.5" />
     </button>

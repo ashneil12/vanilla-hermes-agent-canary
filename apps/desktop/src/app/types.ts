@@ -108,14 +108,23 @@ export type CommandDispatchResponse =
   | SkillCommandDispatchResponse
   | SendCommandDispatchResponse
 
-export type SidebarNavId = 'artifacts' | 'command-center' | 'messaging' | 'new-session' | 'settings' | 'skills'
+export type SidebarNavId =
+  | 'admin-panel'
+  | 'artifacts'
+  | 'command-center'
+  | 'messaging'
+  | 'new-session'
+  | 'settings'
+  | 'skills'
 
 export interface SidebarNavItem {
   id: SidebarNavId
   label: string
   icon: React.ComponentType<{ className?: string }>
   route?: string
-  action?: 'new-session'
+  // 'admin-panel' is a HermesOS web-only add-on: opens the full dashboard
+  // (telemetry / config / channels / TUI chat) at /dash in a new tab.
+  action?: 'admin-panel' | 'new-session'
 }
 
 export interface ClientSessionState {

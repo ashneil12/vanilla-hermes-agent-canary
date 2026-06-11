@@ -172,6 +172,19 @@ class _FakeCreateStream:
         self.closed = True
 
 
+class _FakeCreateStreamWithTerminalTypeError:
+    def __init__(self, events):
+        self._events = list(events)
+        self.closed = False
+
+    def __iter__(self):
+        yield from self._events
+        raise TypeError("'NoneType' object is not iterable")
+
+    def close(self):
+        self.closed = True
+
+
 def _codex_request_kwargs():
     return {
         "model": "gpt-5-codex",
@@ -672,6 +685,29 @@ def test_run_codex_stream_ignores_completed_response_with_null_output(monkeypatc
     assert response.status == "completed"
     assert response.output == [output_item]
     assert response.usage.total_tokens == 11
+
+
+def test_run_codex_create_stream_fallback_synthesizes_after_nullable_terminal(monkeypatch, caplog):
+    agent = _build_agent(monkeypatch)
+    create_stream = _FakeCreateStreamWithTerminalTypeError(
+        [
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.output_text.delta", delta="OK"),
+        ]
+    )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: create_stream,
+        )
+    )
+
+    with caplog.at_level("WARNING", logger="agent.codex_runtime"):
+        response = agent._run_codex_create_stream_fallback(_codex_request_kwargs())
+
+    assert create_stream.closed is True
+    assert response.output[0].content[0].text == "OK"
+    assert "synthesizing completed response" in caplog.text
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):

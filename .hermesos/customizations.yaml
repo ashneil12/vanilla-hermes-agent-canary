@@ -1,0 +1,282 @@
+# HermesOS Customizations Manifest
+# =================================
+# The CONTRACT that governs autonomous upstream merges. The Aeon auto-update
+# agent reads this BEFORE resolving any merge conflict against
+# NousResearch/hermes-agent. It declares which changes are OURS (preserve),
+# which always take upstream (re-forking them is a bug), and how to reconcile
+# the few that overlap.
+#
+# FEEDBACK LOOP: whenever we add or change a HermesOS customization, we add or
+# update its entry here in the SAME change. That is how the agent "stays aware"
+# of our work on every future merge. An undeclared customization is one the
+# auto-merge is allowed to clobber — so: no entry, no protection.
+#
+# Design principle: keep our changes ADDITIVE (new files beside upstream), not
+# INVASIVE (edits inside upstream files). Additive changes never conflict, so
+# the agent can merge unattended. Every "merge-careful" entry below is a place
+# we failed that principle and must watch.
+
+version: 1
+forks:
+  canary: ashneil12/vanilla-hermes-agent-canary      # bleeding edge
+  prod:   ashneil12/vanilla-hermes-agent             # trails canary by 3h
+upstream: NousResearch/hermes-agent
+
+# on_conflict vocabulary
+policies:
+  keep-ours:     "Our version wins. Additive/standalone; upstream rarely touches it."
+  take-theirs:   "Upstream wins. We do not customize this — keeping 'ours' is a bug."
+  merge-careful: "Both sides changed. Reconcile semantically, re-run the named test(s), escalate if not confident."
+
+# ---------------------------------------------------------------------------
+# Things we OWN. Preserve across merges per on_conflict.
+# ---------------------------------------------------------------------------
+customizations:
+  - id: webchat-web-shim
+    status: live
+    files:
+      - path: apps/desktop/src/lib/web-shim.ts
+        ownership: whole-file            # entirely ours
+      - path: apps/desktop/src/main.tsx
+        ownership: one-line              # only: `import './lib/web-shim'` at top
+    intent: >
+      Hosted-web bridge so the desktop renderer runs as a browser SPA against a
+      remote gateway (provides window.hermesDesktop via fetch/WS instead of
+      Electron IPC), plus the HermesOS "Admin Panel" dashboard launcher
+      (bridge.openAdminPanel → opens /dash with the session token).
+    on_conflict: keep-ours
+    note: "If upstream reorders main.tsx imports, just keep our import line present."
+    handoff: >
+      The control-plane dashboard hands the per-instance bearer to the surface
+      as `#iframe_token=<apiServerKey>` (hermesdeploy webui-handoff.ts —
+      createWebuiIframeHashUrl). resolveConfig() therefore reads `iframe_token`
+      FIRST, then the plainer `#token` for manual links, then the
+      backend-injected globals, then sessionStorage. Reading only `#token` was
+      the bug that left the chat WS unauthenticated (401 → "Hermes couldn't
+      start") on every dashboard open. If hermesdeploy ever renames the hash
+      key, update this reader to match — it is the single token entry point.
+
+  - id: admin-panel-nav
+    status: live
+    files:
+      - path: apps/desktop/src/app/types.ts
+        ownership: two-line          # add 'admin-panel' to SidebarNavId + action union
+        on_conflict: merge-careful
+      - path: apps/desktop/src/app/chat/sidebar/index.tsx
+        ownership: block             # SIDEBAR_NAV item (after artifacts) + web-client render gate
+        on_conflict: merge-careful
+      - path: apps/desktop/src/app/session/hooks/use-session-actions.ts
+        ownership: block             # selectSidebarItem branch for action 'admin-panel'
+        on_conflict: merge-careful
+    intent: >
+      A left-sidebar nav item "Admin Panel" (under Artifacts) that opens the
+      full HermesOS dashboard (telemetry / config / channels / TUI chat) at
+      /dash. Web-only — rendered only when window.__HERMES_WEB_CLIENT__ (set by
+      the web-shim); the native desktop app has no /dash route, so it never
+      shows there. Replaces the earlier floating bottom-right launcher button.
+    on_conflict: merge-careful
+    note: >
+      INVASIVE (edits upstream nav files) — the only way to get a native-looking
+      sidebar item; DOM injection into the React list gets clobbered on
+      re-render. On a merge conflict, re-add: (1) 'admin-panel' to the
+      SidebarNavId + action unions, (2) the SIDEBAR_NAV entry, (3) the
+      selectSidebarItem branch calling window.hermesDesktop.openAdminPanel.
+
+  - id: webchat-serve
+    status: live-multistage-bake     # baked LIGHT via a throwaway builder stage
+    files:
+      - path: Dockerfile
+        ownership: block            # webchat_build builder stage + COPY --from of the dist only
+        on_conflict: merge-careful
+      - path: hermes_cli/web_server.py
+        ownership: block            # mount_webchat serves /webchat from the baked dist
+        on_conflict: keep-ours
+      - path: pyproject.toml
+        ownership: one-line         # webchat_dist/**/* in package-data
+        on_conflict: keep-ours
+    decision: >
+      First attempt baked the bundle in the SAME image layer as its build deps —
+      that added ~1GB (apps/* node_modules + node-pty C++ toolchain), and the
+      in-place roll of the heavier image WEDGED a live VM (→ host reboot). FIX:
+      MULTI-STAGE — a throwaway `webchat_build` stage (full node image, has the
+      toolchain) produces the static dist; the runtime COPYs ONLY the ~21MB dist.
+      Runtime grows ~21MB, not ~1GB → in-place fleet rolls stay light. Bundle
+      travels with the agent image (no separate asset pipeline); web_server.py's
+      mount_webchat serves it at /webchat.
+    serves: "GET /webchat (+ /webchat/assets/*) — mount_webchat from the baked dist"
+    follow_up: >
+      Provisioner cutover (control-plane, hermesdeploy-canary → prod): in
+      webui-instance-builder.ts drop the `webui:` service and route Caddy `/` to
+      the rich chat; keep gateway + official-dashboard. Canary-first, then prod
+      per the autonomy guardrails. Verify the rebuilt image stays LIGHT before
+      any in-place roll.
+
+  - id: hermesos-brand-skin
+    status: live
+    files:
+      - path: apps/desktop/src/lib/web-shim.ts
+        ownership: block                 # installBrandSkin() — injected <style> override
+    intent: >
+      HermesOS gold/bronze skin for the hosted web surface. Re-tints upstream's
+      blue accent (--theme-primary / --theme-midground = #0053fd) to gold via a
+      shim-injected high-specificity stylesheet (#hermesos-skin) — ADDITIVE, so
+      it never conflicts with upstream styles.css on a sync. Per-mode shades:
+      #A67C1A (light) / #E0A82E (dark). Web-only — the native desktop app has no
+      web-shim, so it keeps upstream's default theme.
+    on_conflict: keep-ours
+    note: "If upstream renames the --theme-* / --ui-accent tokens, update installBrandSkin to match the new var names."
+
+  - id: webchat-dark-mode-default
+    status: live
+    files:
+      - path: apps/desktop/src/lib/web-shim.ts
+        ownership: block                 # seedDefaultColorMode() — first-run localStorage seed
+    intent: >
+      Make dark mode "just work" on the hosted web surface. Upstream's theme
+      context (apps/desktop/src/themes/context.tsx) defaults the color mode to
+      'light' when nothing is stored; on the web we seed the FIRST-RUN default to
+      'system' so the rich chat follows the visitor's OS light/dark preference
+      automatically. ADDITIVE — only writes the localStorage key when UNSET, so it
+      never overrides an explicit user choice from the in-app toggle (Cmd+K ->
+      Light/Dark/System, or Settings -> Appearance), which persists under the same
+      key. Pairs with hermesos-brand-skin, whose :root.dark variant re-tints the
+      gold accent for dark. Web-only — native desktop keeps upstream's default.
+    on_conflict: keep-ours
+    note: "Mode key string ('hermes-desktop-mode-v1') is duplicated from MODE_KEY in src/themes/context.tsx — if upstream bumps that version, update HERMES_MODE_KEY in web-shim.ts to match."
+
+  - id: health-egress
+    status: ported            # agent plugin written; pending canary-build verification + cron repoint
+    source_in_webui: "api/health_egress.py  (route: GET /api/health/egress)"
+    ours_files:
+      - plugins/hermes-egress/dashboard/plugin_api.py    # probe + router (whole file, ours)
+      - plugins/hermes-egress/dashboard/manifest.json
+    serves: "GET /api/plugins/hermes-egress/check?targets=...  (same wire shape as the webui original)"
+    intent: >
+      Synthetic outbound DNS/TCP egress probe. LOAD-BEARING: the Hermesdeploy
+      fleet egress-sweep cron hits it on every VM to catch VMs that lost egress
+      while /api/health stays green.
+    on_conflict: keep-ours
+    follow_up: >
+      Control-plane PR: repoint dashboard/src/lib/instance-egress-sweep.ts from
+      /api/health/egress to /api/plugins/hermes-egress/check and send the
+      per-instance token. Verify the plugin mounts on a canary image build.
+
+  - id: venice-managed-key-fallback
+    status: resolved-no-code        # the agent handles this natively; NO code port, NO merge risk
+    source_in_webui: "api/streaming.py :: _resolve_managed_venice_custom_api_key (a webui-only workaround)"
+    finding: >
+      The webui hook only existed because webui's generic `custom` resolver
+      stamped a `no-key-required` placeholder and had no way to read a key from
+      env at runtime. The UPSTREAM AGENT already supports this: a custom
+      provider entry may declare `key_env` (or `api_key_env`) and the agent
+      resolves the key from that env var at request time
+      (agent/auxiliary_client.py:3582 `os.getenv(custom_key_env)`, and the main
+      path at agent/agent_init.py:802). Native `provider: venice` reads
+      VENICE_API_KEY directly. So both Venice access patterns work with config
+      alone.
+    resolution:
+      native_venice: "provider: venice  → reads VENICE_API_KEY env (works as-is)"
+      managed_custom_endpoint: "custom_providers entry with key_env: VENICE_API_KEY (or OPENAI_API_KEY) → agent reads injected env key at runtime"
+    on_conflict: take-theirs        # we customize NOTHING here now; upstream owns key resolution
+    provisioner_note: "When a managed-Venice custom OpenAI-compatible provider is configured, set key_env (not a literal key). No agent code, no streaming-layer patch."
+
+  - id: venice-recommended-surfacing
+    status: live
+    files:
+      - path: apps/desktop/src/app/settings/constants.ts
+        ownership: block                 # PROVIDER_GROUPS: VENICE_ entry at priority 0 (leads Settings -> Keys)
+        on_conflict: keep-ours
+      - path: apps/desktop/src/components/desktop-onboarding-overlay.tsx
+        ownership: block                 # API_KEY_OPTIONS venice entry + VeniceRecommendedCard + FeaturedProviderRow hideRecommendedBadge prop
+        on_conflict: keep-ours
+      - path: apps/desktop/src/components/desktop-onboarding-overlay.test.tsx
+        ownership: merge-careful         # the "Recommended badge absent" assertion flips: Venice card always holds the slot
+        on_conflict: merge-careful
+      - path: apps/desktop/src/app/settings/providers-settings.tsx
+        ownership: merge-careful         # renders VeniceRecommendedCard atop the OAuth "Connect an account" picker
+        on_conflict: keep-ours
+      - path: apps/desktop/src/types/hermes.ts
+        ownership: merge-careful         # StatusResponse.dashboard_url (additive optional field)
+        on_conflict: merge-careful
+      - path: hermes_cli/web_server.py
+        ownership: merge-careful         # /api/status exposes dashboard_url from HERMES_DASHBOARD_URL (additive key)
+        on_conflict: merge-careful
+    intent: >
+      Make Venice the RECOMMENDED provider across the rich chat and make the
+      managed-Venice service legible + reachable. Managed Venice already works
+      end-to-end on the control plane (managed-webui-enable.ts injects
+      HERMES_INFERENCE_PROVIDER=custom + a VENICE_/OPENAI_ proxy key + the
+      /api/managed-venice/v1 base_url; the agent boots already chatting on it),
+      but the webui->rich-chat migration dropped the front-end surfacing —
+      apps/desktop had ZERO Venice references. This adds:
+        (a) catalog: Venice first in Settings -> Keys (PROVIDER_GROUPS priority 0)
+            and first in the api-key onboarding picker (API_KEY_OPTIONS).
+        (b) RECOMMENDED card: a VeniceRecommendedCard at the top of the OAuth
+            "Connect an account" panel (onboarding Picker + Settings -> Providers
+            OAuthPicker), holding the gold RECOMMENDED badge; Nous's own badge is
+            suppressed via FeaturedProviderRow's hideRecommendedBadge. Venice isn't
+            OAuth, so clicking deep-links to the dashboard managed-Venice enable
+            flow (/dashboard/billing?managedVenice=deposit) — enabling needs Clerk +
+            wallet and can't happen in-agent. The dashboard origin comes from
+            /api/status.dashboard_url (HERMES_DASHBOARD_URL, injected into every
+            agent by hetzner-instance-builders.ts). If absent (local dev), the card
+            falls back to the API-key path so it's never a dead end.
+      No OAuth-catalog change, no provider logic — additive metadata + one
+      additive status field + one read-only UI card.
+    on_conflict: keep-ours
+    follow_up: >
+      VISUAL CHECK on a canary build before merge (card placement, badge swap,
+      click target). Then: (1) Active-provider "Venice (Managed)" badge when the
+      configured base_url matches /api/managed-venice/ (providers-settings + model
+      picker). (2) Confirm VENICE_API_KEY is category 'provider' in the agent env
+      catalog so the Keys card renders even when unset. (3) Managed-Venice enable is
+      gated to backend==='webui' (managed-webui-enable.ts ~340/~656) — fine today
+      (rich-chat agents are still backend='webui'), revisit if that class is renamed.
+
+  - id: aeon-delegation-panel
+    status: planned
+    source_in_webui: "api/aeon.py (writes skills.config.aeon_github_pat / aeon_fork_repo)"
+    intent: "AEON GitHub-delegation settings UI. The `aeon` skill itself is upstream-compatible; only the settings panel is ours."
+    on_conflict: keep-ours
+
+  - id: first-run-onboarding
+    status: planned
+    source_in_webui: "api/bootstrap.py + a streaming hook"
+    intent: "First-run identity-discovery prompt, once per newly provisioned agent."
+    on_conflict: keep-ours
+
+  - id: telemetry-deltas
+    status: planned
+    intent: >
+      Surface day-of-week + hour-of-day activity heatmaps and cost/token
+      share-% on the dashboard Analytics page, and default
+      dashboard.show_token_analytics to true.
+    on_conflict: merge-careful
+    note: "Upstream InsightsEngine already computes activity patterns; we expose them. Re-check if upstream changes the analytics endpoint shape."
+
+# ---------------------------------------------------------------------------
+# We NEVER customize these. Take upstream, always. If a merge tries to keep
+# 'ours' here, that is a regression to escalate — it means we accidentally
+# re-forked something upstream now owns better than we do.
+# ---------------------------------------------------------------------------
+take_upstream_always:
+  - chat, streaming, message rendering (assistant-ui)
+  - sessions, persistence, resume
+  - models, providers, profiles
+  - cron, skills, MCP
+  - i18n / locales
+  - gateway + messaging platform adapters (Telegram/Discord/Slack/WhatsApp/Signal)
+  - the dashboard web/ SPA and hermes_cli/web_server.py routes
+
+# ---------------------------------------------------------------------------
+# Autonomy guardrails for the Aeon agent.
+# ---------------------------------------------------------------------------
+autonomy:
+  sync_interval: 3h
+  prod_trails_canary: 3h
+  rollout: pull-based            # VMs pull their image tag; Aeon never holds fleet SSH
+  canary_tag: ":canary"
+  prod_tag: ":stable"            # promote = re-tag the 3h-soaked canary digest
+  on_ci_red: hold-and-alert      # never ship a red build
+  on_low_confidence_merge: hold-and-alert
+  per_vm_updater: "self health-check + auto-rollback to previous digest if unhealthy"

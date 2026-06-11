@@ -1002,14 +1002,32 @@ from tools.registry import registry, tool_error
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
-        "Generate high-quality images from text prompts. The underlying "
-        "backend (FAL, OpenAI, etc.) and model are user-configured and not "
-        "selectable by the agent. Returns either a URL or an absolute file "
-        "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it. When "
-        "the active terminal backend has a different filesystem, successful "
-        "local-file results may also include `agent_visible_image` for "
-        "follow-up terminal/file operations."
+        "Generate images from text prompts. ALWAYS USE THIS TOOL for any "
+        "image generation request. Do NOT use shell, curl, bash, fetch, "
+        "or any terminal-side approach to hit image APIs directly — that "
+        "bypasses the user's configured provider (Venice / FAL / xAI / "
+        "OpenAI etc.), bypasses billing/credentials, and produces output "
+        "that the chat UI cannot auto-render. The backend is auto-paired "
+        "to whichever provider the user has a key for (Venice when "
+        "VENICE_API_KEY is set, FAL otherwise) — you do not need to pick. "
+        "Returns {success, image, model, provider, ...} where `image` is "
+        "an absolute file path or HTTPS URL. After calling this tool, "
+        "ALWAYS render the returned `image` value in your reply using "
+        "markdown image syntax with a MEDIA: prefix: "
+        "`![brief description](MEDIA:<image_value>)`. Use the `image` "
+        "value VERBATIM (full path, no trimming) — the MEDIA: prefix is "
+        "what tells the chat UI to fetch and inline-render the image. "
+        "Without `MEDIA:` (or without the `![]()` wrapper), the path "
+        "renders as broken markdown text instead of an image. "
+        "When the active terminal backend has a different filesystem, "
+        "successful local-file results may also include `agent_visible_image` "
+        "for follow-up terminal/file operations. "
+        "You can also pass `reference_images` to generate FROM an existing "
+        "image (reference-conditioned generation) — give the prior image(s) "
+        "plus a prompt and the original is preserved while your changes are "
+        "applied. This is the right way to iterate on an image you just made "
+        "('now make it nighttime', 'move the subject right', 'add a hat'); it "
+        "routes to the strong edit model and keeps the composition."
     ),
     "parameters": {
         "type": "object",
@@ -1023,6 +1041,18 @@ IMAGE_GENERATE_SCHEMA = {
                 "enum": list(VALID_ASPECT_RATIOS),
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
+            },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional. 1-3 source images to condition on (file path, "
+                    "HTTPS URL, or base64). When provided, the prior image is "
+                    "preserved and only your prompt's changes are applied "
+                    "(reference-conditioned generation / edit). Use this to "
+                    "modify an existing image instead of producing an unrelated "
+                    "new one."
+                ),
             },
         },
         "required": ["prompt"],
@@ -1042,6 +1072,26 @@ def _read_configured_image_model():
                 return value.strip()
     except Exception as exc:
         logger.debug("Could not read image_gen.model: %s", exc)
+    return None
+
+
+def _read_configured_image_style():
+    """Return the value of ``image_gen.style_preset`` from config.yaml, or None.
+
+    Set via the WebUI Settings → Media "Style" dropdown (which lists the
+    presets from Venice ``/image/styles``). Only the Venice image provider
+    consumes ``style_preset`` today; other providers ignore the kwarg.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if isinstance(section, dict):
+            value = section.get("style_preset")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    except Exception as exc:
+        logger.debug("Could not read image_gen.style_preset: %s", exc)
     return None
 
 
@@ -1082,8 +1132,31 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     direct call, just routed through the registry).
     """
     configured = _read_configured_image_provider()
-    if not configured:
+    # hermes-fork: explicit "fal" short-circuits to the in-tree FAL pipeline
+    # (consistent with the auto-pair fal handling below). Upstream now routes
+    # fal through plugins/image_gen/fal, which re-enters THIS pipeline via _it
+    # indirection — behavior-identical — so we keep the direct shortcut and,
+    # critically, preserve our auto-pair feature (upstream's `if not configured:
+    # return None` here would make the auto-pair block below dead code).
+    if configured == "fal":
         return None
+    if not configured:
+        # No explicit image_gen.provider: auto-pair with the active provider
+        # (e.g. venice when VENICE_API_KEY is set), mirroring video_gen.
+        try:
+            from agent.image_gen_registry import get_active_provider
+            from hermes_cli.plugins import _ensure_plugins_discovered
+            _ensure_plugins_discovered()
+            _ap = get_active_provider()
+            if _ap is None:
+                _ensure_plugins_discovered(force=True)
+                _ap = get_active_provider()
+        except Exception as exc:
+            logger.debug("image_gen auto-pair skipped: %s", exc)
+            _ap = None
+        if _ap is None or getattr(_ap, "name", None) == "fal":
+            return None
+        configured = _ap.name
 
     # Also read configured model so we can pass it to the plugin
     configured_model = _read_configured_image_model()
@@ -1122,10 +1195,16 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
             "error_type": "provider_not_registered",
         })
 
+    # Also read a configured style preset so the WebUI's Media "Style"
+    # dropdown becomes a live default (the Venice provider honors it).
+    configured_style = _read_configured_image_style()
+
     try:
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
         if configured_model:
             kwargs["model"] = configured_model
+        if configured_style:
+            kwargs["style_preset"] = configured_style
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning(
@@ -1148,12 +1227,49 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     return json.dumps(result)
 
 
+def _reference_edit_aspect_ratio(aspect_ratio: str) -> str:
+    """Convert image_generate's friendly aspect names to Venice edit enums.
+
+    ``image_generate`` exposes ``landscape|square|portrait`` to the model, but
+    Venice's edit/multi-edit endpoints accept concrete ratio strings. Passing
+    ``landscape`` through causes the edit endpoint to reject the request.
+    """
+    value = (aspect_ratio or "auto").strip()
+    return {
+        "landscape": "16:9",
+        "square": "1:1",
+        "portrait": "9:16",
+    }.get(value.lower(), value or "auto")
+
+
 def _handle_image_generate(args, **kw):
     prompt = args.get("prompt", "")
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     task_id = kw.get("task_id")
+
+    # Reference-conditioned generation: when source image(s) are supplied this
+    # is really an EDIT — route to the Venice edit path (strong, identity-
+    # preserving model) so the original is kept instead of producing an
+    # unrelated new image. Accepts ``reference_images`` (list) or the singular
+    # ``reference_image``.
+    refs = args.get("reference_images")
+    if refs is None:
+        refs = args.get("reference_image")
+    if isinstance(refs, str):
+        refs = [refs]
+    if isinstance(refs, list):
+        clean = [r for r in refs if isinstance(r, str) and r.strip()]
+        if clean:
+            try:
+                from tools.image_edit_tool import image_edit_tool, image_compose_tool
+            except Exception as exc:  # pragma: no cover - import guard
+                return tool_error(f"reference-image generation unavailable: {exc}")
+            edit_aspect_ratio = _reference_edit_aspect_ratio(aspect_ratio)
+            if len(clean) == 1:
+                return image_edit_tool(image=clean[0], prompt=prompt, aspect_ratio=edit_aspect_ratio)
+            return image_compose_tool(images=clean[:3], prompt=prompt, aspect_ratio=edit_aspect_ratio)
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).

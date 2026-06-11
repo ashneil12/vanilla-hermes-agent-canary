@@ -1592,7 +1592,21 @@ class TestDialecticLifecycleSmoke:
              patch("hermes_constants.get_hermes_home", return_value=MagicMock()):
             provider.initialize(session_id="smoke-test")
 
-        self._await_thread(provider)
+        # Deterministic wait for the prewarm to land. _await_thread can no-op
+        # past the wait if provider._prefetch_thread isn't yet captured when
+        # initialize() returns (the worker is started before its ref is read on
+        # a loaded 6-slice CI runner), so the assert used to read
+        # _prefetch_result before the worker wrote it — a flaky
+        # "session-start prewarm must land" failure. Poll the actual result
+        # under the lock up to a generous ceiling instead of a single
+        # timing-dependent read; a genuine hang still surfaces as a timeout.
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            self._await_thread(provider)
+            with provider._prefetch_lock:
+                if provider._prefetch_result.startswith("prewarm"):
+                    break
+            time.sleep(0.05)
         with provider._prefetch_lock:
             assert provider._prefetch_result.startswith("prewarm"), \
                 "session-start prewarm must land in _prefetch_result"

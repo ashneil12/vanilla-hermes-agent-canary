@@ -210,8 +210,14 @@ class TestInstallHangupProtection:
         try:
             # On Windows (no SIGHUP) we still wrap stdio and create the log.
             assert state["installed"] is True
-            assert isinstance(sys.stdout, _UpdateOutputStream)
-            assert isinstance(sys.stderr, _UpdateOutputStream)
+            # Check by class NAME, not isinstance: under the parallel test
+            # runner hermes_cli.main can be loaded under two identities, giving
+            # two distinct _UpdateOutputStream class objects. The wrapper is then
+            # a real _UpdateOutputStream but isinstance() against this module's
+            # (possibly stale) class returns False — a flaky false negative. The
+            # behavior we assert is "stdout/stderr were wrapped", so match name.
+            assert type(sys.stdout).__name__ == "_UpdateOutputStream"
+            assert type(sys.stderr).__name__ == "_UpdateOutputStream"
             assert state["log_file"] is not None
 
             sys.stdout.write("checking mirror\n")

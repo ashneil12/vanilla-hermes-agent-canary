@@ -38,8 +38,34 @@ _HERMES_CORE_TOOLS = [
     "read_terminal",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
+    # Vision + image generation + multimodal editing
+    # image_edit / image_compose / image_upscale / image_remove_background
+    # all register under the ``image_gen`` toolset (see tools/image_edit_tool.py).
+    # They MUST be listed here so the platform-tool resolver's subset check
+    # (hermes_cli/tools_config.py::_get_platform_tools) treats ``image_gen``
+    # as a subset of ``hermes-cli`` once the runtime registry has loaded the
+    # extra tools — otherwise the toolset silently disappears from the LLM's
+    # tool list (image_generate becomes invisible) and the agent falls back
+    # to shell/curl. Each tool's own ``check_fn`` still gates schema
+    # exposure when its provider key is missing.
     "vision_analyze", "image_generate",
+    "video_generate",
+    "audio_generate",
+    "image_edit", "image_compose", "image_upscale", "image_remove_background",
+    # Venice extras (tools/venice_extras_tool.py): image style presets,
+    # document/text parser, voice cloning, YouTube transcription, and music/video
+    # cost quotes. Same subset-check reasoning as the image tools above — must be
+    # listed here so their toolsets stay a subset of the platform composite.
+    "image_styles", "text_parser", "video_transcribe", "voice_clone",
+    "audio_quote", "video_quote",
+    # On-chain reads (tools/venice_extras_tool.py): read-only JSON-RPC via
+    # Venice's crypto proxy. Same subset-check reasoning as above — listed
+    # here so the ``crypto`` toolset stays a subset of the platform composite.
+    "crypto_rpc",
+    # Multimodal config tool (model picker per modality). Registered under
+    # ``toolset="config"`` — needs to be in core so the resolver's recovery
+    # loop treats the toolset as a subset of the platform composite.
+    "multimodal_set_model", "multimodal_get_settings",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -49,8 +75,13 @@ _HERMES_CORE_TOOLS = [
     "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
     # Text-to-speech
     "text_to_speech",
-    # Planning & memory
-    "todo", "memory",
+    # Planning & memory + embeddings
+    # text_embed registers under ``toolset="memory"`` (see tools/embed_tool.py);
+    # same subset-check reasoning as the image_gen tools above — without
+    # listing it here the ``memory`` toolset disappears from the LLM's tool
+    # list at runtime once embed_tool is imported.
+    "todo", "memory", "text_embed",
+    "venice_characters",
     # Session history search
     "session_search",
     # Clarifying questions
@@ -71,6 +102,18 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
+    # Browser sidecar — only in schema when the user opted in AND the
+    # Hermesdeploy-provisioned sidecar container is reachable (check_fn
+    # in tools/browser_sidecar.py probes /health). Listed here so the
+    # platform-tool resolver in hermes_cli/tools_config.py can detect
+    # the toolset as a subset of platform composites; absence of the
+    # sidecar simply makes these tools invisible to the LLM at runtime.
+    "browser_session_start", "browser_session_end",
+    "browser_goto",
+    "browser_click_text", "browser_click_selector", "browser_fill",
+    "browser_wait_for", "browser_assert_visible", "browser_get_text",
+    "browser_screenshot",
+    "browser_run_named_flow",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
@@ -92,7 +135,7 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract"],
+        "tools": ["web_search", "web_extract", "text_parser", "video_transcribe"],
         "includes": []  # No other toolsets included
     },
     
@@ -127,18 +170,18 @@ TOOLSETS = {
     
     "image_gen": {
         "description": "Creative generation tools (images)",
-        "tools": ["image_generate"],
+        "tools": ["image_generate", "image_styles"],
         "includes": []
     },
 
     "video_gen": {
         "description": (
-            "Video generation tools. Single ``video_generate`` tool covers "
-            "text-to-video (prompt only) and image-to-video (prompt + "
-            "image_url) — the active backend auto-routes. Configure via "
-            "``hermes tools`` → Video Generation."
+            "Video + audio generation. ``video_generate`` covers text-to-video "
+            "(prompt only) and image-to-video (prompt + image_url); "
+            "``audio_generate`` generates music and sound effects (Venice). The "
+            "active backend auto-routes. Configure via ``hermes tools`` → Video Generation."
         ),
-        "tools": ["video_generate"],
+        "tools": ["video_generate", "audio_generate", "audio_quote", "video_quote"],
         "includes": []
     },
 
@@ -149,6 +192,16 @@ TOOLSETS = {
             "or keyboard focus. Works with any tool-capable model."
         ),
         "tools": ["computer_use"],
+        "includes": []
+    },
+
+    "crypto": {
+        "description": (
+            "Read-only on-chain data via Venice's crypto JSON-RPC proxy "
+            "(EVM chains + more): balances, blocks, logs, eth_call, gas. "
+            "Signing/sending is disabled (no wallet). Uses VENICE_API_KEY."
+        ),
+        "tools": ["crypto_rpc"],
         "includes": []
     },
 
@@ -181,6 +234,30 @@ TOOLSETS = {
         ],
         "includes": []
     },
+
+    # Browser sidecar — Pro-tier-gated Hermes deployment provisions a
+    # deterministic Playwright HTTP service (services/browser-sidecar/) on the
+    # agent VM. These 11 primitives are the deterministic counterpart to the
+    # generic "browser" toolset above: they don't compete with or replace
+    # browser_navigate/etc., they're scripted-flow primitives for QA agents.
+    # check_fn on each tool gates on /health, so when the sidecar isn't
+    # provisioned the toolset is just absent from the schema.
+    "browser_sidecar": {
+        "description": (
+            "Deterministic Playwright primitives for QA agents (e.g., Vex). "
+            "Persistent auth across sessions; re-seed via the dashboard if "
+            "SESSION_EXPIRED. Pro-tier feature."
+        ),
+        "tools": [
+            "browser_session_start", "browser_session_end",
+            "browser_goto",
+            "browser_click_text", "browser_click_selector", "browser_fill",
+            "browser_wait_for", "browser_assert_visible", "browser_get_text",
+            "browser_screenshot",
+            "browser_run_named_flow",
+        ],
+        "includes": []
+    },
     
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
@@ -203,7 +280,7 @@ TOOLSETS = {
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
-        "tools": ["text_to_speech"],
+        "tools": ["text_to_speech", "voice_clone"],
         "includes": []
     },
     

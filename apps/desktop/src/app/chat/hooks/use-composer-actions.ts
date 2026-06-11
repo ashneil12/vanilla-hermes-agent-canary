@@ -287,7 +287,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
   )
 
   const attachContextFilePath = useCallback(
-    (filePath: string) => {
+    (filePath: string, label?: string) => {
       if (!filePath) {
         return false
       }
@@ -297,7 +297,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
       attachToMain({
         id: attachmentId('file', rel),
         kind: 'file',
-        label: pathLabel(filePath),
+        label: label || pathLabel(filePath),
         detail: rel,
         refText: `@file:${formatRefValue(rel)}`,
         path: filePath
@@ -503,6 +503,20 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
           attached = true
 
           continue
+        }
+
+        if (window.hermesDesktop?.uploadFile) {
+          try {
+            const uploaded = await window.hermesDesktop.uploadFile(file)
+
+            if (uploaded?.path && attachContextFilePath(uploaded.path, uploaded.name || file.name)) {
+              attached = true
+
+              continue
+            }
+          } catch (err) {
+            notifyError(err, copy.dropFiles)
+          }
         }
 
         lastFailure = `Could not attach ${file.name || 'file'}`
