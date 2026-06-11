@@ -66,8 +66,9 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Desktop app source (Tauri/Electron); never installed in the container
-apps/
+# Desktop app source (Tauri/Electron). NOT in the final image, but the
+# webchat_build stage bakes apps/desktop into /webchat_dist, so it must be in
+# the build context. The final image copies only /webchat_dist, not apps/ source.
 
 # Test suite — not shipped in production images
 tests/
