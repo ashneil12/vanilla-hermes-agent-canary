@@ -78,7 +78,7 @@ import {
   sessionPinId
 } from '@/store/session'
 
-import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE } from '../../routes'
+import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SETTINGS_ROUTE, SKILLS_ROUTE } from '../../routes'
 import { SidebarPanelLabel } from '../../shell/sidebar-label'
 import type { SidebarNavItem } from '../../types'
 
@@ -111,7 +111,10 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
   { id: 'messaging', label: '', icon: props => <Codicon name="comment" {...props} />, route: MESSAGING_ROUTE },
   { id: 'artifacts', label: '', icon: props => <Codicon name="files" {...props} />, route: ARTIFACTS_ROUTE },
   // HermesOS web-only: opens the full dashboard (telemetry/config/channels/TUI) at /dash.
-  { id: 'admin-panel', label: 'Admin Panel', icon: props => <Codicon name="dashboard" {...props} />, action: 'admin-panel' }
+  { id: 'admin-panel', label: 'Admin Panel', icon: props => <Codicon name="dashboard" {...props} />, action: 'admin-panel' },
+  // HermesOS web-only: a proper, labelled Settings nav entry under Admin Panel
+  // (the titlebar gear stays as a fallback for when the sidebar is collapsed).
+  { id: 'settings', label: 'Settings', icon: props => <Codicon name="settings-gear" {...props} />, route: SETTINGS_ROUTE }
 ]
 
 const WORKSPACE_PAGE = 5
@@ -592,7 +595,7 @@ export function ChatSidebar({
             <SidebarMenu className="gap-px">
               {SIDEBAR_NAV.filter(
                 item =>
-                  item.id !== 'admin-panel' ||
+                  (item.id !== 'admin-panel' && item.id !== 'settings') ||
                   (typeof window !== 'undefined' && (window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
               ).map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
@@ -600,7 +603,8 @@ export function ChatSidebar({
                 const active =
                   (item.id === 'skills' && currentView === 'skills') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
-                  (item.id === 'artifacts' && currentView === 'artifacts')
+                  (item.id === 'artifacts' && currentView === 'artifacts') ||
+                  (item.id === 'settings' && currentView === 'settings')
 
                 const isNewSession = item.id === 'new-session'
 
