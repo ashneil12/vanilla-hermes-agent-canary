@@ -1857,10 +1857,12 @@ class TestWebServerEndpoints:
 
     def test_apply_main_model_assignment_base_url_and_context_reconcile(self):
         """The shared main-slot assignment helper must persist a supplied
-        base_url, clear a stale base_url only when switching providers, preserve
-        it on same-provider re-assignment, and always drop a hardcoded
-        context_length override. Both POST /api/model/set and profile-model
-        writes route through this, so the contract is pinned here."""
+        base_url, adopt the new provider's registered endpoint when switching
+        providers (falling back to "" only when the provider has no profile
+        base_url), preserve it on same-provider re-assignment, and always drop a
+        hardcoded context_length override. Both POST /api/model/set and
+        profile-model writes route through this, so the contract is pinned
+        here."""
         from hermes_cli.web_server import _apply_main_model_assignment
 
         # Custom + base_url → persisted; stale context_length dropped.
@@ -1872,14 +1874,16 @@ class TestWebServerEndpoints:
         assert out["base_url"] == "http://127.0.0.1:8000/v1"
         assert "context_length" not in out
 
-        # Switching providers (custom → openrouter) → stale base_url cleared.
+        # Switching providers (custom → openrouter) with no explicit URL → the
+        # stale custom URL is replaced with openrouter's registered endpoint,
+        # NOT blanked (a blank would route the new provider to the OpenAI host).
         out = _apply_main_model_assignment(
             {"provider": "custom", "base_url": "http://127.0.0.1:8000/v1"},
             "openrouter",
             "anthropic/claude-opus-4.8",
         )
         assert out["provider"] == "openrouter"
-        assert out["base_url"] == ""
+        assert out["base_url"] == "https://openrouter.ai/api/v1"
 
         # Same provider, no new base_url → existing custom endpoint preserved.
         # Regression: picking a different MiMo model under xiaomi must NOT wipe a
@@ -1902,7 +1906,8 @@ class TestWebServerEndpoints:
         )
         assert out["base_url"] == "https://token-plan-cn.xiaomimimo.com/v1"
 
-        # Switching providers without a base_url → don't invent one, clear stale.
+        # Switching to a provider with no profile base_url (custom) → fall back
+        # to "" (registry default), dropping the stale URL.
         out = _apply_main_model_assignment(
             {"provider": "openrouter", "base_url": "http://stale:1/v1"}, "custom", "m"
         )
@@ -1911,6 +1916,31 @@ class TestWebServerEndpoints:
         # Non-dict input is coerced to a fresh dict (never raises).
         out = _apply_main_model_assignment("not-a-dict", "custom", "m", "http://x/v1")
         assert out == {"provider": "custom", "default": "m", "base_url": "http://x/v1"}
+
+    def test_apply_main_model_assignment_writes_registered_provider_base_url(self):
+        """Defect 2: switching the MAIN model to a registered BYOK marketplace
+        provider (surplus) with no explicit base_url must write that provider's
+        own inference endpoint — not blank base_url, which would route the
+        provider's key to the OpenAI default host and break new chats."""
+        from hermes_cli.web_server import _apply_main_model_assignment
+
+        # No stored base_url at all (the case #89's logic missed: its
+        # `model_cfg.get("base_url")` precondition meant a bare switch was a
+        # no-op and the OpenAI default leaked through).
+        out = _apply_main_model_assignment(
+            {"provider": "anthropic"}, "surplus", "claude-haiku-4.5"
+        )
+        assert out["provider"] == "surplus"
+        assert out["default"] == "claude-haiku-4.5"
+        assert out["base_url"] == "https://www.surplusintelligence.ai/api/inference/v1"
+
+        # A stale base_url from the previous provider is replaced too.
+        out = _apply_main_model_assignment(
+            {"provider": "openai-api", "base_url": "https://api.openai.com/v1"},
+            "surplus",
+            "claude-haiku-4.5",
+        )
+        assert out["base_url"] == "https://www.surplusintelligence.ai/api/inference/v1"
 
     def test_parse_model_ids_handles_openai_and_bare_shapes(self):
         """Model discovery must tolerate the common /v1/models shapes and
@@ -1968,9 +1998,10 @@ class TestWebServerEndpoints:
         assert model_cfg["default"] == "llama-3.1-8b"
         assert model_cfg["base_url"] == "http://127.0.0.1:8000/v1"
 
-    def test_set_model_main_non_custom_clears_stale_base_url(self):
-        """Switching to a hosted provider must clear a stale base_url so the
-        resolver picks that provider's own default endpoint."""
+    def test_set_model_main_non_custom_writes_provider_base_url(self):
+        """Switching to a hosted provider must replace a stale base_url with that
+        provider's own registered endpoint, so the resolver routes to the right
+        host (not the OpenAI default)."""
         from hermes_cli.config import load_config, save_config
 
         cfg = load_config()
@@ -1986,7 +2017,7 @@ class TestWebServerEndpoints:
             json={"scope": "main", "provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
         )
         assert resp.status_code == 200
-        assert resp.json()["base_url"] == ""
+        assert resp.json()["base_url"] == "https://openrouter.ai/api/v1"
 
     def test_set_model_main_same_provider_preserves_base_url(self):
         """Re-picking a model under the SAME provider must NOT wipe a configured
@@ -2070,7 +2101,7 @@ class TestWebServerEndpoints:
 
         model_cfg = load_config().get("model")
         assert model_cfg["provider"] == "openrouter"
-        assert model_cfg.get("base_url", "") == ""
+        assert model_cfg.get("base_url", "") == "https://openrouter.ai/api/v1"
 
     def test_set_model_main_gateway_failure_does_not_block_save(self, monkeypatch):
         """A Portal/gateway hiccup must never prevent saving the model."""
