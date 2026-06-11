@@ -16218,8 +16218,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # planned stops and should not trigger service-manager revival.
     if _signal_initiated_shutdown and not runner._restart_requested:
         logger.info(
-            "Exiting with code 1 (signal-initiated shutdown without restart "
-            "request) so systemd Restart=on-failure can revive the gateway."
+            "Exiting with code 1 (unexpected signal-initiated shutdown "
+            "without a restart request) so a process supervisor can revive "
+            "the gateway. This relies on a supervisor that restarts on "
+            "non-zero exit: systemd Restart=on-failure, Docker/Compose "
+            "restart: on-failure|unless-stopped (gateway as the container's "
+            "main process), s6/supervisord autorestart, or the Hermes "
+            "gateway-supervisor loop. Container deployments without one will "
+            "NOT come back up — see `hermes gateway service install`. "
+            "Operator-initiated stops (`hermes gateway stop`) and `--replace` "
+            "takeovers exit 0 instead and are never revived."
         )
         return False  # → sys.exit(1) in the caller
 
