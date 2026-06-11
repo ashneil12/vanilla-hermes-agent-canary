@@ -2148,6 +2148,28 @@ def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
     return merged
 
 
+def _sort_discovered_model_ids(ids: list[str]) -> list[str]:
+    """Sort a live-discovered (generic / marketplace) model catalog into a
+    stable, family-grouped order for the model pickers.
+
+    Marketplace providers (e.g. Surplus Intelligence) return hundreds of
+    models in seller-availability order, scattering related variants — a user
+    hunting for ``claude-opus-4-8-fast`` finds it 60 rows from
+    ``claude-opus-4.6-fast``, so it reads as "missing". A case-insensitive
+    alphabetical sort clusters each family (``claude-*``, ``gpt-*``,
+    ``llama-*``) together, making the list navigable.
+
+    Call this ONLY for generic live-discovery lists. Curated catalogs
+    (openrouter / nous / the openai default-endpoint intersect) carry a
+    deliberate hand-picked order and must be returned unchanged.
+    """
+    try:
+        return sorted(ids, key=lambda m: str(m).lower())
+    except Exception:
+        # Never let an ordering nicety break the picker — fall back to verbatim.
+        return ids
+
+
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Return the best known model catalog for a provider.
 
@@ -2330,8 +2352,13 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             if api_key:
                 live = _p.fetch_models(api_key=api_key)
                 if live:
-                    return live
-            # Use profile's fallback_models if defined
+                    # Generic live discovery returns ids in the provider's own
+                    # (often arbitrary marketplace) order. Sort so related
+                    # families cluster and the GUI/CLI pickers stay navigable
+                    # for 200+-entry catalogs. See _sort_discovered_model_ids.
+                    return _sort_discovered_model_ids(live)
+            # Use profile's fallback_models if defined (a small hand-ordered
+            # curated list — leave its order untouched).
             if _p.fallback_models:
                 return list(_p.fallback_models)
     except Exception:
