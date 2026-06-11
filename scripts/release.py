@@ -77,6 +77,10 @@ AUTHOR_MAP = {
     # hermes-fork: 2026-06-07 upstream sync (c98637723)
     "enesilhaydin@gmail.com": "enesilhaydin",
     # hermes-fork: 2026-06-06 upstream sync (56236b16e)
+    # hermes-fork: 2026-06-11 upstream sync (catch-up to latest) — check-attribution
+    "konsisumer@users.noreply.github.com": "konsisumer",
+    "maplestoryjuni222@gmail.com": "BROCCOLO1D",
+    "philip.a.dsouza@gmail.com": "PhilipAD",  # email variant of philipadsouza@gmail.com
     # hermes-fork: 2026-06-08 upstream sync (e88116256) — upstream new contributors
     "peterhao@Peters-MacBook-Air.local": "pinguarmy",
     "barronlroth@gmail.com": "barronlroth",
