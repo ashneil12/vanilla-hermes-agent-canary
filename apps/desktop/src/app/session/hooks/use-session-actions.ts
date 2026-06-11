@@ -8,7 +8,6 @@ import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChat
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { setSessionYolo } from '@/lib/yolo-session'
-import { clearComposerAttachments, clearComposerDraft } from '@/store/composer'
 import { clearQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
@@ -19,7 +18,6 @@ import {
   $messages,
   $sessions,
   $yoloActive,
-  getRememberedWorkspaceCwd,
   sessionPinId,
   setActiveSessionId,
   setAwaitingResponse,
@@ -41,7 +39,8 @@ import {
   setSessionStartedAt,
   setSessionsTotal,
   setTurnStartedAt,
-  setYoloActive
+  setYoloActive,
+  workspaceCwdForNewSession
 } from '@/store/session'
 import { reportBackendContract } from '@/store/updates'
 import type { SessionCreateResponse, SessionInfo, SessionResumeResponse, UsageStats } from '@/types/hermes'
@@ -210,14 +209,16 @@ function patchSessionWorkspace(sessionId: string, cwd: string | undefined) {
   setSessions(prev => prev.map(session => (session.id === sessionId ? { ...session, cwd } : session)))
 }
 
-function applyRuntimeInfo(
-  info: SessionCreateResponse['info'] | undefined
-): Partial<Pick<ClientSessionState, 'branch' | 'cwd'>> | null {
+function applyRuntimeInfo(info: SessionCreateResponse['info'] | undefined): Partial<
+  Pick<ClientSessionState, 'branch' | 'cwd' | 'fast' | 'model' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'>
+> | null {
   if (!info) {
     return null
   }
 
-  const sessionState: Partial<Pick<ClientSessionState, 'branch' | 'cwd'>> = {}
+  const sessionState: Partial<
+    Pick<ClientSessionState, 'branch' | 'cwd' | 'fast' | 'model' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'>
+  > = {}
 
   reportBackendContract(info.desktop_contract)
 
@@ -227,10 +228,12 @@ function applyRuntimeInfo(
 
   if (info.model) {
     setCurrentModel(info.model)
+    sessionState.model = info.model
   }
 
   if (info.provider) {
     setCurrentProvider(info.provider)
+    sessionState.provider = info.provider
   }
 
   if (info.cwd) {
@@ -249,18 +252,22 @@ function applyRuntimeInfo(
 
   if (typeof info.reasoning_effort === 'string') {
     setCurrentReasoningEffort(info.reasoning_effort)
+    sessionState.reasoningEffort = info.reasoning_effort
   }
 
   if (typeof info.service_tier === 'string') {
     setCurrentServiceTier(info.service_tier)
+    sessionState.serviceTier = info.service_tier
   }
 
   if (typeof info.fast === 'boolean') {
     setCurrentFastMode(info.fast)
+    sessionState.fast = info.fast
   }
 
   if (typeof info.yolo === 'boolean') {
     setYoloActive(info.yolo)
+    sessionState.yolo = info.yolo
   }
 
   if (info.usage) {
@@ -311,11 +318,17 @@ export function useSessionActions({
       })
       setSessionStartedAt(null)
       setTurnStartedAt(null)
-      // New chats inherit the current workspace.
-      setCurrentCwd(getRememberedWorkspaceCwd())
+      // New chats start in the configured default project dir when set,
+      // otherwise the sticky last-used workspace (PR #37586).
+      setCurrentModel('')
+      setCurrentProvider('')
+      setCurrentReasoningEffort('')
+      setCurrentServiceTier('')
+      setCurrentFastMode(false)
+      setYoloActive(false)
+      setCurrentCwd(workspaceCwdForNewSession())
       setCurrentBranch('')
-      clearComposerDraft()
-      clearComposerAttachments()
+      // Never clear the composer here — ChatBar's per-thread draft swap owns it.
       setFreshDraftReady(true)
     },
     [activeSessionIdRef, busyRef, navigate, selectedStoredSessionIdRef]
@@ -333,15 +346,17 @@ export function useSessionActions({
         // Route the new chat to the chosen profile's backend (null = primary,
         // so single-profile users are unaffected).
         await ensureGatewayProfile($newChatProfile.get())
-        const cwd = $currentCwd.get().trim() || getRememberedWorkspaceCwd()
+        const cwd = $currentCwd.get().trim() || workspaceCwdForNewSession()
         // Pass the owning profile so a new chat under a non-launch profile (global
         // remote mode) builds its agent + persists against THAT profile's home/db.
         const newChatProfile = $newChatProfile.get()
+
         const created = await requestGateway<SessionCreateResponse>('session.create', {
           cols: 96,
           ...(cwd && { cwd }),
           ...(newChatProfile ? { profile: newChatProfile } : {})
         })
+
         const stored = created.stored_session_id ?? null
 
         if (
@@ -467,8 +482,6 @@ export function useSessionActions({
         setCurrentCwd(cachedState.cwd)
         setCurrentBranch(cachedState.branch)
         setSessionStartedAt(Date.now())
-        clearComposerDraft()
-        clearComposerAttachments()
 
         try {
           const usage = await requestGateway<UsageStats>('session.usage', { session_id: cachedRuntimeId })
@@ -598,8 +611,6 @@ export function useSessionActions({
           }),
           storedSessionId
         )
-        clearComposerDraft()
-        clearComposerAttachments()
       } catch (err) {
         if (!isCurrentResume()) {
           return
@@ -722,8 +733,6 @@ export function useSessionActions({
         selectedStoredSessionIdRef.current = routedSessionId
         navigate(sessionRoute(routedSessionId))
 
-        clearComposerDraft()
-        clearComposerAttachments()
         const runtimeInfo = applyRuntimeInfo(branched.info)
 
         patchSessionWorkspace(routedSessionId, runtimeInfo?.cwd)
@@ -864,6 +873,12 @@ export function useSessionActions({
 
       try {
         await setSessionArchived(storedSessionId, true, archived?.profile)
+        // A sidebar refresh can race the optimistic removal while the PATCH is
+        // in flight and briefly reinsert the still-unarchived backend row. Win
+        // that race after the mutation succeeds so right-click → Archive does
+        // not appear to do nothing until the next full refresh.
+        setSessions(prev => prev.filter(s => s.id !== storedSessionId))
+        $pinnedSessionIds.set($pinnedSessionIds.get().filter(id => id !== storedSessionId && id !== archivedPinId))
         notify({ durationMs: 2_000, kind: 'success', message: copy.archived })
       } catch (err) {
         if (archived) {

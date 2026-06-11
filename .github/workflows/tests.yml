@@ -55,6 +55,16 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          # Persist uv's download/wheel cache (~/.cache/uv) across runs.
+          # Keyed on the dependency manifests, so the cache is reused until
+          # pyproject.toml or uv.lock changes. `uv sync` still runs every
+          # time, but resolves from the warm cache instead of re-downloading
+          # and re-building wheels.
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11
@@ -162,6 +172,16 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        with:
+          # Persist uv's download/wheel cache (~/.cache/uv) across runs.
+          # Keyed on the dependency manifests, so the cache is reused until
+          # pyproject.toml or uv.lock changes. `uv sync` still runs every
+          # time, but resolves from the warm cache instead of re-downloading
+          # and re-building wheels.
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Set up Python 3.11
         run: uv python install 3.11

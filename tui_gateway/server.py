@@ -1,5 +1,6 @@
 import atexit
 import concurrent.futures
+import contextlib
 import contextvars
 import copy
 import inspect
@@ -175,6 +176,7 @@ _LONG_HANDLERS = frozenset(
     {
         "browser.manage",
         "cli.exec",
+        "plugins.manage",
         "session.branch",
         "session.compress",
         "session.resume",
@@ -345,11 +347,44 @@ def _notify_session_boundary(event_type: str, session_id: str | None) -> None:
         pass
 
 
+def _claim_active_session_slot(
+    session_key: str,
+    *,
+    live_session_id: str,
+    surface: str = "tui",
+) -> tuple[Any, str | None]:
+    try:
+        from hermes_cli.active_sessions import try_acquire_active_session
+
+        return try_acquire_active_session(
+            session_id=session_key,
+            surface=surface,
+            config=_load_cfg(),
+            metadata={"live_session_id": live_session_id},
+        )
+    except Exception as exc:
+        logger.warning("Failed to claim active session slot: %s", exc)
+        return None, None
+
+
+def _release_active_session_slot(session: dict | None) -> None:
+    if not session:
+        return
+    lease = session.pop("active_session_lease", None)
+    if lease is None:
+        return
+    try:
+        lease.release()
+    except Exception:
+        logger.debug("Failed to release active session slot", exc_info=True)
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit for a session."""
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    _release_active_session_slot(session)
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
@@ -652,6 +687,40 @@ def _profile_home(profile: str | None) -> Path | None:
     if home.resolve() == Path(_hermes_home).resolve():
         return None
     return home if (home / "state.db").exists() or home.exists() else None
+
+
+# Placeholder ``terminal.cwd`` values that don't name a real directory — the
+# gateway resolves these to the home dir at runtime, so they must NOT be treated
+# as an explicit workspace (mirrors gateway/run.py's config bridge).
+_CWD_PLACEHOLDERS = {".", "auto", "cwd"}
+
+
+def _profile_configured_cwd(profile_home: Path | None) -> str | None:
+    """Resolve a non-launch profile's ``terminal.cwd`` from its own config.yaml.
+
+    The desktop's app-global remote mode serves every profile from one backend,
+    so the process-global ``TERMINAL_CWD`` belongs to the *launch* profile. A new
+    session bound to another profile must take its workspace from THAT profile's
+    config, not the stale env var (issue #40334). Returns an absolute, existing
+    directory, or None for placeholders / missing / invalid paths.
+    """
+    if profile_home is None:
+        return None
+    try:
+        import yaml
+
+        p = Path(profile_home) / "config.yaml"
+        if not p.exists():
+            return None
+        with open(p, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        raw = str((data.get("terminal") or {}).get("cwd") or "").strip()
+        if not raw or raw in _CWD_PLACEHOLDERS:
+            return None
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        return resolved if os.path.isdir(resolved) else None
+    except Exception:
+        return None
 
 
 def write_json(obj: dict) -> bool:
@@ -961,9 +1030,13 @@ def _normalize_completion_path(path_part: str) -> str:
 
 
 def _completion_cwd(params: dict | None = None) -> str:
+    params = params or {}
     raw = (
-        (params or {}).get("cwd")
-        or _sessions.get((params or {}).get("session_id") or "", {}).get("cwd")
+        params.get("cwd")
+        or _sessions.get(params.get("session_id") or "", {}).get("cwd")
+        # A session bound to another profile resolves its workspace from THAT
+        # profile's config before falling back to the launch profile's env var.
+        or _profile_configured_cwd(_profile_home(params.get("profile")))
         or os.environ.get("TERMINAL_CWD")
         or os.getcwd()
     )
@@ -1008,6 +1081,7 @@ def _git_branch_for_cwd(cwd: str) -> str:
             text=True,
             timeout=1.5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
@@ -1019,6 +1093,7 @@ def _git_branch_for_cwd(cwd: str) -> str:
             text=True,
             timeout=1.5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         return head.stdout.strip() if head.returncode == 0 else ""
     except Exception:
@@ -1095,6 +1170,34 @@ def _ensure_session_db_row(session: dict) -> None:
                 db.close()
             except Exception:
                 pass
+
+
+@contextlib.contextmanager
+def _session_db(session: dict):
+    """Yield the SessionDB that owns this session's row (profile-aware).
+
+    Mirrors :func:`_ensure_session_db_row`: a remote/profile session persists
+    into its own profile's ``state.db`` (a fresh handle we close on exit);
+    everything else borrows the shared ``_get_db()`` handle (left open). Yields
+    None when the db is unavailable.
+    """
+    db, close_db = None, False
+    profile_home = session.get("profile_home")
+    if profile_home:
+        from hermes_state import SessionDB
+
+        try:
+            db, close_db = SessionDB(db_path=Path(profile_home) / "state.db"), True
+        except Exception:
+            logger.debug("failed to open profile db for session", exc_info=True)
+    else:
+        db = _get_db()
+    try:
+        yield db
+    finally:
+        if close_db and db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
 
 
 def _set_session_cwd(session: dict, cwd: str) -> str:
@@ -1335,6 +1438,131 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     return model, None
 
 
+def _stored_session_runtime_overrides(row: dict | None) -> dict:
+    """Return runtime fields persisted with a stored session.
+
+    ``session.resume`` is a session-scoped operation: reopening an older chat
+    must restore the model/provider/reasoning state that chat actually used,
+    not whatever global model the user most recently selected in another chat.
+    The durable session row stores the model directly, the billing provider in
+    ``billing_provider``, and richer runtime knobs in JSON ``model_config``.
+    """
+    if not row:
+        return {}
+
+    raw_config = row.get("model_config")
+    model_config: dict = {}
+    if isinstance(raw_config, dict):
+        model_config = raw_config
+    elif isinstance(raw_config, str) and raw_config.strip():
+        try:
+            parsed = json.loads(raw_config)
+            if isinstance(parsed, dict):
+                model_config = parsed
+        except Exception:
+            logger.debug("failed to parse stored session model_config", exc_info=True)
+
+    overrides: dict = {}
+    model = str(row.get("model") or model_config.get("model") or "").strip()
+    provider = str(
+        model_config.get("provider")
+        or model_config.get("billing_provider")
+        or row.get("billing_provider")
+        or ""
+    ).strip()
+    base_url = str(model_config.get("base_url") or "").strip()
+    api_mode = str(model_config.get("api_mode") or "").strip()
+    reasoning_config = model_config.get("reasoning_config")
+    service_tier = str(model_config.get("service_tier") or "").strip()
+
+    if model:
+        # Use the same dict-shaped override that live /model switches use so a
+        # DB-restored session can preserve custom endpoint metadata across both
+        # initial resume and later rebuilds (/new). Deliberately do not persist
+        # or restore raw api_key here; endpoint credentials should continue to
+        # come from config/env/provider resolution rather than the session DB.
+        overrides["model_override"] = {
+            "model": model,
+            "provider": provider or None,
+            "base_url": base_url or None,
+            "api_mode": api_mode or None,
+        }
+    if provider:
+        overrides["provider_override"] = provider
+    if isinstance(reasoning_config, dict):
+        overrides["reasoning_config_override"] = reasoning_config
+    if service_tier:
+        overrides["service_tier_override"] = service_tier
+
+    return overrides
+
+
+def _runtime_model_config(agent, existing: dict | None = None) -> dict:
+    config = dict(existing or {})
+    model = str(getattr(agent, "model", "") or "").strip()
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    base_url = str(getattr(agent, "base_url", "") or "").strip()
+    api_mode = str(getattr(agent, "api_mode", "") or "").strip()
+    reasoning_config = getattr(agent, "reasoning_config", None)
+    service_tier = getattr(agent, "service_tier", None)
+
+    if model:
+        config["model"] = model
+    if provider:
+        config["provider"] = provider
+    if base_url:
+        config["base_url"] = base_url
+    else:
+        config.pop("base_url", None)
+    if api_mode:
+        config["api_mode"] = api_mode
+    else:
+        config.pop("api_mode", None)
+    if isinstance(reasoning_config, dict):
+        config["reasoning_config"] = reasoning_config
+    else:
+        config.pop("reasoning_config", None)
+    if service_tier:
+        config["service_tier"] = service_tier
+    else:
+        config.pop("service_tier", None)
+
+    return config
+
+
+def _persist_live_session_runtime(session: dict | None) -> None:
+    """Persist active session runtime so future resumes restore the same footer."""
+    if not session:
+        return
+    agent = session.get("agent")
+    session_key = str(session.get("session_key") or "").strip()
+    if agent is None or not session_key:
+        return
+
+    db = getattr(agent, "_session_db", None) or _get_db()
+    if db is None:
+        return
+
+    try:
+        row = db.get_session(session_key) or {}
+        raw_config = row.get("model_config")
+        existing_config = {}
+        if isinstance(raw_config, dict):
+            existing_config = raw_config
+        elif isinstance(raw_config, str) and raw_config.strip():
+            parsed = json.loads(raw_config)
+            if isinstance(parsed, dict):
+                existing_config = parsed
+        model_config = _runtime_model_config(agent, existing_config)
+        model = str(getattr(agent, "model", "") or "").strip()
+        if hasattr(db, "update_session_meta"):
+            db.update_session_meta(session_key, json.dumps(model_config), model or None)
+        elif model and hasattr(db, "update_session_model"):
+            db.update_session_model(session_key, model)
+    except Exception:
+        logger.debug("failed to persist live session runtime", exc_info=True)
+
+
 def _write_config_key(key_path: str, value):
     cfg = _load_cfg()
     current = cfg
@@ -1451,6 +1679,22 @@ def _load_enabled_toolsets() -> list[str] | None:
     ]
     cfg = None
     fallback_notice = None
+
+    # Coding posture (base Hermes): with no explicit pin, collapse to the
+    # coding toolset (+ enabled MCP servers) when sitting in a code workspace.
+    # The desktop app and `hermes --tui` both land here. See
+    # agent/coding_context.py. No config is loaded yet at this point, so we let
+    # coding_selection() load it lazily (cli.py passes its already-resolved
+    # CLI_CONFIG instead, purely to avoid a redundant read).
+    if not explicit:
+        try:
+            from agent.coding_context import coding_selection
+
+            selection = coding_selection(platform="tui")
+            if selection is not None:
+                return selection
+        except Exception:
+            pass
 
     try:
         from toolsets import validate_toolset
@@ -1622,7 +1866,13 @@ def _persist_model_switch(result) -> None:
     save_config(cfg)
 
 
-def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
+def _apply_model_switch(
+    sid: str,
+    session: dict,
+    raw_input: str,
+    *,
+    confirm_expensive_model: bool = False,
+) -> dict:
     from hermes_cli.model_switch import parse_model_flags, switch_model
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -1679,6 +1929,27 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
 
+    if not confirm_expensive_model:
+        try:
+            from hermes_cli.model_cost_guard import expensive_model_warning
+
+            warning = expensive_model_warning(
+                result.new_model,
+                provider=result.target_provider,
+                base_url=result.base_url or current_base_url,
+                api_key=result.api_key or current_api_key,
+                model_info=result.model_info,
+            )
+        except Exception:
+            warning = None
+        if warning is not None:
+            return {
+                "value": result.new_model,
+                "warning": warning.message,
+                "confirm_required": True,
+                "confirm_message": warning.message,
+            }
+
     if agent:
         agent.switch_model(
             new_model=result.new_model,
@@ -1688,6 +1959,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_mode=result.api_mode,
         )
         _restart_slash_worker(sid, session)
+        _persist_live_session_runtime(session)
         _emit("session.info", sid, _session_info(agent, session))
 
     # Record the switch as a PER-SESSION override so a later rebuild of THIS
@@ -1713,7 +1985,11 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         }
     if persist_global:
         _persist_model_switch(result)
-    return {"value": result.new_model, "warning": result.warning_message or ""}
+    return {
+        "value": result.new_model,
+        "warning": result.warning_message or "",
+        "confirm_required": False,
+    }
 
 
 def _compress_session_history(
@@ -1957,7 +2233,8 @@ def _current_profile_name() -> str:
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing
 # cryptically downstream. Bump whenever the desktop's backend contract changes.
-DESKTOP_BACKEND_CONTRACT = 1
+# v2: adds the file.attach RPC (remote-gateway non-image file upload).
+DESKTOP_BACKEND_CONTRACT = 2
 
 
 def _session_info(agent, session: dict | None = None) -> dict:
@@ -1998,6 +2275,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = False
     info: dict = {
         "model": getattr(agent, "model", ""),
+        "provider": getattr(agent, "provider", ""),
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -2393,6 +2671,14 @@ def _agent_cbs(sid: str) -> dict:
         "clarify_callback": lambda q, c: _block(
             "clarify.request", sid, {"question": q, "choices": c}
         ),
+        # read_terminal tool (desktop GUI): same blocking bridge as clarify — the
+        # renderer answers terminal.read.respond with the serialized buffer.
+        "read_terminal_callback": lambda start=None, count=None: _block(
+            "terminal.read.request",
+            sid,
+            {k: v for k, v in (("start", start), ("count", count)) if v is not None},
+            timeout=30,
+        ),
     }
 
 
@@ -2552,6 +2838,29 @@ def _parse_tui_skills_env() -> list[str]:
     return skills
 
 
+def _load_fallback_model():
+    """Return the configured fallback chain for TUI-created agents.
+
+    Delegates to the shared ``get_fallback_chain`` helper so the TUI path
+    stays in parity with ``HermesCLI.__init__`` and ``gateway/run.py``:
+    ``fallback_providers`` is the primary source of truth and keeps its
+    order, with legacy ``fallback_model`` entries merged in afterwards
+    (deduped on provider/model/base_url).
+    """
+    from hermes_cli.fallback_config import get_fallback_chain
+
+    return get_fallback_chain(_load_cfg())
+
+
+def _agent_fallback_model(agent):
+    """Return an agent's fallback chain without rehydrating deliberately empty chains."""
+    if hasattr(agent, "_fallback_chain"):
+        return getattr(agent, "_fallback_chain") or []
+    if hasattr(agent, "_fallback_model"):
+        return getattr(agent, "_fallback_model", None)
+    return _load_fallback_model()
+
+
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
 
@@ -2586,7 +2895,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "platform": "tui",
         "session_db": _get_db(),
-        "fallback_model": getattr(agent, "_fallback_model", None),
+        "fallback_model": _agent_fallback_model(agent),
     }
 
 
@@ -2754,7 +3063,10 @@ def _make_agent(
     key: str,
     session_id: str | None = None,
     session_db=None,
-    model_override: dict | None = None,
+    model_override: dict | str | None = None,
+    provider_override: str | None = None,
+    reasoning_config_override: dict | None = None,
+    service_tier_override: str | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -2790,12 +3102,11 @@ def _make_agent(
                 part for part in (system_prompt, skills_prompt) if part
             ).strip()
     # Prefer a per-session model override (set by a prior in-session /model
-    # switch) over global config/env resolution. This keeps a rebuilt session
-    # (/new, resume) on the model the user picked FOR THIS SESSION, without
-    # reading process-global env vars that another session may have changed.
-    if model_override and model_override.get("model"):
+    # switch) over global config/env resolution. Resume-time stored sessions may
+    # also pass scalar model/provider/runtime knobs from the persisted DB row.
+    if isinstance(model_override, dict) and model_override.get("model"):
         model = str(model_override.get("model") or "")
-        requested_provider = model_override.get("provider") or None
+        requested_provider = model_override.get("provider") or provider_override or None
         override_base_url = model_override.get("base_url")
         override_api_key = model_override.get("api_key")
         override_api_mode = model_override.get("api_mode")
@@ -2814,6 +3125,10 @@ def _make_agent(
             runtime["api_mode"] = override_api_mode
     else:
         model, requested_provider = _resolve_startup_runtime()
+        if isinstance(model_override, str) and model_override:
+            model = model_override
+        if provider_override:
+            requested_provider = provider_override
         runtime = resolve_runtime_provider(
             requested=requested_provider,
             target_model=model or None,
@@ -2834,8 +3149,16 @@ def _make_agent(
         # display detail).  See cli.py PR (decoupling fix) for the matching
         # change on the classic CLI side.
         verbose_logging=False,
-        reasoning_config=_load_reasoning_config(),
-        service_tier=_load_service_tier(),
+        reasoning_config=(
+            reasoning_config_override
+            if reasoning_config_override is not None
+            else _load_reasoning_config()
+        ),
+        service_tier=(
+            service_tier_override
+            if service_tier_override is not None
+            else _load_service_tier()
+        ),
         enabled_toolsets=_load_enabled_toolsets(),
         platform="tui",
         session_id=session_id or key,
@@ -2845,6 +3168,7 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
+        fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
 
@@ -3284,6 +3608,9 @@ def _(rid, params: dict) -> dict:
 
     ready = threading.Event()
     now = time.time()
+    lease, limit_message = _claim_active_session_slot(key, live_session_id=sid)
+    if limit_message is not None:
+        return _err(rid, 4090, limit_message)
 
     with _sessions_lock:
         _sessions[sid] = {
@@ -3292,6 +3619,7 @@ def _(rid, params: dict) -> dict:
             "agent_ready": ready,
             "attached_images": [],
             "close_on_disconnect": is_truthy_value(params.get("close_on_disconnect", False)),
+            "active_session_lease": lease,
             "cols": cols,
             "created_at": now,
             "edit_snapshots": {},
@@ -3497,6 +3825,9 @@ def _(rid, params: dict) -> dict:
     # _session_resume_lock across it would stall session.close on the main
     # dispatch thread (it's not a _LONG_HANDLER), blocking fast-path RPCs.
     sid = uuid.uuid4().hex[:8]
+    lease, limit_message = _claim_active_session_slot(target, live_session_id=sid)
+    if limit_message is not None:
+        return _err(rid, 4090, limit_message)
     _enable_gateway_prompts()
     home_token = (
         set_hermes_home_override(str(profile_home)) if profile_home is not None else None
@@ -3515,11 +3846,22 @@ def _(rid, params: dict) -> dict:
         try:
             # Pass the profile's db so the agent persists turns to the right
             # state.db; home override is active here so config/skills/model
-            # resolve to the profile too.
-            agent = _make_agent(sid, target, session_id=target, session_db=db)
+            # resolve to the profile too. Runtime identity is restored from the
+            # stored session row so switching chats does not inherit whatever
+            # global model another chat last selected.
+            stored_runtime_overrides = _stored_session_runtime_overrides(found)
+            agent = _make_agent(
+                sid,
+                target,
+                session_id=target,
+                session_db=db,
+                **stored_runtime_overrides,
+            )
         finally:
             _clear_session_context(tokens)
     except Exception as e:
+        if lease is not None:
+            lease.release()
         return _err(rid, 5000, f"resume failed: {e}")
     finally:
         if home_token is not None:
@@ -3536,6 +3878,8 @@ def _(rid, params: dict) -> dict:
                     agent.close()
             except Exception:
                 pass
+            if lease is not None:
+                lease.release()
             other_sid, other_session = live
             payload = _live_session_payload(
                 other_sid,
@@ -3549,13 +3893,20 @@ def _(rid, params: dict) -> dict:
         try:
             _init_session(sid, target, agent, history, cols=cols)
             if sid in _sessions:
+                if stored_runtime_overrides.get("model_override") is not None:
+                    _sessions[sid]["model_override"] = stored_runtime_overrides[
+                        "model_override"
+                    ]
                 _sessions[sid]["display_history_prefix"] = display_history_prefix
                 # Remember the profile home so each turn re-binds HERMES_HOME (the
                 # agent persists to its own db, but mid-turn home reads — memory,
                 # skills — must resolve to the resumed profile too).
                 if profile_home is not None:
                     _sessions[sid]["profile_home"] = str(profile_home)
+                _sessions[sid]["active_session_lease"] = lease
         except Exception as e:
+            if lease is not None:
+                lease.release()
             return _err(rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
     return _ok(
@@ -3769,10 +4120,16 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait({"session_id": sid}, rid)
     if err:
         return err
+    assert session is not None
 
     return _ok(
         rid,
-        _live_session_payload(sid, session, touch=True),
+        _live_session_payload(
+            sid,
+            session,
+            touch=True,
+            transport=current_transport() or _stdio_transport,
+        ),
     )
 
 
@@ -3879,6 +4236,145 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4022, str(e))
     except Exception as e:
         return _err(rid, 5007, str(e))
+
+
+@method("handoff.request")
+def _(rid, params: dict) -> dict:
+    """Queue a handoff of this session to a messaging platform.
+
+    Desktop parity with the CLI ``/handoff`` command: we only write
+    ``handoff_state='pending'`` onto the persisted session row. The actual
+    transfer is performed by the separate ``hermes gateway`` process, whose
+    ``_handoff_watcher`` claims the row, re-binds the session to the platform's
+    home channel, and forges a synthetic turn. The desktop then polls
+    ``handoff.state`` for the terminal result.
+    """
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    if session.get("running"):
+        return _err(
+            rid,
+            4009,
+            "session busy — wait for the current turn to finish, then retry the handoff",
+        )
+
+    platform_name = (params.get("platform", "") or "").strip().lower()
+    if not platform_name:
+        return _err(rid, 4023, "platform required")
+
+    # Validate against the live gateway config — an unconfigured platform or a
+    # missing home channel would leave the handoff pending forever, so reject
+    # up front with a clear, actionable message (mirrors cli.py).
+    try:
+        from gateway.config import Platform, load_gateway_config
+    except Exception as e:  # pragma: no cover — gateway pkg always ships
+        return _err(rid, 5021, f"could not load gateway config: {e}")
+    try:
+        platform = Platform(platform_name)
+    except (ValueError, KeyError):
+        return _err(rid, 4024, f"unknown platform '{platform_name}'")
+    try:
+        gw_config = load_gateway_config()
+    except Exception as e:
+        return _err(rid, 5021, f"could not load gateway config: {e}")
+    pcfg = gw_config.platforms.get(platform)
+    if not pcfg or not pcfg.enabled:
+        return _err(
+            rid,
+            4025,
+            f"platform '{platform_name}' is not configured/enabled in the gateway",
+        )
+    home = gw_config.get_home_channel(platform)
+    if not home or not home.chat_id:
+        return _err(
+            rid,
+            4026,
+            f"no home channel configured for {platform_name} — set one with "
+            "/sethome on the destination chat first",
+        )
+
+    # The watcher transfers a persisted DB row, so make sure one exists even
+    # for a brand-new empty chat (mirrors the CLI's set_session_title stub).
+    _ensure_session_db_row(session)
+
+    with _session_db(session) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        key = session["session_key"]
+        try:
+            if not db.get_session(key):
+                db.set_session_title(key, f"handoff-{key[:8]}")
+            ok = db.request_handoff(key, platform_name)
+        except Exception as e:
+            return _err(rid, 5007, str(e))
+
+    if not ok:
+        return _err(
+            rid,
+            4027,
+            "session is already in flight for handoff — wait for it to settle, then retry",
+        )
+    return _ok(
+        rid,
+        {
+            "queued": True,
+            "session_key": key,
+            "platform": platform_name,
+            "home_name": home.name,
+        },
+    )
+
+
+@method("handoff.state")
+def _(rid, params: dict) -> dict:
+    """Poll the handoff state for a session.
+
+    Returns ``{state, platform, error}`` where ``state`` is one of
+    ``pending|running|completed|failed`` (or empty when no handoff record
+    exists). Desktop polls this after ``handoff.request``.
+    """
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    with _session_db(session) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        record = db.get_handoff_state(session["session_key"])
+
+    record = record or {}
+    return _ok(
+        rid,
+        {
+            "state": record.get("state") or "",
+            "platform": record.get("platform") or "",
+            "error": record.get("error") or "",
+        },
+    )
+
+
+@method("handoff.fail")
+def _(rid, params: dict) -> dict:
+    """Mark an in-flight handoff as failed so the user can retry.
+
+    Desktop calls this when its bounded poll times out. Only pending/running
+    rows are changed so a late success from the gateway watcher is not clobbered.
+    """
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    reason = str(params.get("error") or "handoff failed").strip()[:500]
+    with _session_db(session) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        key = session["session_key"]
+        record = db.get_handoff_state(key) or {}
+        state = record.get("state") or ""
+        if state in {"pending", "running"}:
+            db.fail_handoff(key, reason)
+            return _ok(rid, {"failed": True, "state": "failed"})
+
+    return _ok(rid, {"failed": False, "state": state})
 
 
 @method("session.usage")
@@ -4192,6 +4688,10 @@ def _(rid, params: dict) -> dict:
     if not history:
         return _err(rid, 4008, "nothing to branch — send a message first")
     new_key = _new_session_key()
+    new_sid = uuid.uuid4().hex[:8]
+    lease, limit_message = _claim_active_session_slot(new_key, live_session_id=new_sid)
+    if limit_message is not None:
+        return _err(rid, 4090, limit_message)
     branch_name = params.get("name", "")
     try:
         if branch_name:
@@ -4224,8 +4724,9 @@ def _(rid, params: dict) -> dict:
             )
         db.set_session_title(new_key, title)
     except Exception as e:
+        if lease is not None:
+            lease.release()
         return _err(rid, 5008, f"branch failed: {e}")
-    new_sid = uuid.uuid4().hex[:8]
     try:
         tokens = _set_session_context(new_key)
         try:
@@ -4235,7 +4736,11 @@ def _(rid, params: dict) -> dict:
         _init_session(
             new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
         )
+        if new_sid in _sessions:
+            _sessions[new_sid]["active_session_lease"] = lease
     except Exception as e:
+        if lease is not None:
+            lease.release()
         return _err(rid, 5000, f"agent init failed on branch: {e}")
     return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
 
@@ -5515,7 +6020,7 @@ def _(rid, params: dict) -> dict:
             str(pdf_path), str(out_prefix),
         ]
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return _err(rid, 5028, "pdftoppm timed out (>120s)")
         if res.returncode != 0:
@@ -5547,6 +6052,197 @@ def _(rid, params: dict) -> dict:
                 "text": f"[User attached PDF: {display_name} ({len(attached_pages)} page(s))]",
             },
         )
+
+
+_ATTACHMENT_REF_NEEDS_QUOTING_RE = None
+
+
+def _format_ref_value(value: str) -> str:
+    """Quote a context-ref value when it contains whitespace or bracket chars.
+
+    Mirrors the desktop ``formatRefValue`` so the staged ``@file:`` ref round-trips
+    through ``agent.context_references`` cleanly.
+    """
+    import re as _re
+
+    global _ATTACHMENT_REF_NEEDS_QUOTING_RE
+    if _ATTACHMENT_REF_NEEDS_QUOTING_RE is None:
+        _ATTACHMENT_REF_NEEDS_QUOTING_RE = _re.compile(r"""[\s()\[\]{}<>"'`]""")
+    if not value or not _ATTACHMENT_REF_NEEDS_QUOTING_RE.search(value):
+        return value
+    if "`" not in value:
+        return f"`{value}`"
+    if '"' not in value:
+        return f'"{value}"'
+    if "'" not in value:
+        return f"'{value}'"
+    return value
+
+
+def _attachment_ref_path(session: dict, target: Path) -> str:
+    """Workspace-relative path for an attachment, or the absolute path if outside."""
+    workspace = Path(_session_cwd(session)).resolve()
+    try:
+        rel = target.resolve().relative_to(workspace)
+        return str(rel).replace(os.sep, "/")
+    except ValueError:
+        return str(target.resolve())
+
+
+def _desktop_attachment_dir(session: dict) -> Path:
+    root = Path(_session_cwd(session)).resolve() / ".hermes" / "desktop-attachments"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _sanitize_attachment_name(name: str) -> str:
+    import re as _re
+
+    candidate = Path(str(name or "").strip()).name
+    candidate = _re.sub(r"[\x00-\x1f]+", "_", candidate)
+    candidate = candidate.strip().strip(".")
+    return candidate or "attachment"
+
+
+def _unique_attachment_path(root: Path, filename: str) -> Path:
+    candidate = root / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem or "attachment"
+    suffix = Path(filename).suffix
+    counter = 2
+    while True:
+        next_candidate = root / f"{stem}-{counter}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        counter += 1
+
+
+def _resolve_gateway_attachment_path(raw: str) -> Path | None:
+    """Resolve a raw path token to a gateway-visible file, or None."""
+    if not raw:
+        return None
+    try:
+        from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
+    except Exception:
+        return None
+
+    dropped = _detect_file_drop(raw)
+    if dropped:
+        return Path(dropped["path"]).resolve()
+    path_token, _remainder = _split_path_input(raw)
+    resolved = _resolve_attachment_path(path_token)
+    return Path(resolved).resolve() if resolved is not None else None
+
+
+def _decode_attachment_data_url(data_url: str) -> bytes:
+    """Decode a ``data:<any-mime>;base64,<b64>`` payload to bytes.
+
+    Unlike ``_decode_attach_base64`` (image-mime-specific), this accepts any
+    media type — text/csv, application/pdf, etc. — so non-image file uploads
+    round-trip. Also tolerates a bare base64 string with no data-URL prefix.
+    """
+    import base64 as _base64
+    import binascii as _binascii
+    import re as _re
+
+    cleaned = (data_url or "").strip()
+    m = _re.match(r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", cleaned, _re.DOTALL | _re.I)
+    if m:
+        cleaned = m.group(1)
+    cleaned = _re.sub(r"\s+", "", cleaned)
+    try:
+        return _base64.b64decode(cleaned, validate=True)
+    except (ValueError, _binascii.Error) as exc:
+        raise ValueError("invalid data_url payload") from exc
+
+
+def _stage_session_file_attachment(
+    session: dict,
+    *,
+    raw_path: str,
+    data_url: str,
+    name: str,
+) -> tuple[Path, bool]:
+    """Make a desktop file attachment available to the remote gateway agent.
+
+    Three cases:
+      1. The path resolves to a file already INSIDE the session workspace — use
+         it as-is (no copy, ``uploaded=False``).
+      2. The path resolves to a gateway-visible file OUTSIDE the workspace — copy
+         it into ``.hermes/desktop-attachments/`` so the ``@file:`` ref resolves.
+      3. The path doesn't exist on the gateway (the common remote case: it's a
+         path on the CLIENT's disk) — decode the uploaded ``data_url`` bytes and
+         write them into ``.hermes/desktop-attachments/``.
+
+    Returns ``(stored_path, uploaded)``.
+    """
+    workspace = Path(_session_cwd(session)).resolve()
+    resolved = _resolve_gateway_attachment_path(raw_path)
+    if resolved is not None:
+        try:
+            resolved.relative_to(workspace)
+            return resolved, False
+        except ValueError:
+            payload = resolved.read_bytes()
+            filename = resolved.name
+    else:
+        if not data_url:
+            raise ValueError("file not found on gateway and no data_url provided")
+        payload = _decode_attachment_data_url(data_url)
+        filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
+
+    upload_dir = _desktop_attachment_dir(session)
+    target = _unique_attachment_path(upload_dir, _sanitize_attachment_name(filename))
+    target.write_bytes(payload)
+    return target.resolve(), True
+
+
+@method("file.attach")
+def _(rid, params: dict) -> dict:
+    """Stage a non-image file attachment into the session workspace.
+
+    The image/PDF path renders to vision tiles; this one keeps the file as a
+    readable artifact and returns a workspace-relative ``@file:`` ref so the
+    agent's file tools (and ``agent.context_references``) can read it. Solves the
+    remote-gateway case where the desktop passes a path that only exists on the
+    CLIENT's disk: the client uploads ``data_url`` bytes and we materialize the
+    file on the gateway.
+
+    Params:
+      session_id (str, required)
+      path (str): client/host path of the file (used for naming + local-mode
+        gateway-visible resolution).
+      data_url (str): ``data:<mime>;base64,<b64>`` upload of the file bytes,
+        required when the path isn't visible to the gateway.
+      name (str, optional): preferred filename.
+    """
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    raw = str(params.get("path", "") or "").strip()
+    data_url = str(params.get("data_url", "") or "").strip()
+    name = str(params.get("name", "") or "").strip()
+    if not raw and not data_url:
+        return _err(rid, 4015, "path or data_url required")
+    try:
+        stored_path, uploaded = _stage_session_file_attachment(
+            session, raw_path=raw, data_url=data_url, name=name
+        )
+        ref_path = _attachment_ref_path(session, stored_path)
+        return _ok(
+            rid,
+            {
+                "attached": True,
+                "name": stored_path.name,
+                "path": str(stored_path),
+                "ref_path": ref_path,
+                "ref_text": f"@file:{_format_ref_value(ref_path)}",
+                "uploaded": uploaded,
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5028, str(e))
 
 
 @method("image.detach")
@@ -5795,6 +6491,12 @@ def _(rid, params: dict) -> dict:
     return _respond(rid, params, "answer")
 
 
+@method("terminal.read.respond")
+def _(rid, params: dict) -> dict:
+    # `text` is a JSON string of the serialized terminal buffer + line metadata.
+    return _respond(rid, params, "text")
+
+
 @method("sudo.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "password")
@@ -5863,13 +6565,31 @@ def _(rid, params: dict) -> dict:
                     if session.get("agent") is None:
                         return _err(rid, 5032, "agent initialization failed")
                 result = _apply_model_switch(
-                    params.get("session_id", ""), session, value
+                    params.get("session_id", ""),
+                    session,
+                    value,
+                    confirm_expensive_model=bool(
+                        params.get("confirm_expensive_model", False)
+                    ),
                 )
             else:
-                result = _apply_model_switch("", {"agent": None}, value)
+                result = _apply_model_switch(
+                    "",
+                    {"agent": None},
+                    value,
+                    confirm_expensive_model=bool(
+                        params.get("confirm_expensive_model", False)
+                    ),
+                )
             return _ok(
                 rid,
-                {"key": key, "value": result["value"], "warning": result["warning"]},
+                {
+                    "key": key,
+                    "value": result["value"],
+                    "warning": result["warning"],
+                    "confirm_required": result.get("confirm_required", False),
+                    "confirm_message": result.get("confirm_message", ""),
+                },
             )
         except Exception as e:
             return _err(rid, 5001, str(e))
@@ -5927,6 +6647,7 @@ def _(rid, params: dict) -> dict:
             if nv == "fast":
                 current_overrides.update(overrides)
             agent.request_overrides = current_overrides
+            _persist_live_session_runtime(session)
             _emit(
                 "session.info",
                 params.get("session_id", ""),
@@ -6093,6 +6814,12 @@ def _(rid, params: dict) -> dict:
             _write_config_key("agent.reasoning_effort", arg)
             if session and session.get("agent") is not None:
                 session["agent"].reasoning_config = parsed
+                _persist_live_session_runtime(session)
+                _emit(
+                    "session.info",
+                    params.get("session_id", ""),
+                    _session_info(session["agent"], session),
+                )
             return _ok(rid, {"key": key, "value": arg})
         except Exception as e:
             return _err(rid, 5001, str(e))
@@ -6789,6 +7516,7 @@ def _(rid, params: dict) -> dict:
             timeout=min(int(params.get("timeout", 240)), 600),
             cwd=os.getcwd(),
             env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
         )
         parts = [r.stdout or "", r.stderr or ""]
         out = "\n".join(p for p in parts if p).strip() or "(no output)"
@@ -6849,6 +7577,7 @@ def _(rid, params: dict) -> dict:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                stdin=subprocess.DEVNULL,
             )
             output = (
                 (r.stdout or "")
@@ -7239,6 +7968,7 @@ def _list_repo_files(root: str) -> list[str]:
             capture_output=True,
             timeout=2.0,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         if top_result.returncode == 0:
             top = top_result.stdout.decode("utf-8", "replace").strip()
@@ -7256,6 +7986,7 @@ def _list_repo_files(root: str) -> list[str]:
                 capture_output=True,
                 timeout=2.0,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
             if list_result.returncode == 0:
                 for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
@@ -8964,7 +9695,83 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5025, str(e))
 
 
-# ── Methods: shell ───────────────────────────────────────────────────
+@method("plugins.manage")
+def _(rid, params: dict) -> dict:
+    """List installed plugins with activation state, or toggle one on/off.
+
+    Backs the TUI Plugins Hub. Uses the same disk-discovery + enable/disable
+    primitives as ``hermes plugins`` / the dashboard, so the three surfaces
+    agree on what's installed and what's enabled.
+
+    Actions:
+      - ``list``   → {"plugins": [{name, version, description, source,
+                       status}], "user_count": N, "bundled_count": M}
+      - ``toggle`` → flip ``name`` based on ``enable`` (bool). Returns the
+                       refreshed row plus {"ok", "unchanged"}.
+    """
+    action = params.get("action", "list")
+    try:
+        from hermes_cli.plugins_cmd import (
+            _discover_all_plugins,
+            _get_disabled_set,
+            _get_enabled_set,
+            _plugin_status,
+        )
+
+        def _rows():
+            enabled = _get_enabled_set()
+            disabled = _get_disabled_set()
+            out = []
+            for name, version, desc, source, _dir, key in sorted(
+                _discover_all_plugins()
+            ):
+                out.append(
+                    {
+                        "name": name,
+                        "version": str(version or ""),
+                        "description": desc or "",
+                        "source": source,
+                        "status": _plugin_status(name, enabled, disabled, key=key),
+                    }
+                )
+            return out
+
+        if action == "list":
+            rows = _rows()
+            user_count = sum(1 for r in rows if r["source"] != "bundled")
+            return _ok(
+                rid,
+                {
+                    "plugins": rows,
+                    "user_count": user_count,
+                    "bundled_count": len(rows) - user_count,
+                },
+            )
+
+        if action == "toggle":
+            from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
+
+            name = (params.get("name") or "").strip()
+            if not name:
+                return _err(rid, 4019, "plugins.toggle requires a 'name'")
+            enable = bool(params.get("enable"))
+            result = dashboard_set_agent_plugin_enabled(name, enabled=enable)
+            if not result.get("ok"):
+                return _err(rid, 5026, result.get("error") or "toggle failed")
+            row = next((r for r in _rows() if r["name"] == name), None)
+            return _ok(
+                rid,
+                {
+                    "ok": True,
+                    "unchanged": bool(result.get("unchanged")),
+                    "name": name,
+                    "plugin": row,
+                },
+            )
+
+        return _err(rid, 4017, f"unknown plugins action: {action}")
+    except Exception as e:
+        return _err(rid, 5026, str(e))
 
 
 @method("shell.exec")
@@ -8989,7 +9796,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
+            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd(),
+            stdin=subprocess.DEVNULL,
         )
         return _ok(
             rid,
