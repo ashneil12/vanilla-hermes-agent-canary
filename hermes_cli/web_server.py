@@ -828,6 +828,29 @@ def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, st
     return prov_in, model_in
 
 
+def _provider_profile_base_url(provider: str) -> str:
+    """Return the canonical ``base_url`` of a registered provider profile.
+
+    BYOK marketplace providers (e.g. ``surplus``) declare their own inference
+    endpoint via a :class:`ProviderProfile`. When a main-model switch lands on
+    such a provider with no explicit ``base_url``, we must write that endpoint
+    into config — otherwise the runtime falls back to the OpenAI default host
+    and the provider's key is sent to the wrong server.
+
+    Returns the trimmed profile ``base_url`` (no trailing slash), or ``""`` when
+    the provider has no profile, no ``base_url``, or anything goes wrong.
+    """
+    try:
+        from providers import get_provider_profile
+
+        prof = get_provider_profile(provider)
+        if prof is not None and getattr(prof, "base_url", None):
+            return str(prof.base_url).strip().rstrip("/")
+    except Exception:
+        pass
+    return ""
+
+
 def _apply_main_model_assignment(
     model_cfg: "Any", provider: str, model: str, base_url: str = ""
 ) -> dict:
@@ -838,18 +861,23 @@ def _apply_main_model_assignment(
     - An explicitly supplied ``base_url`` is always persisted (covers
       ``custom``/local endpoints and any provider whose key is bound to a
       non-default host).
-    - Otherwise, a stale ``base_url`` is cleared ONLY when switching to a
-      *different* provider — that URL belonged to the old provider. When the
-      provider is unchanged and no new URL is supplied, the existing
-      ``base_url`` is preserved. This keeps a user's custom endpoint (e.g. a
-      Xiaomi MiMo Token Plan host, ``https://token-plan-*.xiaomimimo.com/v1``)
-      alive when they merely re-pick a model under the same provider — picking
-      a model previously wiped it, forcing the registry default and breaking
-      Token Plan keys.
+    - Otherwise, when switching to a *different* provider, the stale URL (which
+      belonged to the old provider) is replaced with the NEW provider's
+      canonical endpoint from its registered :class:`ProviderProfile`, falling
+      back to ``""`` (registry default) only when the provider declares no
+      profile ``base_url``. This is what keeps BYOK marketplace providers like
+      ``surplus`` — which DOES have a key but a non-OpenAI endpoint — routing to
+      their own host instead of the OpenAI default after a switch.
+    - When the provider is unchanged and no new URL is supplied, the existing
+      ``base_url`` is preserved untouched. This keeps a user's custom endpoint
+      (e.g. a Xiaomi MiMo Token Plan host,
+      ``https://token-plan-*.xiaomimimo.com/v1``) alive when they merely re-pick
+      a model under the same provider — picking a model previously wiped it,
+      forcing the registry default and breaking Token Plan keys.
 
     The runtime resolver reads ``model.base_url`` from config (it ignores
     ``OPENAI_BASE_URL``) and only honors it when the configured provider matches
-    and the pool entry is on the registry default, so preserving it here is what
+    and the pool entry is on the registry default, so writing it here is what
     lets the override actually route. The hardcoded ``context_length`` override
     is always dropped since the new model may have a different context window.
 
@@ -864,11 +892,13 @@ def _apply_main_model_assignment(
     model_cfg["default"] = model
     if base_url.strip():
         model_cfg["base_url"] = base_url.strip()
-    elif model_cfg.get("base_url") and new_provider != prev_provider:
-        # Switching providers: the old URL belonged to the old provider, drop
-        # it so the new provider's default endpoint is used. Same-provider
+    elif new_provider != prev_provider:
+        # Switching providers with no explicit URL: adopt the new provider's
+        # canonical endpoint from its registered profile (so BYOK providers like
+        # surplus keep their own host), falling back to "" (registry default)
+        # when the provider declares no profile base_url. Same-provider
         # re-assignment keeps the user's configured base_url intact.
-        model_cfg["base_url"] = ""
+        model_cfg["base_url"] = _provider_profile_base_url(new_provider)
     model_cfg.pop("context_length", None)
     return model_cfg
 
