@@ -198,10 +198,13 @@ function ModelResults({
     provider.name.toLowerCase().includes(q) ||
     provider.slug.toLowerCase().includes(q)
 
-  // Only configured providers (those with curated models) are selectable
-  // here. Switching to a NOT-yet-configured provider goes through the
-  // "Add provider" footer button, which opens the full onboarding selector.
-  const configured = providers.filter(p => (p.models ?? []).length > 0)
+  // Only providers with usable credentials AND curated models are selectable
+  // here. A provider the box has no key for is excluded even if the backend
+  // surfaced models for it — switching to one would brick every new session at
+  // agent init ("Provider 'X' is set in config.yaml but no API key was found").
+  // Setting one up goes through the "Add provider" footer button, which opens
+  // the full onboarding selector.
+  const configured = providers.filter(p => (p.models ?? []).length > 0 && p.authenticated !== false)
 
   return (
     <>

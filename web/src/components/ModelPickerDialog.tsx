@@ -39,6 +39,10 @@ interface ModelOptionProvider {
   total_models?: number;
   is_current?: boolean;
   warning?: string;
+  /** False for providers the box has no usable credentials for. Selecting one
+   *  would persist a dead provider into config.yaml and brick new sessions at
+   *  agent init, so these are filtered out of the switcher. */
+  authenticated?: boolean;
 }
 
 interface ModelOptionsResponse {
@@ -129,7 +133,12 @@ export function ModelPickerDialog(props: Props) {
     promise
       .then((r) => {
         if (closedRef.current) return;
-        const next = r?.providers ?? [];
+        // Only providers with usable credentials are selectable. A provider the
+        // box has no key for is excluded even if the backend surfaced models for
+        // it — switching to one would brick every new session at agent init
+        // ("Provider 'X' is set in config.yaml but no API key was found").
+        // Unconfigured providers are set up via the Providers/Env settings.
+        const next = (r?.providers ?? []).filter((p) => p.authenticated !== false);
         setProviders(next);
         setCurrentModel(String(r?.model ?? ""));
         setCurrentProviderSlug(String(r?.provider ?? ""));
