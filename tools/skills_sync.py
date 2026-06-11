@@ -200,15 +200,33 @@ def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
     return SKILLS_DIR / rel
 
 
+# Runtime-generated artifacts that must NOT count toward a skill's content hash.
+# Without this, an unmodified skill drifts after first run (e.g. __pycache__ from
+# a skill's .py helper, a .bak from a prior update) and gets falsely flagged
+# "user-modified", which then permanently blocks bundled updates for that skill.
+_HASH_IGNORE_DIR_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+_HASH_IGNORE_SUFFIXES = {".pyc", ".pyo", ".log", ".bak"}
+_HASH_IGNORE_NAMES = {".DS_Store"}
+
+
 def _dir_hash(directory: Path) -> str:
-    """Compute a hash of all file contents in a directory for change detection."""
+    """Hash a skill dir's *source* contents for change detection.
+
+    Ignores runtime/cache artifacts so an unmodified skill hashes identically
+    before and after it runs (otherwise it gets falsely flagged user-modified).
+    """
     hasher = hashlib.md5()
     try:
         for fpath in sorted(directory.rglob("*")):
-            if fpath.is_file():
-                rel = fpath.relative_to(directory)
-                hasher.update(str(rel).encode("utf-8"))
-                hasher.update(fpath.read_bytes())
+            if not fpath.is_file():
+                continue
+            rel = fpath.relative_to(directory)
+            if _HASH_IGNORE_DIR_PARTS.intersection(rel.parts):
+                continue
+            if fpath.name in _HASH_IGNORE_NAMES or fpath.suffix in _HASH_IGNORE_SUFFIXES:
+                continue
+            hasher.update(str(rel).encode("utf-8"))
+            hasher.update(fpath.read_bytes())
     except (OSError, IOError):
         pass
     return hasher.hexdigest()
@@ -557,8 +575,18 @@ def sync_skills(quiet: bool = False) -> dict:
                     skipped += 1
                 continue
 
+            # If the on-disk copy already matches the current bundle, it's in
+            # sync — re-baseline the manifest (covers a hash-method change or an
+            # out-of-band update) and move on. Checked FIRST so stale origin
+            # hashes can't falsely flag a skill that actually equals the bundle.
+            if user_hash == bundled_hash:
+                if origin_hash != bundled_hash:
+                    manifest[skill_name] = bundled_hash
+                skipped += 1
+                continue
+
             if user_hash != origin_hash:
-                # User modified this skill — don't overwrite their changes
+                # Genuinely user-modified (differs from both bundle and last ship)
                 user_modified.append(skill_name)
                 if not quiet:
                     print(f"  ~ {skill_name} (user-modified, skipping)")

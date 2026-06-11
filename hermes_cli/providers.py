@@ -73,7 +73,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "qwen-oauth": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
-        base_url_override="https://portal.qwen.ai/v1",
+        base_url_override="https://dashscope.aliyuncs.com/compatible-mode/v1",
         base_url_env_var="HERMES_QWEN_BASE_URL",
     ),
     "google-gemini-cli": HermesOverlay(

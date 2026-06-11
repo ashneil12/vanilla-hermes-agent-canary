@@ -576,6 +576,9 @@ export interface StatusResponse {
   active_sessions: number
   config_path: string
   config_version: number
+  /** HermesOS: control-plane dashboard origin (HERMES_DASHBOARD_URL). Used to
+   *  deep-link the managed-Venice enable flow. Null when unset (local dev). */
+  dashboard_url?: null | string
   env_path: string
   gateway_exit_reason: string | null
   gateway_health_url: string | null

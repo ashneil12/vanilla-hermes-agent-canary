@@ -553,6 +553,52 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 
 def build_api_kwargs(agent, api_messages: list) -> dict:
+    """Build the keyword arguments dict for the active API mode.
+
+    Thin wrapper around :func:`_build_api_kwargs_impl` that additionally injects
+    the per-profile Venice *base character* (``venice.character_slug`` in the
+    active profile's config.yaml) when the chat provider is Venice. No-op for
+    every other provider, so the core chat path is unchanged otherwise.
+    """
+    return _maybe_add_venice_character(agent, _build_api_kwargs_impl(agent, api_messages))
+
+
+def _maybe_add_venice_character(agent, kwargs):
+    """Inject ``venice_parameters.character_slug`` for Venice chat requests.
+
+    Driven by ``venice.character_slug`` in the active profile's config.yaml.
+    Strictly conditional — returns *kwargs* untouched unless the provider is
+    Venice AND a character slug is configured — so non-Venice chat is never
+    affected. Wrapped in a broad try/except: a failure here must never break
+    the chat request.
+    """
+    try:
+        provider = (getattr(agent, "provider", "") or "").strip().lower()
+        base_lower = (getattr(agent, "_base_url_lower", "") or "").lower()
+        if provider != "venice" and "venice.ai" not in base_lower:
+            return kwargs
+        if not isinstance(kwargs, dict):
+            return kwargs
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        vsec = cfg.get("venice") if isinstance(cfg, dict) else None
+        slug = ""
+        if isinstance(vsec, dict) and isinstance(vsec.get("character_slug"), str):
+            slug = vsec["character_slug"].strip()
+        if not slug:
+            return kwargs
+        extra = kwargs.setdefault("extra_body", {})
+        if isinstance(extra, dict):
+            vp = extra.setdefault("venice_parameters", {})
+            if isinstance(vp, dict):
+                vp.setdefault("character_slug", slug)
+    except Exception as exc:  # never break the chat path
+        logging.getLogger(__name__).debug("venice character injection skipped: %s", exc)
+    return kwargs
+
+
+def _build_api_kwargs_impl(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
 

@@ -1273,8 +1273,10 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
             resp = client.get(f"{server_url}/v1/models/{model}")
             if resp.status_code == 200:
                 data = resp.json()
-                # vLLM returns max_model_len
-                ctx = data.get("max_model_len") or data.get("context_length") or data.get("max_tokens")
+                # Prefer unambiguous context-window fields such as
+                # max_input_tokens over max_tokens. Anthropic-compatible
+                # /v1/models/{id} responses use max_tokens for output cap.
+                ctx = _extract_context_length(data) or data.get("max_tokens")
                 if ctx and isinstance(ctx, (int, float)):
                     return int(ctx)
 
@@ -1286,7 +1288,7 @@ def _query_local_context_length(model: str, base_url: str, api_key: str = "") ->
                 models_list = data.get("data", [])
                 for m in models_list:
                     if _model_id_matches(m.get("id", ""), model):
-                        ctx = m.get("max_model_len") or m.get("context_length") or m.get("max_tokens")
+                        ctx = _extract_context_length(m) or m.get("max_tokens")
                         if ctx and isinstance(ctx, (int, float)):
                             return int(ctx)
     except Exception:
@@ -1365,7 +1367,9 @@ _CODEX_OAUTH_CONTEXT_FALLBACK: Dict[str, int] = {
 
 _codex_oauth_context_cache: Dict[str, int] = {}
 _codex_oauth_context_cache_time: float = 0.0
+_codex_oauth_context_fail_time: float = 0.0
 _CODEX_OAUTH_CONTEXT_CACHE_TTL = 3600  # 1 hour
+_CODEX_OAUTH_CONTEXT_FAIL_TTL = 60  # back off this long after a failed probe
 
 
 def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
@@ -1378,12 +1382,26 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
     Returns a ``{slug: context_window}`` dict. Empty on failure.
     """
     global _codex_oauth_context_cache, _codex_oauth_context_cache_time
+    global _codex_oauth_context_fail_time
     now = time.time()
     if (
         _codex_oauth_context_cache
         and now - _codex_oauth_context_cache_time < _CODEX_OAUTH_CONTEXT_CACHE_TTL
     ):
         return _codex_oauth_context_cache
+
+    # Negative cache: short-circuit repeated probes after a recent failure.
+    # ``get_model_context_length`` fires from several init sites (context
+    # compressor, plugin ctx, fallback resolution), so a cold cache behind a
+    # dead/slow proxy would otherwise pay the request timeout once per call and
+    # stack into a multi-minute startup stall (and tripped pytest-timeout in CI
+    # — see tests/run_agent/test_create_openai_client_proxy_env.py). One failed
+    # probe now suppresses the rest until the proxy/network likely recovers.
+    if (
+        _codex_oauth_context_fail_time
+        and now - _codex_oauth_context_fail_time < _CODEX_OAUTH_CONTEXT_FAIL_TTL
+    ):
+        return {}
 
     try:
         resp = requests.get(
@@ -1397,10 +1415,12 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
                 "Codex /models probe returned HTTP %s; falling back to hardcoded defaults",
                 resp.status_code,
             )
+            _codex_oauth_context_fail_time = now
             return {}
         data = resp.json()
     except Exception as exc:
         logger.debug("Codex /models probe failed: %s", exc)
+        _codex_oauth_context_fail_time = now
         return {}
 
     entries = data.get("models", []) if isinstance(data, dict) else []

@@ -1,6 +1,6 @@
 ---
 name: audiocraft-audio-generation
-description: "AudioCraft: MusicGen text-to-music, AudioGen text-to-sound."
+description: "Local/offline AudioCraft (MusicGen/AudioGen) synthesis. For normal music or sound generation use the audio_generate TOOL instead (cloud, instant, no install) — only use this skill when the user explicitly requires local/offline synthesis."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

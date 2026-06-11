@@ -449,6 +449,13 @@ export function useSessionActions({
         return
       }
 
+      // HermesOS web-only: open the full dashboard (/dash) in a new tab.
+      if (item.action === 'admin-panel') {
+        ;(window as unknown as { hermesDesktop?: { openAdminPanel?: () => void } }).hermesDesktop?.openAdminPanel?.()
+
+        return
+      }
+
       if (item.route) {
         navigate(item.route)
       }

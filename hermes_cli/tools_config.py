@@ -55,6 +55,7 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
 CONFIGURABLE_TOOLSETS = [
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
+    ("browser_sidecar", "🪪 Browser Sidecar (Pro+)",   "deterministic Playwright primitives — Hermesdeploy-provisioned sidecar"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
     ("file",            "📁 File Operations",           "read, write, patch, search"),
     ("code_execution",  "⚡ Code Execution",            "execute_code"),
@@ -62,6 +63,7 @@ CONFIGURABLE_TOOLSETS = [
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
     ("video_gen",       "🎬 Video Generation",          "video_generate (text-to-video + image-to-video)"),
+    ("crypto",          "⛓️  On-Chain (read-only)",     "crypto_rpc — read EVM/other chains via Venice RPC (balances, blocks, eth_call)"),
     ("x_search",        "🐦 X (Twitter) Search",        "x_search (requires xAI OAuth or XAI_API_KEY)"),
     ("moa",             "🧠 Mixture of Agents",         "mixture_of_agents"),
     ("tts",             "🔊 Text-to-Speech",            "text_to_speech"),
@@ -101,6 +103,13 @@ def gui_toolset_label(label: str) -> str:
 # Toolsets that are OFF by default for new installs.
 # They're still in _HERMES_CORE_TOOLS (available at runtime if enabled),
 # but the setup checklist won't pre-select them for first-time users.
+# browser_sidecar is intentionally NOT in _DEFAULT_OFF_TOOLSETS. Its check_fn
+# (tools/browser_sidecar.py:_is_sidecar_available) already gates each tool on
+# the dashboard-provisioned sidecar's /health endpoint returning tier_ok=true,
+# so instances without the sidecar container simply don't see the tools at
+# runtime. Adding it here would force users to manually opt-in via
+# `hermes tools` even on instances where the dashboard has provisioned the
+# sidecar — that's a poor handoff between dashboard and CLI.
 #
 # Video gen is off by default — it's a niche, paid, slow feature. Users
 # who want it opt in via `hermes tools` → Video Generation, which walks
@@ -112,7 +121,7 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "x_search"}
 
 
 def _xai_credentials_present() -> bool:

@@ -155,6 +155,41 @@ class TestBlockingGatewayApproval:
         assert not e2.event.is_set()
         assert len(_gateway_queues[session_key]) == 1
 
+    def test_resolve_single_by_approval_id_targets_matching_request(self):
+        """Dashboard approval buttons resolve the request they were rendered for."""
+        from tools.approval import (
+            resolve_gateway_approval,
+            _ApprovalEntry, _gateway_queues,
+        )
+        session_key = "test-approval-id"
+        e1 = _ApprovalEntry({"command": "first", "approval_id": "approval-first"})
+        e2 = _ApprovalEntry({"command": "second", "approval_id": "approval-second"})
+        _gateway_queues[session_key] = [e1, e2]
+
+        count = resolve_gateway_approval(session_key, "deny", approval_id="approval-second")
+
+        assert count == 1
+        assert not e1.event.is_set()
+        assert e2.event.is_set()
+        assert e2.result == "deny"
+        assert _gateway_queues[session_key] == [e1]
+
+    def test_resolve_single_by_unknown_approval_id_leaves_queue_untouched(self):
+        """A stale approval button cannot accidentally approve the oldest request."""
+        from tools.approval import (
+            resolve_gateway_approval,
+            _ApprovalEntry, _gateway_queues,
+        )
+        session_key = "test-approval-id-miss"
+        entry = _ApprovalEntry({"command": "first", "approval_id": "approval-first"})
+        _gateway_queues[session_key] = [entry]
+
+        count = resolve_gateway_approval(session_key, "once", approval_id="missing")
+
+        assert count == 0
+        assert not entry.event.is_set()
+        assert _gateway_queues[session_key] == [entry]
+
     def test_unregister_signals_all_entries(self):
         """unregister_gateway_notify signals all waiting entries to prevent hangs."""
         from tools.approval import (

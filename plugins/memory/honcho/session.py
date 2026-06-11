@@ -460,35 +460,38 @@ class HonchoSessionManager:
         while True:
             try:
                 item = self._async_queue.get(timeout=5)
-                if item is _ASYNC_SHUTDOWN:
-                    break
-
-                first_error: Exception | None = None
                 try:
-                    success = self._flush_session(item)
-                except Exception as e:
-                    success = False
-                    first_error = e
+                    if item is _ASYNC_SHUTDOWN:
+                        break
 
-                if success:
-                    continue
+                    first_error: Exception | None = None
+                    try:
+                        success = self._flush_session(item)
+                    except Exception as e:
+                        success = False
+                        first_error = e
 
-                if first_error is not None:
-                    logger.warning("Honcho async write failed, retrying once: %s", first_error)
-                else:
-                    logger.warning("Honcho async write failed, retrying once")
+                    if success:
+                        continue
 
-                import time as _time
-                _time.sleep(2)
+                    if first_error is not None:
+                        logger.warning("Honcho async write failed, retrying once: %s", first_error)
+                    else:
+                        logger.warning("Honcho async write failed, retrying once")
 
-                try:
-                    retry_success = self._flush_session(item)
-                except Exception as e2:
-                    logger.error("Honcho async write retry failed, dropping batch: %s", e2)
-                    continue
+                    import time as _time
+                    _time.sleep(2)
 
-                if not retry_success:
-                    logger.error("Honcho async write retry failed, dropping batch")
+                    try:
+                        retry_success = self._flush_session(item)
+                    except Exception as e2:
+                        logger.error("Honcho async write retry failed, dropping batch: %s", e2)
+                        continue
+
+                    if not retry_success:
+                        logger.error("Honcho async write retry failed, dropping batch")
+                finally:
+                    self._async_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
@@ -532,15 +535,21 @@ class HonchoSessionManager:
             except Exception as e:
                 logger.error("Honcho flush_all error for %s: %s", session.key, e)
 
-        # Drain async queue synchronously if it exists
+        # Drain async queue synchronously if it exists. The background writer may
+        # already have dequeued an item, so wait for Queue.task_done() as well as
+        # draining whatever remains in the queue.
         if self._async_queue is not None:
             while not self._async_queue.empty():
                 try:
                     item = self._async_queue.get_nowait()
-                    if item is not _ASYNC_SHUTDOWN:
-                        self._flush_session(item)
                 except queue.Empty:
                     break
+                try:
+                    if item is not _ASYNC_SHUTDOWN:
+                        self._flush_session(item)
+                finally:
+                    self._async_queue.task_done()
+            self._async_queue.join()
 
     def shutdown(self) -> None:
         """Gracefully shut down the async writer thread."""

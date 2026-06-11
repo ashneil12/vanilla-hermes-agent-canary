@@ -29,6 +29,19 @@ def _clear_openai_env(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_stt_lazy_install(monkeypatch):
+    """Pin upstream's faster-whisper lazy-install off (see test_transcription_tools).
+
+    ``_try_lazy_install_stt`` re-checks importability via ``find_spec`` and would
+    bypass the ``_HAS_FASTER_WHISPER=False`` mocks on a dev machine that has
+    faster-whisper installed, hiding the not-installed / no-cloud-fallback paths.
+    """
+    monkeypatch.setattr(
+        "tools.transcription_tools._try_lazy_install_stt", lambda: False, raising=True
+    )
+
+
 class TestGetProvider:
     """_get_provider() picks the right backend based on config + availability."""
 

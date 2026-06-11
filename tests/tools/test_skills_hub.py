@@ -1664,6 +1664,39 @@ class TestSkillMetaToDict:
 # ---------------------------------------------------------------------------
 
 
+class TestOptionalSkillSourceResolution:
+    def test_inspect_and_fetch_use_frontmatter_name_when_directory_differs(self, tmp_path):
+        optional_root = tmp_path / "optional-skills"
+        skill_dir = optional_root / "bankr" / "bankr-twitter-agent"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            """\
+---
+name: twitter-agent
+description: Bankr Twitter agent.
+---
+
+# Twitter Agent
+
+Use Bankr Twitter tools.
+""",
+            encoding="utf-8",
+        )
+
+        src = OptionalSkillSource()
+        src._optional_dir = optional_root
+
+        meta = src.inspect("official/bankr/bankr-twitter-agent")
+        bundle = src.fetch("official/bankr/bankr-twitter-agent")
+
+        assert meta is not None
+        assert meta.name == "twitter-agent"
+        assert meta.identifier == "official/bankr/bankr-twitter-agent"
+        assert bundle is not None
+        assert bundle.name == "twitter-agent"
+        assert bundle.identifier == "official/bankr/bankr-twitter-agent"
+
+
 class TestOptionalSkillSourceBinaryAssets:
     def test_fetch_preserves_binary_assets(self, tmp_path):
         optional_root = tmp_path / "optional-skills"

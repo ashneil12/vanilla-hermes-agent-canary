@@ -25,6 +25,54 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _is_codex_stream_state_type_error(exc: TypeError) -> bool:
+    """Return True for SDK stream-state crashes caused by nullable event fields."""
+    text = str(exc).lower()
+    return "nonetype" in text and "not iterable" in text
+
+
+def _codex_synthesized_response(
+    *,
+    model: str | None,
+    output_items: list | None = None,
+    text_parts: list | None = None,
+    log_context: str,
+):
+    """Build a minimal Responses-like object from already streamed content."""
+    if output_items:
+        logger.warning(
+            "Codex stream terminal parser failed after %d output items; "
+            "synthesizing completed response. %s",
+            len(output_items),
+            log_context,
+        )
+        output = list(output_items)
+    elif text_parts:
+        assembled = "".join(text_parts)
+        logger.warning(
+            "Codex stream terminal parser failed after %d text deltas (%d chars); "
+            "synthesizing completed response. %s",
+            len(text_parts),
+            len(assembled),
+            log_context,
+        )
+        output = [SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text=assembled)],
+        )]
+    else:
+        return None
+
+    return SimpleNamespace(
+        output=output,
+        usage=SimpleNamespace(input_tokens=0, output_tokens=0, total_tokens=0),
+        status="completed",
+        model=model,
+    )
+
+
 def _coerce_usage_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -619,7 +667,6 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 )
                 continue
             raise
-
         try:
             # Compatibility: some mocks/providers return a concrete response
             # instead of an iterable.  Pass it straight through.
@@ -645,6 +692,17 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                         agent._client_log_context(), exc,
                     )
                     continue
+                raise
+            except TypeError as exc:
+                if not _is_codex_stream_state_type_error(exc):
+                    raise
+                synthesized = _codex_synthesized_response(
+                    model=api_kwargs.get("model"),
+                    text_parts=agent._codex_streamed_text_parts,
+                    log_context=agent._client_log_context(),
+                )
+                if synthesized is not None:
+                    return synthesized
                 raise
 
             if final.status in {"incomplete", "failed"}:

@@ -51,11 +51,13 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
-import inspect
+import base64
+import hashlib
 import logging
 import mimetypes
 import os
 import re
+import secrets
 import time
 from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
@@ -508,157 +510,46 @@ def _check_e2ee_deps() -> bool:
         return False
 
 
-def _normalize_e2ee_mode(value: Any) -> str:
-    """Normalize Matrix E2EE mode to off/optional/required."""
-    raw = str(value or "").strip().lower()
-    if raw in ("required", "require", "true", "1", "yes", "on"):
-        return "required"
-    if raw in ("optional", "prefer", "preferred"):
-        return "optional"
-    return "off"
+def _unpadded_b64(data: bytes, *, urlsafe: bool = False) -> str:
+    encoder = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+    return encoder(data).decode("ascii").rstrip("=")
 
 
-def _resolve_e2ee_mode(extra: Optional[Dict[str, Any]] = None) -> str:
-    """Resolve E2EE mode with MATRIX_ENCRYPTION backwards compatibility."""
-    extra = extra or {}
-    explicit = extra.get("e2ee_mode") or os.getenv("MATRIX_E2EE_MODE", "")
-    if explicit:
-        return _normalize_e2ee_mode(explicit)
-    legacy_enabled = extra.get(
-        "encryption",
-        os.getenv("MATRIX_ENCRYPTION", "").lower() in ("true", "1", "yes"),
+def _encrypt_attachment_without_olm(data: bytes):
+    """Encrypt Matrix media without importing mautrix.crypto's Olm-dependent package."""
+    from Crypto.Cipher import AES
+    from Crypto.Util import Counter
+    from mautrix.types import EncryptedFile, JSONWebKey
+
+    key = secrets.token_bytes(32)
+    iv = secrets.token_bytes(8)
+    counter = Counter.new(64, prefix=iv, initial_value=0)
+    encrypted = AES.new(key, AES.MODE_CTR, counter=counter).encrypt(data)
+    digest = hashlib.sha256(encrypted).digest()
+
+    return encrypted, EncryptedFile(
+        version="v2",
+        iv=_unpadded_b64(iv + b"\x00" * 8),
+        hashes={"sha256": _unpadded_b64(digest)},
+        key=JSONWebKey(
+            key_type="oct",
+            algorithm="A256CTR",
+            extractable=True,
+            key_ops=["encrypt", "decrypt"],
+            key=_unpadded_b64(key, urlsafe=True),
+        ),
     )
-    return "required" if legacy_enabled else "off"
 
 
-def _redact_matrix_value(value: Any) -> str:
-    """Return a safe, non-reversible preview for Matrix diagnostics."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    return "***"
-
-
-def _write_matrix_recovery_key_output_file(recovery_key: str) -> Optional[Path]:
-    """Write a generated Matrix recovery key to an operator-chosen file.
-
-    The file is created with mode 0600 and never overwritten. Returns the path
-    when written, otherwise None.
-    """
-    output_file = os.getenv("MATRIX_RECOVERY_KEY_OUTPUT_FILE", "").strip()
-    if not output_file:
-        return None
-    path = Path(output_file).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(path, flags, 0o600)
+def _encrypt_matrix_attachment(data: bytes):
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(recovery_key)
-            fh.write("\n")
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    return path
+        from mautrix.crypto.attachments import encrypt_attachment
 
-
-def _get_matrix_recovery_key_output_target() -> tuple[Optional[Path], str]:
-    """Return a usable one-time recovery-key output path, or a redacted reason."""
-    output_file = os.getenv("MATRIX_RECOVERY_KEY_OUTPUT_FILE", "").strip()
-    if not output_file:
-        return None, "not_configured"
-    path = Path(output_file).expanduser()
-    if path.exists():
-        return None, "exists"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        return None, f"unusable: {exc}"
-    return path, ""
-
-
-def _handle_generated_matrix_recovery_key(mxid: str, recovery_key: str) -> None:
-    """Handle a freshly generated Matrix recovery key without logging it."""
-    try:
-        output_path = _write_matrix_recovery_key_output_file(recovery_key)
-    except FileExistsError:
-        logger.warning(
-            "Matrix: bootstrapped cross-signing for %s. Recovery key output file "
-            "already exists; refusing to overwrite. Store the generated key "
-            "securely and set MATRIX_RECOVERY_KEY for future restarts.",
-            mxid,
-        )
-        return
-    except Exception as exc:
-        logger.warning(
-            "Matrix: bootstrapped cross-signing for %s, but failed to write "
-            "MATRIX_RECOVERY_KEY_OUTPUT_FILE: %s. Store the generated key "
-            "securely and set MATRIX_RECOVERY_KEY for future restarts.",
-            mxid,
-            exc,
-        )
-        return
-
-    if output_path:
-        logger.warning(
-            "Matrix: bootstrapped cross-signing for %s. A new recovery key was "
-            "written to %s with mode 0600. Move it to your secret store and set "
-            "MATRIX_RECOVERY_KEY for future restarts.",
-            mxid,
-            output_path,
-        )
-    else:
-        logger.warning(
-            "Matrix: bootstrapped cross-signing for %s. A new recovery key was "
-            "generated but will not be logged. Set MATRIX_RECOVERY_KEY_OUTPUT_FILE "
-            "to write it once with mode 0600, or configure MATRIX_RECOVERY_KEY "
-            "from your Matrix client before future restarts.",
-            mxid,
-        )
-
-
-def _sanitize_matrix_html(html: str) -> str:
-    sanitizer = _MatrixHtmlSanitizer()
-    try:
-        sanitizer.feed(html or "")
-        sanitizer.close()
-        return sanitizer.get_html()
-    except Exception:
-        return _html_escape(html or "")
-
-
-def _redact_url_for_log(url: str) -> str:
-    """Strip query/fragment from URLs before logging signed media links."""
-    try:
-        parts = urlsplit(str(url))
-        if not parts.scheme and not parts.netloc:
-            return str(url).split("?", 1)[0].split("#", 1)[0]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-    except Exception:
-        return "<url>"
-
-
-def _pre_sanitize_matrix_markdown(text: str) -> str:
-    """Remove unsafe raw HTML before Markdown conversion can escape it."""
-    result = re.sub(
-        r"(?is)<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>",
-        "",
-        text or "",
-    )
-    result = re.sub(
-        r"""(?is)\s+on[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""",
-        "",
-        result,
-    )
-    result = re.sub(
-        r"""(?is)\s+(href|src)\s*=\s*("[^"]*(?:javascript|data|vbscript):[^"]*"|'[^']*(?:javascript|data|vbscript):[^']*'|[^\s>]*(?:javascript|data|vbscript):[^\s>]*)""",
-        "",
-        result,
-    )
-    return result
+        return encrypt_attachment(data)
+    except ModuleNotFoundError as exc:
+        if exc.name != "olm":
+            raise
+        return _encrypt_attachment_without_olm(data)
 
 
 def check_matrix_requirements() -> bool:
@@ -2075,8 +1966,7 @@ class MatrixAdapter(BasePlatformAdapter):
                     room_encrypted = False
                 if room_encrypted:
                     try:
-                        from mautrix.crypto.attachments import encrypt_attachment
-                        upload_data, encrypted_file = encrypt_attachment(data)
+                        upload_data, encrypted_file = _encrypt_matrix_attachment(data)
                     except Exception as exc:
                         logger.error("Matrix: attachment encryption failed: %s", exc)
                         return SendResult(success=False, error=str(exc))

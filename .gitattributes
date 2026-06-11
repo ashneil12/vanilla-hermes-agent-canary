@@ -1,6 +1,13 @@
 # Auto-generated files — collapse diffs and exclude from language stats
 web/package-lock.json linguist-generated=true
 
+# Fork-owned CI build pipeline — never auto-combine on upstream/prod merges.
+# (Requires `git config merge.ours.driver true` locally to take effect.)
+.github/workflows/docker-publish.yml merge=ours
+
+# .gitattributes itself union-merges so an upstream edit here never hard-conflicts
+# (Aeon would otherwise hold every time Nous touches this file).
+.gitattributes merge=union
 # Enforce LF for scripts that run inside Linux containers.
 # Without this, Windows checkout converts to CRLF and breaks `exec` in the
 # container entrypoint with "no such file or directory".

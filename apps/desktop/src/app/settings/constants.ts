@@ -38,12 +38,24 @@ export const EMPTY_SELECT_VALUE = '__hermes_empty__'
 export const CONTROL_TEXT = 'text-xs'
 
 export const PROVIDER_GROUPS: ProviderPrefix[] = [
+  // HermesOS: Venice leads the list — it's the recommended provider and the
+  // one HermesOS can manage for you. With managed Venice enabled, the agent is
+  // injected a ``VENICE_`` proxy key server-side, so this card shows as "set"
+  // with the managed endpoint as its base URL. Self-serve users can also paste
+  // their own Venice key here.
+  {
+    prefix: 'VENICE_',
+    name: 'Venice',
+    description: 'Private, uncensored frontier models — recommended; managed by HermesOS',
+    docsUrl: 'https://venice.ai/settings/api',
+    priority: 0
+  },
   {
     prefix: 'NOUS_',
     name: 'Nous Portal',
     description: 'Hosted Hermes & Nous-trained models',
     docsUrl: 'https://portal.nousresearch.com',
-    priority: 0
+    priority: 1
   },
   {
     prefix: 'OPENROUTER_',

@@ -2,13 +2,14 @@
 """
 Transcription Tools Module
 
-Provides speech-to-text transcription with six providers:
+Provides speech-to-text transcription with seven cloud/local providers:
 
   - **local** (default, free) — faster-whisper running locally, no API key needed.
     Auto-downloads the model (~150 MB for ``base``) on first use.
   - **groq** (free tier) — Groq Whisper API, requires ``GROQ_API_KEY``.
   - **openai** (paid) — OpenAI Whisper API, requires ``VOICE_TOOLS_OPENAI_KEY``.
   - **mistral** — Mistral Voxtral Transcribe API, requires ``MISTRAL_API_KEY``.
+  - **venice** — Venice OpenAI-compatible STT, requires ``VENICE_API_KEY``.
   - **xai** — xAI Grok STT API, requires ``XAI_API_KEY``. High accuracy,
     Inverse Text Normalization, diarization, 21 languages.
   - **elevenlabs** — ElevenLabs Scribe API, requires ``ELEVENLABS_API_KEY``.
@@ -204,6 +205,40 @@ def _normalize_local_command_model(model_name: Optional[str]) -> str:
     return _normalize_local_model(model_name)
 
 
+def _auto_detect_cloud_stt() -> str:
+    """First available cloud STT provider by key presence.
+
+    Order: groq (free tier) > openai > mistral > venice > xai > elevenlabs. Returns
+    ``"none"`` when no cloud key is configured. Used both for auto-detect and
+    as a graceful fallback when a configured local backend (faster-whisper /
+    whisper binary) isn't installed — so voice transcription still works (e.g.
+    Telegram voice messages) instead of silently failing.
+    """
+    if _HAS_OPENAI and get_env_value("GROQ_API_KEY"):
+        return "groq"
+    if _HAS_OPENAI and _has_openai_audio_backend():
+        return "openai"
+    # Only auto-select Mistral if the SDK is already present — don't trigger a
+    # lazy-install during passive auto-detection. Explicit `provider: mistral`
+    # resolves through the guarded explicit-provider path below.
+    if _HAS_MISTRAL and get_env_value("MISTRAL_API_KEY"):
+        return "mistral"
+    # hermes-fork: Venice is part of the managed multi-modal stack and remains
+    # preferred over xAI when both cloud keys are present.
+    if os.environ.get("VENICE_API_KEY", "").strip():
+        return "venice"
+    try:
+        from tools.xai_http import resolve_xai_http_credentials
+
+        if resolve_xai_http_credentials().get("api_key"):
+            return "xai"
+    except Exception:
+        pass
+    if get_env_value("ELEVENLABS_API_KEY"):
+        return "elevenlabs"
+    return "none"
+
+
 def _try_lazy_install_stt() -> bool:
     """Attempt to lazy-install faster-whisper and return True on success.
 
@@ -228,7 +263,7 @@ def _try_lazy_install_stt() -> bool:
     return False
 
 
-# Names of the 6 STT providers with native handlers in this module.
+# Names of the STT providers with native handlers in this module.
 # Kept in sync with ``agent.transcription_registry._BUILTIN_NAMES`` —
 # a regression test fails if they drift. The plugin hook from
 # issue #30398-style follow-up rejects plugins registering under any
@@ -240,7 +275,9 @@ BUILTIN_STT_PROVIDERS = frozenset({
     "groq",
     "openai",
     "mistral",
+    "venice",
     "xai",
+    "elevenlabs",
 })
 
 
@@ -255,7 +292,8 @@ BUILTIN_STT_PROVIDERS = frozenset({
 #
 # Resolution order:
 #   1. Built-in (``local``, ``local_command``, ``groq``, ``openai``,
-#      ``mistral``, ``xai``)              → native handler. **Always wins.**
+#      ``mistral``, ``venice``, ``xai``, ``elevenlabs``)
+#      → native handler. **Always wins.**
 #   2. ``stt.providers.<name>: type: command``  → command-provider runner.
 #   3. Plugin-registered TranscriptionProvider  → plugin dispatch.
 #   4. No match                                 → "No STT provider available".
@@ -745,9 +783,12 @@ def _transcribe_command_stt(
 def _get_provider(stt_config: dict) -> str:
     """Determine which STT provider to use.
 
-    When ``stt.provider`` is explicitly set in config, that choice is
-    honoured — no silent cloud fallback.  When no provider is configured,
-    auto-detect tries: local > groq (free) > openai (paid).
+    When ``stt.provider`` is explicitly set, that choice is authoritative and is
+    never silently swapped for a different cloud provider (GH-1774): an explicit
+    *local* choice without a local backend resolves to ``none`` rather than a
+    cloud key. When no provider is configured, auto-detect tries:
+    local > groq (free) > openai > venice > xai, so out-of-the-box voice still
+    works on instances that only have a cloud key like Venice.
     """
     if not is_stt_enabled(stt_config):
         return "none"
@@ -763,9 +804,14 @@ def _get_provider(stt_config: dict) -> str:
                 return "local"
             if _has_local_command():
                 return "local_command"
-            # Try lazy-install before giving up
+            # Try lazy-install before giving up (upstream)
             if _try_lazy_install_stt():
                 return "local"
+            # GH-1774 (hermes-fork): if lazy-install also fails, an explicit
+            # `local` choice is authoritative — never silently swap in a cloud
+            # provider (the user opted into on-device transcription for
+            # privacy/cost). Auto mode (no provider set) still picks an
+            # available cloud provider, including Venice.
             logger.warning(
                 "STT provider 'local' configured but unavailable "
                 "(install faster-whisper or set HERMES_LOCAL_STT_COMMAND)"
@@ -818,6 +864,14 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "venice":
+            if os.environ.get("VENICE_API_KEY", "").strip():
+                return "venice"
+            logger.warning(
+                "STT provider 'venice' configured but VENICE_API_KEY is not set"
+            )
+            return "none"
+
         if provider == "elevenlabs":
             if get_env_value("ELEVENLABS_API_KEY"):
                 return "elevenlabs"
@@ -828,41 +882,22 @@ def _get_provider(stt_config: dict) -> str:
 
         return provider  # Unknown — let it fail downstream
 
-    # --- Auto-detect (no explicit provider): local > groq > openai > xai > elevenlabs -
-    # mistral is intentionally skipped while `mistralai` is quarantined on
-    # PyPI (malicious 2.4.6 release on 2026-05-12).
+    # --- Auto-detect (no explicit provider): local > groq > openai > mistral > venice > xai > elevenlabs ---
+    # hermes-fork: upstream's Mistral auto-detect is preserved, Venice remains
+    # a managed multi-modal fallback before xAI, and upstream's ElevenLabs
+    # fallback remains last.
 
     if _HAS_FASTER_WHISPER:
         return "local"
     if _has_local_command():
         return "local_command"
-    # Try lazy-install before falling through to cloud providers
+    # Try lazy-install before falling through to cloud providers (upstream)
     if _try_lazy_install_stt():
         return "local"
-    if _HAS_OPENAI and get_env_value("GROQ_API_KEY"):
-        logger.info("No local STT available, using Groq Whisper API")
-        return "groq"
-    if _HAS_OPENAI and _has_openai_audio_backend():
-        logger.info("No local STT available, using OpenAI Whisper API")
-        return "openai"
-    # Only auto-select Mistral if the SDK is already present — don't trigger a
-    # lazy-install during passive auto-detection. Explicit `provider: mistral`
-    # (above) does lazy-install on first transcription call.
-    if _HAS_MISTRAL and get_env_value("MISTRAL_API_KEY"):
-        logger.info("No local STT available, using Mistral Voxtral Transcribe API")
-        return "mistral"
-    try:
-        from tools.xai_http import resolve_xai_http_credentials
-
-        if resolve_xai_http_credentials().get("api_key"):
-            logger.info("No local STT available, using xAI Grok STT API")
-            return "xai"
-    except Exception:
-        pass
-    if get_env_value("ELEVENLABS_API_KEY"):
-        logger.info("No local STT available, using ElevenLabs Scribe STT API")
-        return "elevenlabs"
-    return "none"
+    _cloud = _auto_detect_cloud_stt()
+    if _cloud != "none":
+        logger.info("No local STT available, using %s STT API", _cloud)
+    return _cloud
 
 
 # ---------------------------------------------------------------------------
@@ -1235,8 +1270,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             if use_shell:
                 subprocess.run(command, shell=True, check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
             else:
-                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
-            
+                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True, timeout=300)
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
             if not txt_files:
@@ -1530,6 +1564,106 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider: Venice (/audio/transcriptions)
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_VENICE_STT_BASE_URL = "https://api.venice.ai/api/v1"
+# Venice's transcription model id (NOT OpenAI's "whisper-1", which 404s on Venice
+# with: 'Did you mean: openai/whisper-large-v3?'). Overridable via stt.venice.model.
+DEFAULT_VENICE_STT_MODEL = "openai/whisper-large-v3"
+
+
+def _transcribe_venice(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using Venice's OpenAI-compatible /audio/transcriptions endpoint.
+
+    Same ``VENICE_API_KEY`` as chat + image + video + speech. Supports
+    word-level timestamps via ``response_format=verbose_json``.
+    """
+    api_key = os.environ.get("VENICE_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "No Venice credentials found. Set VENICE_API_KEY (same key as Venice chat).",
+        }
+
+    stt_config = _load_stt_config()
+    venice_config = stt_config.get("venice", {}) if isinstance(stt_config, dict) else {}
+    base_url = str(
+        venice_config.get("base_url")
+        or os.environ.get("VENICE_BASE_URL")
+        or DEFAULT_VENICE_STT_BASE_URL
+    ).strip().rstrip("/")
+    model = (model_name or venice_config.get("model") or DEFAULT_VENICE_STT_MODEL).strip()
+    language = venice_config.get("language")
+    response_format = str(venice_config.get("response_format") or "json").strip() or "json"
+
+    try:
+        import requests
+
+        data: Dict[str, str] = {
+            "model": model,
+            "response_format": response_format,
+        }
+        if isinstance(language, str) and language.strip():
+            data["language"] = language.strip()
+
+        with open(file_path, "rb") as audio_file:
+            response = requests.post(
+                f"{base_url}/audio/transcriptions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "User-Agent": "hermes-agent/stt-venice",
+                },
+                files={"file": (Path(file_path).name, audio_file)},
+                data=data,
+                timeout=180,
+            )
+
+        if response.status_code != 200:
+            detail = ""
+            try:
+                err_body = response.json()
+                detail = (err_body.get("error") or {}).get("message", "") or response.text[:300]
+            except Exception:
+                detail = response.text[:300]
+            return {
+                "success": False,
+                "transcript": "",
+                "error": f"Venice STT error (HTTP {response.status_code}): {detail}",
+            }
+
+        if response_format in {"text", "srt", "vtt"}:
+            transcript_text = response.text.strip()
+        else:
+            result = response.json()
+            transcript_text = (result.get("text") or "").strip()
+
+        if not transcript_text:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": "Venice STT returned empty transcript",
+            }
+
+        logger.info(
+            "Transcribed %s via Venice STT (model=%s, %d chars)",
+            Path(file_path).name,
+            model,
+            len(transcript_text),
+        )
+
+        return {"success": True, "transcript": transcript_text, "provider": "venice"}
+
+    except PermissionError:
+        return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        logger.error("Venice STT transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "error": f"Venice STT transcription failed: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Provider: ElevenLabs (Scribe STT API)
 # ---------------------------------------------------------------------------
 
@@ -1687,6 +1821,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
+
+    if provider == "venice":
+        venice_cfg = stt_config.get("venice", {})
+        model_name = model or venice_cfg.get("model", DEFAULT_VENICE_STT_MODEL)
+        return _transcribe_venice(file_path, model_name)
 
     if provider == "elevenlabs":
         elevenlabs_cfg = stt_config.get("elevenlabs", {})

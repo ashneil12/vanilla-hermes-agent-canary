@@ -365,9 +365,20 @@ class TestRegistryIntegration:
 
     def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
         """The agent-facing schema must stay tight — model selection is a
-        user-level config choice, not an agent-level arg."""
+        user-level config choice, not an agent-level arg.
+
+        hermes-fork: Venice image generation also accepts ``reference_images``,
+        which is injected only when a reference-capable provider is active. It is
+        the single permitted extra on top of the always-present core args — the
+        schema must never expose anything else to the agent.
+        """
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        keys = set(props.keys())
+        assert {"prompt", "aspect_ratio"} <= keys <= {
+            "prompt",
+            "aspect_ratio",
+            "reference_images",
+        }
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]

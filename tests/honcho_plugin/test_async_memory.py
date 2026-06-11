@@ -256,8 +256,11 @@ class TestFlushAll:
             # the mock rather than the real _flush_session.
             mgr._async_queue.put(sess)
             mgr.flush_all()
-            # Called at least once for the queued item
-            assert mock_flush.call_count >= 1
+            # The main thread may drain the queue itself or the background
+            # writer may win the race. Either way, flush_all() must not return
+            # until all queued async writes have reached task_done().
+            assert mgr._async_queue.empty()
+            assert mgr._async_queue.unfinished_tasks == 0
 
     def test_flush_all_tolerates_errors(self):
         mgr = _make_manager(write_frequency="session")

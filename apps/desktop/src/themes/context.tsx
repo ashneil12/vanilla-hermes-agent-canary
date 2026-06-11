@@ -35,7 +35,44 @@ const PROFILE_MODES_KEY = 'hermes-desktop-profile-modes-v1'
 const LAST_PROFILE_KEY = 'hermes-desktop-active-profile-v1'
 const RETIRED_SKINS = new Set(['nous-light', 'default', 'gold'])
 
+/**
+ * Dashboard appearance bridge. When this app is embedded as an iframe in the
+ * Hermes dashboard, the dashboard posts {colorScheme: 'light' | 'dark'} on
+ * mount and on every light/dark toggle, and pre-encodes ?theme= on the iframe
+ * URL so the first paint matches. Mirrors WEBUI_DASHBOARD_APPEARANCE_MESSAGE_TYPE
+ * in hermesdeploy/dashboard/src/lib/webui-appearance.ts.
+ */
+const DASHBOARD_APPEARANCE_MESSAGE_TYPE = 'hermes-dashboard:appearance'
+
 export type ThemeMode = 'light' | 'dark' | 'system'
+
+/** Mode hint from the dashboard's `?theme=` query param, when in an iframe. */
+function readDashboardModeFromUrl(): ThemeMode | null {
+  if (typeof window === 'undefined' || window === window.parent) {
+    return null
+  }
+
+  const theme = new URLSearchParams(window.location.search).get('theme')
+
+  if (theme === 'dark') return 'dark'
+  if (theme === 'hermesos-light' || theme === 'light') return 'light'
+
+  return null
+}
+
+function readInitialMode(): ThemeMode {
+  if (typeof window === 'undefined') {
+    return 'light'
+  }
+
+  const dashboardMode = readDashboardModeFromUrl()
+
+  if (dashboardMode) {
+    return dashboardMode
+  }
+
+  return (window.localStorage.getItem(MODE_KEY) as ThemeMode) ?? 'light'
+}
 
 const INJECTED_FONT_URLS = new Set<string>()
 
@@ -317,6 +354,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
   const resolvedMode = resolveMode(mode, systemDark)
+  // Effective skin: an explicit pick wins; otherwise the mode-aware default
+  // (Nous in light, Mono in dark), so it flips with the mode until chosen.
+  const themeName = resolveSkin(storedSkin, resolvedMode)
   const activeTheme = useMemo(() => deriveTheme(themeName, resolvedMode), [themeName, resolvedMode])
 
   // What actually gets painted (matches the `.dark` class applyTheme toggles).
@@ -341,6 +381,44 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setModeState(next)
     modePref.assign(liveProfile(), next)
   }, [])
+
+  // Dashboard ↔ chat color-mode sync. When the dashboard hosts us in an
+  // iframe and the user toggles its light/dark switch, the dashboard posts
+  // an appearance message; we honor the colorScheme to keep the chat in
+  // step. Only mode syncs — the user's theme/skin pick stays untouched.
+  useEffect(() => {
+    if (typeof window === 'undefined' || window === window.parent) {
+      return
+    }
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent) return
+
+      const data = event.data as
+        | { type?: unknown; source?: unknown; appearance?: { colorScheme?: unknown } }
+        | null
+        | undefined
+
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        data.type !== DASHBOARD_APPEARANCE_MESSAGE_TYPE ||
+        data.source !== 'hermes-dashboard'
+      ) {
+        return
+      }
+
+      const colorScheme = data.appearance?.colorScheme
+
+      if (colorScheme === 'dark' || colorScheme === 'light') {
+        setMode(colorScheme)
+      }
+    }
+
+    window.addEventListener('message', onMessage)
+
+    return () => window.removeEventListener('message', onMessage)
+  }, [setMode])
 
   // The light/dark toggle (Shift+X by default) is owned by the keybind runtime
   // (`appearance.toggleMode`) so it shows up in the hotkey map and is rebindable.
