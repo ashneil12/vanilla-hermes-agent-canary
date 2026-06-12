@@ -173,12 +173,13 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
     }
 
     let settled = false
-    let focusArmed = false
+    let dialogOpened = false
 
     const cleanup = () => {
       input.removeEventListener('change', onChange)
       input.removeEventListener('cancel', onCancel)
       window.removeEventListener('focus', onWindowFocus)
+      window.removeEventListener('blur', onWindowBlur)
       input.remove()
     }
 
@@ -191,12 +192,30 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
       resolve(paths)
     }
 
+    // Opening the native file dialog blurs the window; record that so a focus
+    // is only treated as "dialog dismissed" once the dialog has actually
+    // opened. Without this gate a spurious focus (the attach dropdown closing,
+    // or focus settling right after input.click) fired the 250ms timer below
+    // and tore the hidden input down BEFORE the dialog opened — so the user's
+    // pick never reached `change` and nothing uploaded. The picker appeared to
+    // work but no file ever attached.
+    const onWindowBlur = () => {
+      dialogOpened = true
+    }
+
     const onWindowFocus = () => {
+      if (!dialogOpened) {
+        return
+      }
+      // macOS commits the file selection slightly AFTER focus returns, so give
+      // `change` a generous grace before concluding the user cancelled. The
+      // `cancel` event handles fast, reliable cancellation on modern browsers;
+      // this focus path is only a fallback for browsers that don't fire it.
       window.setTimeout(() => {
-        if (!settled && focusArmed && (!input.files || input.files.length === 0)) {
+        if (!settled && (!input.files || input.files.length === 0)) {
           settle([])
         }
-      }, 250)
+      }, 1000)
     }
 
     async function onChange() {
@@ -221,10 +240,8 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
 
     input.addEventListener('change', onChange)
     input.addEventListener('cancel', onCancel)
-    window.setTimeout(() => {
-      focusArmed = true
-      window.addEventListener('focus', onWindowFocus)
-    }, 0)
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('focus', onWindowFocus)
 
     document.body.appendChild(input)
     try {
