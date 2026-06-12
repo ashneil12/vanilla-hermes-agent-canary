@@ -2324,6 +2324,19 @@ async def upload_web_attachment(payload: WebAttachmentUploadRequest):
         _log.exception("Web attachment upload failed")
         raise HTTPException(status_code=500, detail=f"Could not save attachment: {exc}")
 
+    # Re-own the upload to HERMES_HOME's owner so the agent can read it. In the
+    # webfree split-container deploy this dashboard server runs as root while the
+    # agent that later reads the attachment runs as a non-root uid, both sharing
+    # HERMES_HOME — without this the file is written root:root 0600 and the agent
+    # gets EACCES ("upload worked but the agent can't read the file/image"). On
+    # the desktop app the owner already matches, so this is a harmless no-op.
+    try:
+        _hh_stat = get_hermes_home().stat()
+        os.chown(upload_dir, _hh_stat.st_uid, _hh_stat.st_gid)
+        os.chown(target, _hh_stat.st_uid, _hh_stat.st_gid)
+    except OSError:
+        pass
+
     return {
         "ok": True,
         "path": str(target),
