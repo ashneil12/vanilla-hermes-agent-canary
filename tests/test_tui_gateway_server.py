@@ -2552,6 +2552,164 @@ def test_config_set_model_waits_for_lazy_agent_before_switch(monkeypatch):
     finally:
         server._sessions.pop("sid", None)
 
+
+def test_config_set_model_rescues_session_with_failed_agent_build(monkeypatch):
+    """A session whose agent build FAILED must still accept a model switch.
+
+    The build latch is one-shot: a failed init leaves agent_build_started=True
+    with agent_ready set and the error cached, so before the fix every
+    config.set(model) re-surfaced the OLD provider's init error and the user
+    could never switch away from the broken provider (the 'openai-api' wedge).
+    The switch must apply agent-less, reset the latch, and rebuild with the
+    per-session model_override.
+    """
+
+    ready = threading.Event()
+    ready.set()
+    session = _session()
+    session["agent"] = None
+    session["agent_ready"] = ready
+    session["agent_build_started"] = True
+    session["agent_error"] = (
+        "Provider 'openai-api' is set in config.yaml but no API key was found."
+    )
+    server._sessions["sid"] = session
+    new_agent = types.SimpleNamespace(model="new/model", provider="openrouter")
+    calls = []
+
+    def fake_apply(sid, target, raw, **kwargs):
+        calls.append(("apply", raw))
+        target["model_override"] = {"model": "new/model", "provider": "openrouter"}
+        return {"value": "new/model", "warning": ""}
+
+    def fake_start(sid, target):
+        calls.append(
+            ("start", target.get("agent_build_started"), target.get("agent_error"))
+        )
+        if target.get("model_override"):
+            # The rebuild honors the override and succeeds.
+            target["agent"] = new_agent
+        target["agent_ready"].set()
+
+    monkeypatch.setattr(server, "_apply_model_switch", fake_apply)
+    monkeypatch.setattr(server, "_start_agent_build", fake_start)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {"session_id": "sid", "key": "model", "value": "new/model"},
+            }
+        )
+
+        assert "error" not in resp
+        assert resp["result"]["value"] == "new/model"
+        assert session["agent"] is new_agent
+        assert session["agent_error"] is None
+        # First start hits the already-tripped latch; the rebuild only runs
+        # because the recovery path reset agent_build_started/agent_error.
+        assert calls == [
+            (
+                "start",
+                True,
+                "Provider 'openai-api' is set in config.yaml but no API key was found.",
+            ),
+            ("apply", "new/model"),
+            ("start", False, None),
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_config_set_model_dead_session_reports_target_provider_error(monkeypatch):
+    """When the rebuild with the NEW provider also fails, the error returned
+    must be the new provider's init error — not the stale old-provider one."""
+
+    ready = threading.Event()
+    ready.set()
+    session = _session()
+    session["agent"] = None
+    session["agent_ready"] = ready
+    session["agent_build_started"] = True
+    session["agent_error"] = (
+        "Provider 'openai-api' is set in config.yaml but no API key was found."
+    )
+    server._sessions["sid"] = session
+
+    def fake_apply(sid, target, raw, **kwargs):
+        target["model_override"] = {"model": "claude-opus-4-8", "provider": "anthropic"}
+        return {"value": "claude-opus-4-8", "warning": ""}
+
+    def fake_start(sid, target):
+        if target.get("model_override"):
+            target["agent_error"] = (
+                "Provider 'anthropic' is set in config.yaml but no API key was found."
+            )
+        target["agent_ready"].set()
+
+    monkeypatch.setattr(server, "_apply_model_switch", fake_apply)
+    monkeypatch.setattr(server, "_start_agent_build", fake_start)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "claude-opus-4-8",
+                },
+            }
+        )
+
+        assert "anthropic" in resp["error"]["message"]
+        assert "openai-api" not in resp["error"]["message"]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_config_set_model_does_not_race_inflight_agent_build(monkeypatch):
+    """An agent build that timed out (still in flight) must NOT trigger the
+    dead-session recovery — a second build thread would race the first."""
+
+    session = _session()
+    session["agent"] = None
+    session["agent_ready"] = threading.Event()  # never set: build in flight
+    session["agent_build_started"] = True
+    server._sessions["sid"] = session
+    applied = []
+
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, target: None)
+    monkeypatch.setattr(
+        server,
+        "_wait_agent",
+        lambda s, rid, timeout=30.0: server._err(
+            rid, 5032, "agent initialization timed out"
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda *a, **k: applied.append(a) or {"value": "x", "warning": ""},
+    )
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {"session_id": "sid", "key": "model", "value": "new/model"},
+            }
+        )
+
+        assert resp["error"]["message"] == "agent initialization timed out"
+        assert applied == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_config_set_model_uses_live_switch_path(monkeypatch):
     server._sessions["sid"] = _session()
     seen = {}
