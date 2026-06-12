@@ -1002,6 +1002,75 @@ def _start_agent_build(sid: str, session: dict) -> None:
     threading.Thread(target=_build, daemon=True).start()
 
 
+def _switch_model_on_dead_session(
+    rid,
+    sid: str,
+    session: dict,
+    raw_input: str,
+    *,
+    confirm_expensive_model: bool = False,
+) -> dict | None:
+    """Apply a model switch to a session whose agent failed to build.
+
+    ``_start_agent_build`` is a one-shot latch: a failed build leaves
+    ``agent_build_started=True`` with ``agent_ready`` set and the error
+    cached in ``agent_error``, so the session never retries.  When the
+    failure is the session's own model/provider (e.g. a stored model
+    that resolves to a provider with no credentials), the model picker
+    used to be unable to rescue it: config.set(model) re-built the
+    agent with the OLD broken model first and returned that init error
+    for EVERY target provider — the user could not switch away from
+    the very provider that was broken (chicken-and-egg).
+
+    Recover by applying the switch agent-less — ``_apply_model_switch``
+    validates the TARGET provider's credentials and records the
+    per-session ``model_override`` — then resetting the one-shot build
+    latch and rebuilding, which honors the override.
+
+    Returns a JSON-RPC response dict, or ``None`` when the failed build
+    is still in flight (the ``_wait_agent`` timeout case) — a second
+    build thread would race the first for session state, so the caller
+    should surface the original error instead.
+    """
+    ready = session.get("agent_ready")
+    if ready is None or not ready.is_set():
+        return None
+    try:
+        result = _apply_model_switch(
+            sid,
+            session,
+            raw_input,
+            confirm_expensive_model=confirm_expensive_model,
+        )
+    except Exception as e:
+        return _err(rid, 5001, str(e))
+    payload = {
+        "key": "model",
+        "value": result["value"],
+        "warning": result.get("warning", ""),
+        "confirm_required": result.get("confirm_required", False),
+        "confirm_message": result.get("confirm_message", ""),
+    }
+    if payload["confirm_required"]:
+        # No override was recorded yet — the client re-sends with
+        # confirm_expensive_model=true and we recover on that call.
+        return _ok(rid, payload)
+    lock = session.setdefault("agent_build_lock", threading.Lock())
+    with lock:
+        session["agent_error"] = None
+        session["agent_build_started"] = False
+        session["agent_ready"] = threading.Event()
+    _start_agent_build(sid, session)
+    rebuild_err = _wait_agent(session, rid)
+    if rebuild_err:
+        # The NEW provider failed too — at least the error now names
+        # the provider the user actually picked.
+        return rebuild_err
+    if session.get("agent") is None:
+        return _err(rid, 5032, "agent initialization failed")
+    return _ok(rid, payload)
+
+
 def _sess_nowait(params, rid):
     s = _sessions.get(params.get("session_id") or "")
     return (s, None) if s else (None, _err(rid, 4001, "session not found"))
@@ -6560,10 +6629,27 @@ def _(rid, params: dict) -> dict:
                     session_id = params.get("session_id", "")
                     _start_agent_build(session_id, session)
                     init_err = _wait_agent(session, rid)
-                    if init_err:
-                        return init_err
-                    if session.get("agent") is None:
-                        return _err(rid, 5032, "agent initialization failed")
+                    if init_err or session.get("agent") is None:
+                        # The agent can't be built with the session's
+                        # CURRENT model/provider. Don't return that init
+                        # error here — it would make every switch fail
+                        # with the old provider's error and wedge the
+                        # session on the very provider the user is
+                        # trying to escape. Switch agent-less instead.
+                        recovered = _switch_model_on_dead_session(
+                            rid,
+                            session_id,
+                            session,
+                            value,
+                            confirm_expensive_model=bool(
+                                params.get("confirm_expensive_model", False)
+                            ),
+                        )
+                        if recovered is not None:
+                            return recovered
+                        return init_err or _err(
+                            rid, 5032, "agent initialization failed"
+                        )
                 result = _apply_model_switch(
                     params.get("session_id", ""),
                     session,
