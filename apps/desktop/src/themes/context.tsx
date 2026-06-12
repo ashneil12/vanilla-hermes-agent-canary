@@ -274,13 +274,23 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
   }
 }
 
+// Pin Electron's nativeTheme to the app's mode so the native window chrome
+// (macOS vibrancy material, titlebar, pre-paint background) matches the app
+// theme instead of the OS appearance. An explicit light/dark pick is forced;
+// 'system' stays 'system' so prefers-color-scheme keeps tracking the OS.
+const syncNativeTheme = (pref: ThemeMode, rendered: 'light' | 'dark') =>
+  window.hermesDesktop?.setNativeTheme?.(pref === 'system' ? 'system' : rendered)
+
 // Boot-time paint to avoid a flash before <ThemeProvider> mounts. Use the last
 // active profile's appearance so a non-default profile relaunch paints its own
 // skin + light/dark mode.
 if (typeof window !== 'undefined') {
   const profile = readBootProfileKey()
-  const resolved = resolveMode(modePref.resolve(profile))
-  applyTheme(deriveTheme(skinPref.resolve(profile), resolved), resolved)
+  const pref = modePref.resolve(profile)
+  const resolved = resolveMode(pref)
+  const theme = deriveTheme(skinPref.resolve(profile), resolved)
+  applyTheme(theme, resolved)
+  syncNativeTheme(pref, renderedModeFor(theme.colors, resolved))
 }
 
 // ─── Context ────────────────────────────────────────────────────────────────
@@ -354,9 +364,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
   const resolvedMode = resolveMode(mode, systemDark)
-  // Effective skin: an explicit pick wins; otherwise the mode-aware default
-  // (Nous in light, Mono in dark), so it flips with the mode until chosen.
-  const themeName = resolveSkin(storedSkin, resolvedMode)
   const activeTheme = useMemo(() => deriveTheme(themeName, resolvedMode), [themeName, resolvedMode])
 
   // What actually gets painted (matches the `.dark` class applyTheme toggles).
@@ -366,6 +373,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => applyTheme(activeTheme, resolvedMode), [activeTheme, resolvedMode])
+  useEffect(() => syncNativeTheme(mode, renderedMode), [mode, renderedMode])
 
   // Assign to whichever profile is live right now (read fresh so the callbacks
   // stay stable across profile switches).
