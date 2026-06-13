@@ -187,6 +187,17 @@ async function readFileDataUrlForAttach(filePath: string): Promise<string | null
   return dataUrl || null
 }
 
+// The hosted web SPA (lib/web-shim.ts) sets `window.__HERMES_WEB_CLIENT__`. That
+// build runs in a plain browser with NO local filesystem: every file path it
+// holds is already gateway-resident — non-image drops are uploaded to
+// ~/.hermes/uploads via the web shim, and in-app refs are workspace paths. So it
+// cannot (and need not) read file bytes client-side for a path attach; the
+// gateway's file.attach resolves the path directly. Reading would hit the web
+// shim's image-only data-URL cache and wrongly fail for .md/text/pdf.
+function isHostedWebClient(): boolean {
+  return Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
+}
+
 // The readFileDataUrl IPC base64-loads the whole file into memory and is
 // hard-capped (DATA_URL_READ_MAX_BYTES, 16 MB) in electron/hardening.cjs, which
 // rejects with a raw "file is too large (N bytes; limit M bytes)" string. In
@@ -272,7 +283,15 @@ export async function uploadComposerAttachment(
   // Non-image file.
   let dataUrl: string | null = null
 
-  if (remote) {
+  // Native (Electron) remote mode reads the file's bytes here because the path
+  // lives on the CLIENT's disk, invisible to the gateway — they ride along as a
+  // data_url. The hosted web client is the opposite: it has no local disk and
+  // the file is ALREADY on the gateway (uploaded to ~/.hermes/uploads, or an
+  // in-app workspace ref), so attach by path only and let the gateway read it.
+  // Reading here would hit the web shim's image-only cache and throw
+  // "Could not read <name>" for every .md/text/pdf even though the upload that
+  // produced this attachment already succeeded.
+  if (remote && !isHostedWebClient()) {
     try {
       dataUrl = await readFileDataUrlForAttach(path)
     } catch (err) {

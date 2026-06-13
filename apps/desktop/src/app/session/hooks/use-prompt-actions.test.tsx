@@ -1058,4 +1058,60 @@ describe('uploadComposerAttachment remote read failures', () => {
       )
     ).rejects.toThrow('ENOENT: no such file')
   })
+
+  it('hosted web client attaches a non-image file by path only (no client read, no data_url)', async () => {
+    // The web SPA has no local disk: the .md was already uploaded to
+    // ~/.hermes/uploads by the web shim, so we attach by PATH and let the gateway
+    // read it. The shim's readFileDataUrl only caches image previews, so for a
+    // .md it returns '' — the old code then threw "Could not read <name>" even
+    // though the upload had succeeded.
+    const win = window as unknown as { __HERMES_WEB_CLIENT__?: boolean }
+    win.__HERMES_WEB_CLIENT__ = true
+    const readFileDataUrl = vi.fn(async () => '') // web-shim cache miss for non-images
+
+    try {
+      Object.defineProperty(window, 'hermesDesktop', {
+        configurable: true,
+        value: { readFileDataUrl }
+      })
+
+      const calls: { method: string; params?: Record<string, unknown> }[] = []
+      const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+        calls.push({ method, params })
+        if (method === 'file.attach') {
+          return {
+            attached: true,
+            ref_text: '@file:.hermes/desktop-attachments/notes.md',
+            uploaded: true
+          } as never
+        }
+        return {} as never
+      })
+
+      const result = await uploadComposerAttachment(
+        {
+          id: 'file:notes',
+          kind: 'file',
+          label: 'notes.md',
+          path: '/home/hermes/.hermes/uploads/20260613/071447-79fff2b5-notes.md'
+        },
+        { remote: true, requestGateway, sessionId: RUNTIME_SESSION_ID }
+      )
+
+      // Attaches by path; never reads bytes client-side; sends NO data_url.
+      expect(readFileDataUrl).not.toHaveBeenCalled()
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.method).toBe('file.attach')
+      expect(calls[0]?.params).toMatchObject({
+        session_id: RUNTIME_SESSION_ID,
+        path: '/home/hermes/.hermes/uploads/20260613/071447-79fff2b5-notes.md',
+        name: 'notes.md'
+      })
+      expect(calls[0]?.params).not.toHaveProperty('data_url')
+      expect(result.refText).toBe('@file:.hermes/desktop-attachments/notes.md')
+      expect(result.attachedSessionId).toBe(RUNTIME_SESSION_ID)
+    } finally {
+      delete win.__HERMES_WEB_CLIENT__
+    }
+  })
 })
