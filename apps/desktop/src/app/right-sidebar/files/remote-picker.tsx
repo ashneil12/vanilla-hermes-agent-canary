@@ -115,7 +115,7 @@ export function RemoteFolderPicker() {
           <DialogDescription className="mt-1 text-xs">{r.remotePickerDescription}</DialogDescription>
         </div>
 
-        <div className="flex min-h-[22rem] flex-col">
+        <div className="flex flex-col">
           <div className="flex flex-wrap items-center gap-1 border-b border-border/50 px-3 py-2 text-xs text-muted-foreground">
             {crumbs.map((crumb, index) => (
               <button
@@ -129,7 +129,7 @@ export function RemoteFolderPicker() {
             ))}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <div className="min-h-[18rem] max-h-[50vh] overflow-y-auto p-2">
             <FolderRow disabled={currentPath === '/'} name=".." onClick={() => setCurrentPath(parentDir(currentPath))} />
             {loading ? (
               <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
