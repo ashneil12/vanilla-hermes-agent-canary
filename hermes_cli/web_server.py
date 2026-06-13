@@ -1191,14 +1191,16 @@ def _fs_git_branch(cwd: str) -> str:
 def _media_serve_roots() -> list[Path]:
     """Directories ``GET /api/media`` is allowed to read from.
 
-    Confined to where the agent and attach pipeline actually write media on the
-    gateway host — its images dir and cache subtree. This stops an authenticated
-    client from reading image-extension files anywhere on disk (e.g. a renamed
-    key or a screenshot outside the cache) merely because the suffix passes the
-    allowlist.
+    Confined to where the agent actually writes media: its own home dirs
+    (images / screenshots / cache) plus the agent workspace, which is where it
+    naturally saves generated screenshots and other outputs it wants to show in
+    chat. Still an allowlist — an authenticated client can't read image-extension
+    files anywhere on disk (e.g. a renamed key elsewhere on the host) merely
+    because the suffix passes; ``/workspace`` is the agent's own sandbox, not the
+    wider filesystem.
     """
     home = get_hermes_home()
-    roots = [home / "images", home / "screenshots", home / "cache"]
+    roots = [home / "images", home / "screenshots", home / "cache", Path("/workspace")]
     out: list[Path] = []
     for root in roots:
         try:

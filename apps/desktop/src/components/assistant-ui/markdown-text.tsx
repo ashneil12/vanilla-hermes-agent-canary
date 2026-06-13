@@ -215,7 +215,7 @@ function MediaAttachment({ path }: { path: string }) {
         openExternalLink(mediaExternalUrl(path))
       }}
     >
-      {failed ? `Open ${name}` : `Loading ${name}...`}
+      {failed ? `Couldn't load ${name}` : `Loading ${name}...`}
     </a>
   )
 }
@@ -286,6 +286,20 @@ function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>)
       {...props}
     />
   )
+}
+
+// Plain markdown images. Remote / data / blob URLs go straight to <img>. A bare
+// gateway path — the form a model instinctively writes, e.g.
+// ![preview](/workspace/shot.png) — is routed through MediaAttachment so it
+// resolves over the gateway (GET /api/media → data URL) instead of 404-ing as a
+// raw <img src="/workspace/...">. This makes plain `![](path)` behave like the
+// MEDIA: token, so the agent doesn't have to know the convention to show an image.
+function MarkdownImageOrMedia({ src, alt, ...props }: ComponentProps<'img'>) {
+  if (typeof src === 'string' && src && !/^(?:https?|data|blob):/i.test(src)) {
+    return <MediaAttachment path={src} />
+  }
+
+  return <MarkdownImage alt={alt} src={src} {...props} />
 }
 
 // Steady character-reveal for streaming text: decouples visible cadence from
@@ -527,7 +541,7 @@ function MarkdownTextSurface({ containerClassName, containerProps }: MarkdownTex
         td: ({ className, ...props }: ComponentProps<'td'>) => (
           <td className={cn('px-2.5 py-1.5 align-top text-[0.8125rem] leading-snug', className)} {...props} />
         ),
-        img: MarkdownImage,
+        img: MarkdownImageOrMedia,
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => <SyntaxHighlighter {...props} defer={isStreaming} />
       }) as StreamdownTextComponents,
     [isStreaming]
