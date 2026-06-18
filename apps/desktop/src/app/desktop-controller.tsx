@@ -143,6 +143,10 @@ const SkillsView = lazy(async () => ({ default: (await import('./skills')).Skill
 // this cadence while the app is open + visible so new runs surface promptly
 // instead of waiting for the next user-triggered refreshSessions().
 const CRON_POLL_INTERVAL_MS = 30_000
+// Dashboard → iframe bridge: the embedding dashboard postMessages this type to
+// inject a starter prompt as a user message (parallels the appearance message
+// in themes/context.tsx). Powers the dashboard welcome starter-prompt strip.
+const DASHBOARD_SEND_MESSAGE_TYPE = 'hermes-dashboard:send-message'
 // The recents list is local-only: cron rows have their own section, and each
 // messaging platform (telegram, discord, …) is fetched separately into its own
 // self-managed sidebar section (refreshMessagingSessions). Excluding both here
@@ -883,6 +887,49 @@ export function DesktopController() {
       void refreshHermesConfig()
     }
   }, [activeSessionId, freshDraftReady, gatewayState, refreshCurrentModel, refreshHermesConfig])
+
+  // Dashboard → iframe bridge: when this chat runs inside the dashboard's
+  // cross-origin iframe, accept a starter prompt the parent posts and send it
+  // as a user message — exactly as if the user typed it. This powers the
+  // dashboard welcome starter-prompt strip: clicking a suggestion creates the
+  // first backend session (submitText calls createBackendSessionForSend when
+  // there is no active session, which stamps first_usage) without the user
+  // having to type into an unfamiliar embedded chat. submitText surfaces its
+  // own errors, so this stays a thin, validated forwarder. Guards mirror the
+  // appearance listener: only when actually iframed, only from window.parent.
+  useEffect(() => {
+    if (typeof window === 'undefined' || window === window.parent) {
+      return
+    }
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent) return
+
+      const data = event.data as
+        | { type?: unknown; source?: unknown; text?: unknown }
+        | null
+        | undefined
+
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        data.type !== DASHBOARD_SEND_MESSAGE_TYPE ||
+        data.source !== 'hermes-dashboard' ||
+        typeof data.text !== 'string'
+      ) {
+        return
+      }
+
+      const text = data.text.trim()
+      if (!text) return
+
+      void submitText(text)
+    }
+
+    window.addEventListener('message', onMessage)
+
+    return () => window.removeEventListener('message', onMessage)
+  }, [submitText])
 
   useRouteResume({
     activeSessionId,
