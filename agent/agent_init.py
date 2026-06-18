@@ -362,6 +362,34 @@ def init_agent(
     except Exception:
         pass
 
+    # Venice forgives cross-vendor model slugs. Venice hosts Claude/GPT/Gemini
+    # under its OWN ids (e.g. ``claude-sonnet-4-6``), so a session pinned to a
+    # foreign slug like ``anthropic/claude-sonnet-4`` would 404 (model_not_found,
+    # non-retryable) on every request and dead-chat the user. Remap onto the
+    # Venice equivalent here — the single chokepoint where provider/model are
+    # finalized — and record the remap so the loop can surface it once.
+    agent._venice_model_remap = None
+    agent._venice_remap_announced = False
+    try:
+        # Imported locally to avoid an import cycle at module load.
+        from hermes_cli.models import (
+            normalize_venice_model_id,
+        )
+
+        _venice_mapped, _venice_orig = normalize_venice_model_id(
+            agent.provider, agent.model
+        )
+        if _venice_orig is not None:
+            agent.model = _venice_mapped
+            agent._venice_model_remap = (_venice_orig, agent.model)
+            logger.info(
+                "Venice: remapped foreign model id %r -> %r (Venice equivalent)",
+                _venice_orig,
+                agent.model,
+            )
+    except Exception:
+        pass
+
     # GPT-5.x models usually require the Responses API path, but some
     # providers have exceptions (for example Copilot's gpt-5-mini still
     # uses chat completions). Also auto-upgrade for direct OpenAI URLs

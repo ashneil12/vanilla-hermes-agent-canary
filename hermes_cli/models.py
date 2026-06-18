@@ -3170,6 +3170,113 @@ def normalize_copilot_model_id(
     return raw
 
 
+# ---------------------------------------------------------------------------
+# Venice cross-vendor model aliasing
+# ---------------------------------------------------------------------------
+#
+# Venice (https://api.venice.ai/api/v1) hosts Claude / GPT / Gemini / Kimi /
+# Grok under its OWN model ids, which differ from the OpenRouter/Anthropic
+# slugs users routinely carry over (e.g. ``anthropic/claude-sonnet-4`` is an
+# OpenRouter id; Venice's equivalent is ``claude-sonnet-4-6``). When a chat
+# session is pinned to a foreign-namespaced slug, every request sends that id
+# to Venice, which replies HTTP 404 "Specified model not found: ... Did you
+# mean: ...". The error classifier tags this ``model_not_found`` (non-retryable)
+# and, with no fallback configured, the turn aborts — on the webui chat surface
+# the abort status renders as nothing, so the user just sees a dead chat.
+#
+# ``VENICE_MODEL_ALIASES`` makes Venice forgiving of those cross-vendor slugs by
+# mapping the common foreign/legacy forms onto a verified-live Venice id. Keys
+# are matched case-insensitively (lowercase at lookup); values are real Venice
+# model ids only — we never invent an unvalidated id.
+VENICE_MODEL_ALIASES: dict[str, str] = {
+    # Anthropic / OpenRouter-style Claude slugs -> Venice Claude ids
+    "anthropic/claude-sonnet-4": "claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4.6": "claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5",
+    "anthropic/claude-opus-4.8": "claude-opus-4-8",
+    "anthropic/claude-opus-4.7": "claude-opus-4-7",
+    "anthropic/claude-opus-4.6": "claude-opus-4-6",
+    "anthropic/claude-opus-4.5": "claude-opus-4-5",
+    "anthropic/claude-fable-5": "claude-fable-5",
+    # Bare / legacy Claude forms
+    "claude-sonnet-4": "claude-sonnet-4-6",
+    "claude-opus-4": "claude-opus-4-8",
+    # GPT / Gemini / Kimi cross-vendor slugs
+    "openai/gpt-5.5": "openai-gpt-55",
+    "google/gemini-3-flash-preview": "gemini-3-flash-preview",
+    "moonshotai/kimi-k2.6": "kimi-k2-6",
+}
+
+# Vendor prefixes we are willing to strip when applying the safe heuristic for
+# ``vendor/``-slugs that aren't in the table (e.g. ``anthropic/claude-sonnet-4.6``
+# -> ``claude-sonnet-4-6``). Only used to PRODUCE a candidate; the candidate is
+# accepted only if it's already a known-good Venice id (a value in the table).
+_VENICE_VENDOR_PREFIXES: tuple[str, ...] = (
+    "anthropic/",
+    "openai/",
+    "google/",
+    "x-ai/",
+    "moonshotai/",
+    "deepseek/",
+    "qwen/",
+)
+
+
+def normalize_venice_model_id(
+    provider: Optional[str], model: Optional[str]
+) -> tuple[str, Optional[str]]:
+    """Map a foreign/legacy model slug onto the Venice equivalent (Venice only).
+
+    Venice rejects cross-vendor slugs (``anthropic/claude-sonnet-4``) with HTTP
+    404, which aborts the turn non-retryably. This translates the common foreign
+    forms onto a verified-live Venice id so the chat keeps working. It is a
+    deliberate no-op for every non-Venice provider — the blast radius is
+    Venice-only.
+
+    Args:
+        provider: Hermes provider id or alias (normalized internally).
+        model: The model id the session is pinned to.
+
+    Returns:
+        ``(normalized_model, original)`` where ``original`` is the pre-remap
+        slug ONLY when a remap actually occurred; otherwise ``None`` (passthrough).
+    """
+    model_str = (model or "").strip()
+
+    # Passthrough for every non-Venice provider — no behavior change elsewhere.
+    if normalize_provider(provider) != "venice":
+        return (model_str, None)
+
+    if not model_str:
+        return (model_str, None)
+
+    known_venice_ids = set(VENICE_MODEL_ALIASES.values())
+    lowered = model_str.lower()
+
+    # Already a valid Venice id — idempotent no-op.
+    if lowered in known_venice_ids:
+        return (model_str, None)
+
+    # 1) Direct alias-table hit.
+    target = VENICE_MODEL_ALIASES.get(lowered)
+    if target and target != model_str:
+        return (target, model_str)
+
+    # 2) Safe heuristic for vendor/-prefixed slugs not in the table: strip a
+    #    leading known vendor prefix and convert dots to dashes. Only accept the
+    #    result if it's ALSO a known-good Venice id — never invent an
+    #    unvalidated id.
+    for prefix in _VENICE_VENDOR_PREFIXES:
+        if lowered.startswith(prefix):
+            candidate = lowered[len(prefix):].replace(".", "-")
+            if candidate in known_venice_ids and candidate != model_str:
+                return (candidate, model_str)
+            break
+
+    # No known-good mapping — pass through unchanged.
+    return (model_str, None)
+
+
 def _github_reasoning_efforts_for_model_id(model_id: str) -> list[str]:
     raw = (model_id or "").strip().lower()
     if raw.startswith(("openai/o1", "openai/o3", "openai/o4", "o1", "o3", "o4")):

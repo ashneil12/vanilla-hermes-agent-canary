@@ -1245,3 +1245,47 @@ class TestReasoningEffortDefaults:
         agent.reasoning_config = {"enabled": True, "effort": "medium"}
         kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
         assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
+
+
+class TestVeniceModelRemapOnInit:
+    """AIAgent.__init__ remaps foreign model slugs for Venice boxes.
+
+    A Venice box pinned to ``anthropic/claude-sonnet-4`` (an OpenRouter id) 404s
+    every request. The init chokepoint rewrites it to the Venice id and records
+    the remap so the conversation loop can surface a one-time notice.
+    """
+
+    _VENICE_BASE = "https://api.venice.ai/api/v1"
+
+    def test_venice_foreign_slug_is_remapped(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "venice",
+            base_url=self._VENICE_BASE,
+            model="anthropic/claude-sonnet-4",
+        )
+        assert agent.model == "claude-sonnet-4-6"
+        assert agent._venice_model_remap == ("anthropic/claude-sonnet-4", "claude-sonnet-4-6")
+        assert agent._venice_remap_announced is False
+
+    def test_venice_valid_id_not_remapped(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "venice",
+            base_url=self._VENICE_BASE,
+            model="claude-sonnet-4-6",
+        )
+        assert agent.model == "claude-sonnet-4-6"
+        assert agent._venice_model_remap is None
+
+    def test_openrouter_provider_passthrough(self, monkeypatch):
+        """Non-Venice providers are never remapped (blast radius is Venice-only)."""
+        agent = _make_agent(
+            monkeypatch,
+            "openrouter",
+            model="anthropic/claude-sonnet-4",
+        )
+        # OpenRouter is an aggregator; the model keeps its vendor/ prefix and
+        # the Venice remap state is the inert default.
+        assert agent.model == "anthropic/claude-sonnet-4"
+        assert agent._venice_model_remap is None

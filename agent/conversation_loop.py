@@ -539,6 +539,20 @@ def run_conversation(
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
 
+        # Venice cross-vendor remap notice (once per session). If the agent's
+        # model was remapped from a foreign slug onto a Venice id at init,
+        # surface a single info line so the user understands which model is
+        # actually serving their chat. Guarded with getattr so non-remapped /
+        # non-Venice agents are entirely unaffected.
+        _venice_remap = getattr(agent, "_venice_model_remap", None)
+        if _venice_remap and not getattr(agent, "_venice_remap_announced", False):
+            _orig, _mapped = _venice_remap
+            agent._emit_status(
+                f"ℹ️ '{_orig}' isn't a Venice model id — using '{_mapped}' "
+                f"(Venice's equivalent)."
+            )
+            agent._venice_remap_announced = True
+
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
         # this iteration regardless of outcome.
@@ -3214,6 +3228,18 @@ def run_conversation(
                             agent._vprint(f"{agent.log_prefix}      • Does your account have access to {_model}?", force=True)
                             if base_url_host_matches(str(_base), "openrouter.ai"):
                                 agent._vprint(f"{agent.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                    elif classified.reason == FailoverReason.model_not_found:
+                        # The model id the provider rejected (HTTP 404 / invalid
+                        # model). The generic "retry won't help" line is useless
+                        # here — the fix is to pick a valid model, not retry. On
+                        # webui this is the dead-chat case: a Venice box pinned to
+                        # a foreign slug (e.g. anthropic/claude-sonnet-4) 404s
+                        # every turn. The provider's own "Did you mean: ..." list
+                        # is in the error summary above, so point the user at it.
+                        agent._vprint(f"{agent.log_prefix}   💡 '{_model}' isn't a valid model for provider '{_provider}'.", force=True)
+                        agent._vprint(f"{agent.log_prefix}      • The provider's suggested model ids are listed in the error above.", force=True)
+                        agent._vprint(f"{agent.log_prefix}      • Switch models with /model <name>, or pick a different model in the model selector.", force=True)
+                        agent._vprint(f"{agent.log_prefix}        (On Venice, valid Claude ids look like claude-sonnet-4-6 / claude-opus-4-8.)", force=True)
                     else:
                         agent._vprint(f"{agent.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
                     # Content-policy blocks deserve their own actionable

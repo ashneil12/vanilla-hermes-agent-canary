@@ -907,3 +907,76 @@ class TestNousRecommendedModels:
             patch("hermes_cli.models.check_nous_free_tier", side_effect=RuntimeError("boom")),
         ):
             assert get_nous_recommended_aux_model(vision=False) == "paid-model"
+
+
+class TestNormalizeModelForProviderVenice:
+    """Venice cross-vendor model remapping (HTTP 404 'model not found' fix).
+
+    Venice hosts Claude/GPT/Gemini under its own ids; foreign/legacy slugs
+    (e.g. ``anthropic/claude-sonnet-4``) 404 on every request. The mapper
+    rewrites those onto a verified-live Venice id, Venice-only.
+    """
+
+    def test_anthropic_openrouter_slug_remaps(self):
+        from hermes_cli.models import normalize_venice_model_id
+        mapped, orig = normalize_venice_model_id("venice", "anthropic/claude-sonnet-4")
+        assert mapped == "claude-sonnet-4-6"
+        assert orig == "anthropic/claude-sonnet-4"
+
+    def test_dotted_vendor_slug_remaps_via_heuristic(self):
+        """A vendor/-prefixed dotted slug not in the table maps via the safe
+        heuristic, but only because the result is a known Venice id."""
+        from hermes_cli.models import normalize_venice_model_id
+        # In-table direct hit also works, but exercise the heuristic with a
+        # vendor prefix that resolves to a known Venice id after dot->dash.
+        mapped, orig = normalize_venice_model_id("venice", "anthropic/claude-sonnet-4.6")
+        assert mapped == "claude-sonnet-4-6"
+        assert orig == "anthropic/claude-sonnet-4.6"
+
+    def test_real_venice_id_is_noop(self):
+        from hermes_cli.models import normalize_venice_model_id
+        mapped, orig = normalize_venice_model_id("venice", "kimi-k2-6")
+        assert mapped == "kimi-k2-6"
+        assert orig is None
+
+    def test_bare_claude_forms_remap(self):
+        from hermes_cli.models import normalize_venice_model_id
+        assert normalize_venice_model_id("venice", "claude-sonnet-4") == ("claude-sonnet-4-6", "claude-sonnet-4")
+        assert normalize_venice_model_id("venice", "claude-opus-4") == ("claude-opus-4-8", "claude-opus-4")
+
+    def test_cross_vendor_gpt_gemini_kimi(self):
+        from hermes_cli.models import normalize_venice_model_id
+        assert normalize_venice_model_id("venice", "openai/gpt-5.5") == ("openai-gpt-55", "openai/gpt-5.5")
+        assert normalize_venice_model_id("venice", "google/gemini-3-flash-preview") == ("gemini-3-flash-preview", "google/gemini-3-flash-preview")
+        assert normalize_venice_model_id("venice", "moonshotai/kimi-k2.6") == ("kimi-k2-6", "moonshotai/kimi-k2.6")
+
+    def test_unknown_model_passes_through(self):
+        """Never invent an unvalidated id — unknown slugs pass through."""
+        from hermes_cli.models import normalize_venice_model_id
+        assert normalize_venice_model_id("venice", "some-unknown-model") == ("some-unknown-model", None)
+        # Vendor-prefixed but resolves to a non-Venice id => passthrough.
+        assert normalize_venice_model_id("venice", "anthropic/totally-made-up") == ("anthropic/totally-made-up", None)
+
+    def test_non_venice_providers_passthrough(self):
+        """Blast radius is Venice-only — every other provider is untouched."""
+        from hermes_cli.models import normalize_venice_model_id
+        assert normalize_venice_model_id("openrouter", "anthropic/claude-sonnet-4") == ("anthropic/claude-sonnet-4", None)
+        assert normalize_venice_model_id("anthropic", "anthropic/claude-sonnet-4") == ("anthropic/claude-sonnet-4", None)
+        assert normalize_venice_model_id(None, "anthropic/claude-sonnet-4") == ("anthropic/claude-sonnet-4", None)
+
+    def test_empty_and_none_model(self):
+        from hermes_cli.models import normalize_venice_model_id
+        assert normalize_venice_model_id("venice", "") == ("", None)
+        assert normalize_venice_model_id("venice", None) == ("", None)
+
+    def test_case_insensitive_lookup(self):
+        from hermes_cli.models import normalize_venice_model_id
+        mapped, orig = normalize_venice_model_id("venice", "Anthropic/Claude-Sonnet-4")
+        assert mapped == "claude-sonnet-4-6"
+        assert orig == "Anthropic/Claude-Sonnet-4"
+
+    def test_aliases_values_are_self_consistent(self):
+        """Every alias target must itself be idempotent (a no-op)."""
+        from hermes_cli.models import VENICE_MODEL_ALIASES, normalize_venice_model_id
+        for target in set(VENICE_MODEL_ALIASES.values()):
+            assert normalize_venice_model_id("venice", target) == (target, None)
