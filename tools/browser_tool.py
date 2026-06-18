@@ -862,6 +862,7 @@ def _run_chrome_fallback_command(
     browser_env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": task_socket_dir}
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
     _maybe_set_browser_executable(browser_env)
+    _maybe_set_browser_profile(browser_env)
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
         browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
@@ -2001,6 +2002,7 @@ def _run_browser_command(
         browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
         browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
         _maybe_set_browser_executable(browser_env)
+        _maybe_set_browser_profile(browser_env)
 
         # Tell the agent-browser daemon to self-terminate after being idle
         # for our configured inactivity timeout.  This is the daemon-side
@@ -3733,6 +3735,53 @@ def _maybe_set_browser_executable(browser_env: Dict[str, str]) -> None:
     exe = _resolve_chromium_executable()
     if exe:
         browser_env["AGENT_BROWSER_EXECUTABLE_PATH"] = exe
+
+
+def _resolve_persistent_browser_profile() -> Optional[str]:
+    """Return a persistent, writable Chrome profile dir for local sessions.
+
+    Why this is needed: agent-browser launches Chrome with an EPHEMERAL
+    ``--user-data-dir=/tmp/agent-browser-chrome-<uuid>`` by default (a fresh
+    one per daemon launch).  The per-session daemon self-terminates after the
+    inactivity timeout (``BROWSER_SESSION_INACTIVITY_TIMEOUT``, ~5 min), and a
+    new task / agent restart starts a new daemon — so cookies and login state
+    are silently lost between browser actions.  The agent then "sees not
+    logged in" moments after a successful login.
+
+    Pointing ``AGENT_BROWSER_PROFILE`` at a stable directory under the Hermes
+    data home (writable + persisted across restarts) makes Chrome reuse one
+    persistent profile, so logins survive daemon restarts.  Concurrent daemons
+    sharing the directory are tolerated by agent-browser (a single shared
+    profile does not hard-fail a second concurrent session), so we can keep the
+    existing per-task ``--session`` isolation while sharing login state.
+    """
+    try:
+        base = get_hermes_home()
+    except Exception:
+        return None
+    profile = Path(base) / ".agent-browser" / "profile"
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return str(profile)
+
+
+def _maybe_set_browser_profile(browser_env: Dict[str, str]) -> None:
+    """Give local Chrome sessions a persistent profile so logins survive.
+
+    Sets ``AGENT_BROWSER_PROFILE`` in ``browser_env`` when running in local
+    mode and no profile is already configured.  No-op when a value is already
+    present or when a cloud provider is configured (the provider manages its
+    own session persistence).  See :func:`_resolve_persistent_browser_profile`.
+    """
+    if browser_env.get("AGENT_BROWSER_PROFILE"):
+        return
+    if not _is_local_mode():
+        return
+    prof = _resolve_persistent_browser_profile()
+    if prof:
+        browser_env["AGENT_BROWSER_PROFILE"] = prof
 
 
 def _running_in_docker() -> bool:

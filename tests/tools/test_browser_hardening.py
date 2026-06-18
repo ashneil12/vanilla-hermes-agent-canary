@@ -358,3 +358,48 @@ class TestMaybeSetBrowserExecutable:
              patch.object(bt, "_resolve_chromium_executable", return_value="/x/chrome"):
             bt._maybe_set_browser_executable(env)
         assert "AGENT_BROWSER_EXECUTABLE_PATH" not in env
+
+
+# ---------------------------------------------------------------------------
+# Persistent browser profile (login survives daemon restart)
+# ---------------------------------------------------------------------------
+
+class TestPersistentBrowserProfile:
+    """AGENT_BROWSER_PROFILE must point at a persistent dir so logins persist.
+
+    Without it agent-browser uses an ephemeral /tmp user-data-dir per daemon
+    launch, so cookies/login are lost on the ~5-min idle-timeout, a new task,
+    or an agent restart — the agent "sees not logged in" after a login.
+    """
+
+    def test_resolve_creates_profile_under_hermes_home(self, tmp_path):
+        from pathlib import Path
+        import tools.browser_tool as bt
+        with patch.object(bt, "get_hermes_home", return_value=Path(tmp_path)):
+            prof = bt._resolve_persistent_browser_profile()
+        assert prof == str(Path(tmp_path) / ".agent-browser" / "profile")
+        assert Path(prof).is_dir()  # created on demand
+
+    def test_maybe_set_profile_when_local_and_unset(self):
+        import tools.browser_tool as bt
+        env = {}
+        with patch.object(bt, "_is_local_mode", return_value=True), \
+             patch.object(bt, "_resolve_persistent_browser_profile", return_value="/data/prof"):
+            bt._maybe_set_browser_profile(env)
+        assert env["AGENT_BROWSER_PROFILE"] == "/data/prof"
+
+    def test_maybe_set_profile_noop_when_already_set(self):
+        import tools.browser_tool as bt
+        env = {"AGENT_BROWSER_PROFILE": "/preset"}
+        with patch.object(bt, "_resolve_persistent_browser_profile", return_value="/data/prof") as m:
+            bt._maybe_set_browser_profile(env)
+        assert env["AGENT_BROWSER_PROFILE"] == "/preset"
+        m.assert_not_called()
+
+    def test_maybe_set_profile_noop_for_cloud(self):
+        import tools.browser_tool as bt
+        env = {}
+        with patch.object(bt, "_is_local_mode", return_value=False), \
+             patch.object(bt, "_resolve_persistent_browser_profile", return_value="/data/prof"):
+            bt._maybe_set_browser_profile(env)
+        assert "AGENT_BROWSER_PROFILE" not in env
