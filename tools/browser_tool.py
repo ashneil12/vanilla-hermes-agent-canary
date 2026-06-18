@@ -861,6 +861,7 @@ def _run_chrome_fallback_command(
     os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
     browser_env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": task_socket_dir}
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
+    _maybe_set_browser_executable(browser_env)
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
         browser_env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(BROWSER_SESSION_INACTIVITY_TIMEOUT * 1000)
@@ -1999,6 +2000,7 @@ def _run_browser_command(
         # used during CLI discovery.
         browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
         browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
+        _maybe_set_browser_executable(browser_env)
 
         # Tell the agent-browser daemon to self-terminate after being idle
         # for our configured inactivity timeout.  This is the daemon-side
@@ -3637,6 +3639,100 @@ def _chromium_installed() -> bool:
 
     _cached_chromium_installed = False
     return False
+
+
+def _resolve_chromium_executable() -> Optional[str]:
+    """Return the path to a usable Chromium / headless-shell binary, or None.
+
+    Discovery mirrors :func:`_chromium_installed` but returns the actual
+    executable so we can hand it to ``agent-browser`` via
+    ``AGENT_BROWSER_EXECUTABLE_PATH``.
+
+    Why this is needed: the Docker image installs Chromium with
+    ``playwright install chromium --only-shell``, which lands ONLY the
+    headless-shell build in ``PLAYWRIGHT_BROWSERS_PATH``
+    (``chromium_headless_shell-<build>/...``).  ``agent-browser``'s own
+    auto-discovery does NOT recognise that build — it scans for full
+    ``chromium-*`` installs, system Chrome, the Puppeteer cache, and its own
+    ``~/.agent-browser/browsers`` download — so it fails at launch with
+    "Chrome not found" even though :func:`_chromium_installed` sees the
+    headless-shell directory and advertises the browser tool as available.
+    Passing the resolved path explicitly closes that gap (and is also more
+    deterministic for full / system installs).
+    """
+    # 1. Explicit override always wins.
+    ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+    if ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)):
+        return ab_path
+
+    # 2. System Chrome/Chromium on PATH (agent-browser can find these itself,
+    #    but resolving the concrete path is harmless and deterministic).
+    system_chrome = (
+        shutil.which("google-chrome")
+        or shutil.which("google-chrome-stable")
+        or shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("chrome")
+    )
+    if system_chrome:
+        return system_chrome
+
+    # 3. Playwright browser cache — the case agent-browser does NOT resolve
+    #    on its own.  Probe each Playwright build dir for a launchable binary,
+    #    newest build first.  Layouts, in priority order:
+    #      chromium_headless_shell-<b>/chrome-headless-shell-linux64/chrome-headless-shell
+    #      chromium_headless_shell-<b>/chrome-linux/headless_shell   (legacy shell)
+    #      chromium-<b>/chrome-linux/chrome                          (full, linux)
+    #      chromium-<b>/chrome-mac/Chromium.app/Contents/MacOS/Chromium
+    #      chromium-<b>/chrome-win/chrome.exe
+    rel_candidates = (
+        os.path.join("chrome-headless-shell-linux64", "chrome-headless-shell"),
+        os.path.join("chrome-linux", "headless_shell"),
+        os.path.join("chrome-linux", "chrome"),
+        os.path.join("chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+        os.path.join("chrome-win", "chrome.exe"),
+    )
+    for root in _chromium_search_roots():
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            # Reverse-sort so a higher build number wins when several coexist.
+            entries = sorted(os.listdir(root), reverse=True)
+        except OSError:
+            continue
+        for entry in entries:
+            if not (
+                entry.startswith("chromium-")
+                or entry.startswith("chromium_headless_shell-")
+            ):
+                continue
+            build_dir = os.path.join(root, entry)
+            for rel in rel_candidates:
+                cand = os.path.join(build_dir, rel)
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    return cand
+    return None
+
+
+def _maybe_set_browser_executable(browser_env: Dict[str, str]) -> None:
+    """Point agent-browser at the resolved local Chromium binary.
+
+    Sets ``AGENT_BROWSER_EXECUTABLE_PATH`` in ``browser_env`` when running in
+    local Chrome mode and no executable path is already configured.  No-op
+    when a value is already present, when a cloud provider is configured
+    (the provider hosts its own browser), or when the Lightpanda engine is
+    selected (it uses its own binary).  See :func:`_resolve_chromium_executable`
+    for why agent-browser cannot find the bundled headless-shell on its own.
+    """
+    if browser_env.get("AGENT_BROWSER_EXECUTABLE_PATH"):
+        return
+    if not _is_local_mode():
+        return
+    if _using_lightpanda_engine():
+        return
+    exe = _resolve_chromium_executable()
+    if exe:
+        browser_env["AGENT_BROWSER_EXECUTABLE_PATH"] = exe
 
 
 def _running_in_docker() -> bool:

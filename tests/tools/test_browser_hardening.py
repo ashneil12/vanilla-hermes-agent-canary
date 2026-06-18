@@ -268,3 +268,93 @@ class TestCamofoxEvalFix:
         assert "json_data=" not in src, \
             "_camofox_eval should use body= kwarg for _post, not json_data="
         assert "body=" in src
+
+
+# ---------------------------------------------------------------------------
+# AGENT_BROWSER_EXECUTABLE_PATH resolution (Playwright --only-shell build)
+# ---------------------------------------------------------------------------
+
+class TestResolveChromiumExecutable:
+    """browser_tool must hand agent-browser the bundled Playwright binary.
+
+    agent-browser's own auto-discovery does NOT recognise Playwright's
+    ``--only-shell`` headless build, so without an explicit
+    AGENT_BROWSER_EXECUTABLE_PATH it fails at launch with "Chrome not found"
+    even though _chromium_installed() advertises the tool as available.
+    """
+
+    def _make_headless_shell(self, root, build="chromium_headless_shell-1228"):
+        import os
+        bdir = os.path.join(str(root), build, "chrome-headless-shell-linux64")
+        os.makedirs(bdir)
+        binpath = os.path.join(bdir, "chrome-headless-shell")
+        with open(binpath, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(binpath, 0o755)
+        # A non-executable sibling lib must never be picked.
+        with open(os.path.join(bdir, "libGLESv2.so"), "w") as f:
+            f.write("")
+        return binpath
+
+    def test_resolves_only_shell_headless_build(self, tmp_path, monkeypatch):
+        import tools.browser_tool as bt
+        expected = self._make_headless_shell(tmp_path)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+        monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
+        # No system Chrome on PATH for this assertion.
+        with patch.object(bt.shutil, "which", return_value=None):
+            assert bt._resolve_chromium_executable() == expected
+
+    def test_explicit_executable_path_wins(self, tmp_path, monkeypatch):
+        import os
+        import tools.browser_tool as bt
+        explicit = tmp_path / "my-chrome"
+        explicit.write_text("#!/bin/sh\n")
+        os.chmod(explicit, 0o755)
+        monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", str(explicit))
+        assert bt._resolve_chromium_executable() == str(explicit)
+
+    def test_returns_none_when_nothing_installed(self, tmp_path, monkeypatch):
+        import tools.browser_tool as bt
+        monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
+        with patch.object(bt.shutil, "which", return_value=None), \
+             patch.object(bt, "_chromium_search_roots", return_value=[str(tmp_path)]):
+            assert bt._resolve_chromium_executable() is None
+
+
+class TestMaybeSetBrowserExecutable:
+    """_maybe_set_browser_executable gates correctly on mode/engine/preset."""
+
+    def test_sets_when_local_chrome_and_unset(self):
+        import tools.browser_tool as bt
+        env = {}
+        with patch.object(bt, "_is_local_mode", return_value=True), \
+             patch.object(bt, "_using_lightpanda_engine", return_value=False), \
+             patch.object(bt, "_resolve_chromium_executable", return_value="/x/chrome"):
+            bt._maybe_set_browser_executable(env)
+        assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == "/x/chrome"
+
+    def test_noop_when_already_set(self):
+        import tools.browser_tool as bt
+        env = {"AGENT_BROWSER_EXECUTABLE_PATH": "/preset"}
+        with patch.object(bt, "_resolve_chromium_executable", return_value="/x/chrome") as m:
+            bt._maybe_set_browser_executable(env)
+        assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == "/preset"
+        m.assert_not_called()
+
+    def test_noop_for_cloud_provider(self):
+        import tools.browser_tool as bt
+        env = {}
+        with patch.object(bt, "_is_local_mode", return_value=False), \
+             patch.object(bt, "_resolve_chromium_executable", return_value="/x/chrome"):
+            bt._maybe_set_browser_executable(env)
+        assert "AGENT_BROWSER_EXECUTABLE_PATH" not in env
+
+    def test_noop_for_lightpanda_engine(self):
+        import tools.browser_tool as bt
+        env = {}
+        with patch.object(bt, "_is_local_mode", return_value=True), \
+             patch.object(bt, "_using_lightpanda_engine", return_value=True), \
+             patch.object(bt, "_resolve_chromium_executable", return_value="/x/chrome"):
+            bt._maybe_set_browser_executable(env)
+        assert "AGENT_BROWSER_EXECUTABLE_PATH" not in env
