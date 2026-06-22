@@ -113,6 +113,31 @@ def main():
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
 
+    # The webchat turn assembles its tool list via cli.get_tool_definitions() ->
+    # wait_for_mcp_discovery(), but nothing in the slash-worker path ever STARTS
+    # discovery: the eager TUI / api_server startup that normally kicks it off is
+    # bypassed here, and the deferred fallback is gated on HERMES_DEFER_AGENT_STARTUP
+    # (unset). Without this, every webchat turn is served with ZERO MCP tools, so
+    # connected Pipedream apps (google_calendar, gmail, ...) are invisible to the
+    # agent even though the box has them configured. Kick discovery off and BLOCK
+    # until it finishes before we accept the first command, so the very first turn
+    # already has the MCP tools in its selection (a bare start would race the 0.75s
+    # wait_for_mcp_discovery timeout inside the turn and lose).
+    try:
+        import logging as _mcp_log
+        from hermes_cli.mcp_startup import (
+            start_background_mcp_discovery,
+            wait_for_mcp_discovery,
+        )
+
+        start_background_mcp_discovery(
+            logger=_mcp_log.getLogger("slash_worker"),
+            thread_name="slash-worker-mcp-discovery",
+        )
+        wait_for_mcp_discovery(timeout=25.0)
+    except Exception:
+        pass
+
     for raw in sys.stdin:
         line = raw.strip()
         if not line:
