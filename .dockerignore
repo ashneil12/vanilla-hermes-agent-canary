@@ -66,8 +66,14 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Desktop app source (Tauri/Electron); never installed in the container
-apps/
+# Desktop app source (Tauri/Electron). Most of apps/ is never installed in the
+# container, BUT the `webchat_build` Dockerfile stage compiles apps/desktop (which
+# imports apps/shared) into the /webchat bundle, so those two MUST stay in the
+# build context. A blanket `apps/` ignore (re-introduced by an upstream sync) makes
+# `cd apps/desktop` fail in that stage and breaks the whole image build.
+apps/*
+!apps/desktop
+!apps/shared
 
 # Test suite — not shipped in production images
 tests/
