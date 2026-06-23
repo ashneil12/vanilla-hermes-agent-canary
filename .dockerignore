@@ -75,8 +75,13 @@ apps/*
 !apps/desktop
 !apps/shared
 
-# Test suite — not shipped in production images
-tests/
+# Test suite. Upstream excludes it ("not shipped in production images"), but the
+# fork's docker-publish "Media tool wiring regression gate" runs
+#   pytest tests/tools/test_media_generation_wiring.py
+# INSIDE the built image, so tests/ MUST stay in the build context or the gate
+# dies with "file or directory not found" (exit 4). A blanket `tests/` ignore
+# (re-introduced by an upstream sync) breaks the image publish. Keep it in.
+# tests/  <- intentionally NOT excluded; see above.
 
 # Documentation site (Docusaurus) and supplementary docs
 website/
