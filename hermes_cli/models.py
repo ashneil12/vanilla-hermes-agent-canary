@@ -2346,6 +2346,13 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if api_key:
             base_raw = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+            # On hosted boxes OPENAI_BASE_URL carries the managed-Venice pin
+            # (set for the separate provider:custom path). It must not redirect
+            # the canonical OpenAI model listing at the managed proxy — that
+            # surfaces Venice models under "OpenAI" and 401/402s. api.openai.com
+            # is the OpenAI listing endpoint; custom endpoints use provider:custom.
+            if "/api/managed-venice/" in base_raw:
+                base_raw = ""
             base = base_raw or "https://api.openai.com/v1"
             # Custom OpenAI-compatible endpoints (proxies, gateways, self-hosted)
             # may serve a small curated catalog — use the live list verbatim so

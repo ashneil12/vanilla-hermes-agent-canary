@@ -188,7 +188,15 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="api_key",
         inference_base_url="https://api.openai.com/v1",
         api_key_env_vars=("OPENAI_API_KEY",),
-        base_url_env_var="OPENAI_BASE_URL",
+        # Intentionally NO base_url_env_var. The canonical OpenAI provider must
+        # always resolve to api.openai.com. Honoring OPENAI_BASE_URL here let the
+        # managed-Venice pin (OPENAI_BASE_URL is set for the separate
+        # provider:custom managed path) shadow OpenAI, so every switch to an
+        # OpenAI model silently routed through the managed proxy and returned
+        # "402 Insufficient managed Venice credits". config.yaml model.base_url
+        # remains the override for custom OpenAI-compatible endpoints (use
+        # provider:custom). Mirrors the OpenRouter "config.yaml is the single
+        # source of truth" cleanup.
     ),
     "xai-oauth": ProviderConfig(
         id="xai-oauth",
