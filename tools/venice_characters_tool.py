@@ -110,38 +110,39 @@ def venice_characters_tool(
     })
 
 
+# Flat {name, description, parameters} body — registry.register wraps this in
+# the {"type":"function","function":{...}} envelope itself. Defining it already
+# enveloped here double-wrapped the tool, which strict providers (Venice) reject
+# with 400 "Extra inputs are not permitted, field tools[N].function.type".
 VENICE_CHARACTERS_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "venice_characters",
-        "description": (
-            "List or search Venice AI character personas (curated roleplay / "
-            "assistant personalities). Returns each character's name, slug, "
-            "description and tags. Use a character's slug with Venice chat "
-            "(venice_parameters.character_slug) to talk as/with it. "
-            "Requires VENICE_API_KEY."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Optional search term matched against character name, "
-                        "description and tags."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum characters to return (default 20, max 50).",
-                },
-                "include_adult": {
-                    "type": "boolean",
-                    "description": "Include adult-rated characters (default false).",
-                },
+    "name": "venice_characters",
+    "description": (
+        "List or search Venice AI character personas (curated roleplay / "
+        "assistant personalities). Returns each character's name, slug, "
+        "description and tags. Use a character's slug with Venice chat "
+        "(venice_parameters.character_slug) to talk as/with it. "
+        "Requires VENICE_API_KEY."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "Optional search term matched against character name, "
+                    "description and tags."
+                ),
             },
-            "required": [],
+            "limit": {
+                "type": "integer",
+                "description": "Maximum characters to return (default 20, max 50).",
+            },
+            "include_adult": {
+                "type": "boolean",
+                "description": "Include adult-rated characters (default false).",
+            },
         },
+        "required": [],
     },
 }
 

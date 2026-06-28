@@ -544,3 +544,47 @@ class TestThreadSafety:
         toolsets = result_holder["value"]
         assert "gated" in toolsets
         assert toolsets["gated"]["available"] is True
+
+
+def test_get_definitions_unwraps_already_enveloped_schema():
+    """A tool that mistakenly registers an already-OpenAI-enveloped schema
+    ({"type":"function","function":{...}}) must NOT be double-wrapped — strict
+    providers (Venice) 400 on a nested function.type / function.function. The
+    registry unwraps it so the result is a single, well-formed envelope.
+    """
+    reg = ToolRegistry()
+    enveloped = {
+        "type": "function",
+        "function": {
+            "name": "enveloped_tool",
+            "description": "registered already-wrapped by mistake",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    reg.register(
+        name="enveloped_tool",
+        toolset="s1",
+        schema=enveloped,
+        handler=_dummy_handler,
+    )
+    defs = reg.get_definitions({"enveloped_tool"})
+    assert len(defs) == 1
+    fn = defs[0]["function"]
+    # Exactly one envelope: the function body holds the flat fields, NOT a
+    # nested type/function pair.
+    assert "type" not in fn and "function" not in fn
+    assert fn["name"] == "enveloped_tool"
+    assert fn["parameters"] == {"type": "object", "properties": {}}
+
+
+def test_venice_characters_schema_is_flat_not_enveloped():
+    """Regression: venice_characters must define its schema in the flat
+    {name,description,parameters} form (not pre-enveloped) so it serializes to a
+    single envelope instead of double-wrapping.
+    """
+    from tools.venice_characters_tool import VENICE_CHARACTERS_SCHEMA
+
+    assert VENICE_CHARACTERS_SCHEMA.get("type") != "function"
+    assert "function" not in VENICE_CHARACTERS_SCHEMA
+    assert VENICE_CHARACTERS_SCHEMA["name"] == "venice_characters"
+    assert "parameters" in VENICE_CHARACTERS_SCHEMA

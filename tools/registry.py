@@ -362,8 +362,21 @@ class ToolRegistry:
                     if not quiet:
                         logger.debug("Tool %s unavailable (check failed)", name)
                     continue
+            # Defensive: a tool may register an already-OpenAI-enveloped schema
+            # ({"type":"function","function":{...}}) instead of the flat
+            # {name,description,parameters} body we wrap below. Unwrap it so the
+            # wrap at the end never double-wraps — strict providers (e.g. Venice)
+            # reject a double-wrapped tool with 400 "Extra inputs are not
+            # permitted, field tools[N].function.type".
+            base_schema = entry.schema
+            if (
+                isinstance(base_schema, dict)
+                and base_schema.get("type") == "function"
+                and isinstance(base_schema.get("function"), dict)
+            ):
+                base_schema = base_schema["function"]
             # Ensure schema always has a "name" field — use entry.name as fallback
-            schema_with_name = {**entry.schema, "name": entry.name}
+            schema_with_name = {**base_schema, "name": entry.name}
             # Apply runtime-dynamic overrides (e.g. delegate_task description
             # depends on current delegation.max_concurrent_children /
             # max_spawn_depth). Caller side (model_tools.get_tool_definitions)
