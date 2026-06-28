@@ -1819,9 +1819,25 @@ export function usePromptActions({
         messages: state.messages.slice(0, sourceIndex + 1)
       }))
 
+      const isStaleTargetError = (err: unknown) =>
+        /no longer in session history|not in session history/i.test(err instanceof Error ? err.message : String(err))
+
       try {
         await submitRewindPrompt(sessionId, text, truncateBeforeUserOrdinal, busyRef.current || $busy.get())
       } catch (err) {
+        // The gateway couldn't map this checkpoint onto the branch's own history
+        // (e.g. an ancestor-only target on a cold-resumed branch). Mirror edit:
+        // resend the text as a fresh turn — already interrupted above — so
+        // "restore and continue from here" still works instead of dead-ending on
+        // a "Restore failed" toast.
+        if (isStaleTargetError(err)) {
+          try {
+            await submitRewindPrompt(sessionId, text, undefined, false)
+            return
+          } catch {
+            // fall through to roll back + rethrow the original failure
+          }
+        }
         // The rewind never landed (e.g. the gateway stayed busy past the retry
         // deadline). Roll the optimistic truncation back to the full original
         // history so the UI doesn't desync from what's persisted — leaving it

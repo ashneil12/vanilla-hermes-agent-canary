@@ -1684,6 +1684,45 @@ def _persist_branch_seed(session: dict) -> None:
             logger.debug("branch seed persist failed", exc_info=True)
 
 
+def _local_branch_user_ordinal(db, session: dict, ui_ordinal: int, branch_user_count: int):
+    """Map a desktop truncate ordinal onto this session's own transcript.
+
+    The desktop computes ``truncate_before_user_ordinal`` over its
+    ancestor-INCLUSIVE display history (``get_messages_as_conversation(
+    include_ancestors=True)``), but ``session["history"]`` — what prompt.submit
+    truncates and counts for the 4018 guard — is this branch's OWN rows, which
+    on a cold-resumed branch omit the inherited parent turns until
+    ``_persist_branch_seed`` copies them in. The UI ordinal is then offset by
+    those ancestor user turns and overshoots the shorter local list, 4018-ing a
+    perfectly valid restore/edit target.
+
+    Recompute the ancestor offset from the same ancestor-inclusive view the UI
+    counted from and subtract it. Returns the local-branch ordinal, or ``None``
+    when there is no ancestor offset (genuinely stale / non-branched — caller
+    keeps the original 4018) or the translated target lands outside this branch
+    (an ancestor-only checkpoint).
+    """
+    session_key = str(session.get("session_key") or "").strip()
+    if db is None or not session_key:
+        return None
+    try:
+        display = db.get_messages_as_conversation(session_key, include_ancestors=True)
+    except Exception:
+        return None
+    display_user_count = sum(
+        1
+        for m in display
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) == "user"
+    )
+    ancestor_offset = display_user_count - branch_user_count
+    if ancestor_offset <= 0:
+        return None
+    local_ordinal = ui_ordinal - ancestor_offset
+    if 0 <= local_ordinal < branch_user_count:
+        return local_ordinal
+    return None
+
+
 @contextlib.contextmanager
 def _session_db(session: dict):
     """Yield the SessionDB that owns this session's row (profile-aware).
@@ -8095,12 +8134,23 @@ def _(rid, params: dict) -> dict:
                 return _err(rid, 4004, "truncate_before_user_ordinal must be an integer")
             history = session.get("history", [])
             user_indices = [i for i, m in enumerate(history) if m.get("role") == "user"]
+            db = _get_db()
             if ordinal >= len(user_indices):
-                return _err(rid, 4018, "target user message is no longer in session history")
+                # The desktop counts this ordinal over its ancestor-inclusive
+                # display history; session["history"] here is the branch's own
+                # transcript and can be shorter, so a valid restore/edit target
+                # overshoots. Translate it back into local-branch space before
+                # declaring it stale (no-op for non-branched chats).
+                local_ordinal = _local_branch_user_ordinal(
+                    db, session, ordinal, len(user_indices)
+                )
+                if local_ordinal is None:
+                    return _err(rid, 4018, "target user message is no longer in session history")
+                ordinal = local_ordinal
             truncated = history[: user_indices[ordinal]]
             session["history"] = truncated
             session["history_version"] = int(session.get("history_version", 0)) + 1
-            if (db := _get_db()) is not None:
+            if db is not None:
                 try:
                     db.replace_messages(session["session_key"], truncated)
                 except Exception as exc:

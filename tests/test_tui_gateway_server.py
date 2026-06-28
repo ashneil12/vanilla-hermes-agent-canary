@@ -8447,3 +8447,44 @@ class TestResolveRuntimeWithFallback:
 
         assert agent.model == "gpt-5.5"
         assert captured["provider"] == "deepseek"
+
+
+def test_local_branch_user_ordinal_translates_branch_offset():
+    """A cold-resumed branch's session["history"] omits inherited parent turns,
+    so the desktop's ancestor-inclusive truncate ordinal overshoots the local
+    list. The translator maps it back into local-branch space; non-branched or
+    ancestor-only targets return None so prompt.submit keeps the original 4018.
+    """
+
+    class FakeDb:
+        def __init__(self, display):
+            self._display = display
+
+        def get_messages_as_conversation(self, _key, include_ancestors=False):
+            assert include_ancestors is True
+            return self._display
+
+    session = {"session_key": "branch-1"}
+    # Display history the UI counted from: 2 inherited (ancestor) user turns + 1
+    # local. session["history"] holds only the 1 local user turn.
+    display = [
+        {"role": "user", "content": "a0"},
+        {"role": "assistant", "content": "r0"},
+        {"role": "user", "content": "a1"},
+        {"role": "assistant", "content": "r1"},
+        {"role": "user", "content": "b0"},
+        {"role": "assistant", "content": "rb0"},
+    ]
+    db = FakeDb(display)
+
+    # UI truncate-before ordinal 2 (the local turn) overshoots the 1-entry local
+    # list; ancestor offset 2 maps it to local ordinal 0.
+    assert server._local_branch_user_ordinal(db, session, 2, 1) == 0
+    # Restoring to an inherited ancestor turn lands outside the branch -> None.
+    assert server._local_branch_user_ordinal(db, session, 1, 1) is None
+    # No ancestor offset (non-branched chat) -> None, caller keeps raw 4018.
+    flat = FakeDb([{"role": "user", "content": "b0"}])
+    assert server._local_branch_user_ordinal(flat, session, 5, 1) is None
+    # Missing db / session key -> None.
+    assert server._local_branch_user_ordinal(None, session, 2, 1) is None
+    assert server._local_branch_user_ordinal(db, {"session_key": ""}, 2, 1) is None
