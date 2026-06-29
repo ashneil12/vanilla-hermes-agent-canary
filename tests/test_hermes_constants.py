@@ -115,6 +115,52 @@ class TestGetHermesHome:
         assert get_hermes_home() == local_appdata / "hermes"
 
 
+class TestRedirectInstallDirHome:
+    """Guard: a Hermes home resolving into the read-only /opt/hermes tree
+    (HERMES_HOME lost + HOME=/opt/hermes) must redirect to /opt/data."""
+
+    def _wire_install_tree(self, tmp_path, monkeypatch, *, data_exists=True):
+        """Point the guard's constants at a fake install tree under tmp_path."""
+        install_dir = tmp_path / "opt" / "hermes"
+        data_home = tmp_path / "opt" / "data"
+        install_dir.mkdir(parents=True)
+        if data_exists:
+            data_home.mkdir(parents=True)
+        monkeypatch.setattr(hermes_constants, "_DOCKER_INSTALL_DIR", install_dir)
+        monkeypatch.setattr(hermes_constants, "_DOCKER_DATA_HOME", data_home)
+        monkeypatch.setattr(hermes_constants, "_install_dir_home_warned", False)
+        return install_dir, data_home
+
+    def test_fallback_into_install_tree_redirects(self, tmp_path, monkeypatch):
+        """HERMES_HOME unset + HOME=/opt/hermes → /opt/hermes/.hermes → redirect."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: install_dir)
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", True)
+        assert get_hermes_home() == data_home
+
+    def test_explicit_hermes_home_in_install_tree_redirects(self, tmp_path, monkeypatch):
+        """An explicit HERMES_HOME under the read-only tree is also redirected."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("HERMES_HOME", str(install_dir / ".hermes"))
+        assert get_hermes_home() == data_home
+
+    def test_no_redirect_when_data_volume_absent(self, tmp_path, monkeypatch):
+        """Off the Docker image (no /opt/data) the home is left untouched."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch, data_exists=False)
+        bad = install_dir / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(bad))
+        assert get_hermes_home() == bad
+
+    def test_normal_home_untouched(self, tmp_path, monkeypatch):
+        """A HERMES_HOME outside the install tree is never redirected."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        good = tmp_path / "home" / "hermes" / ".hermes"
+        good.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(good))
+        assert get_hermes_home() == good
+
+
 class TestHermesManagedNode:
     def test_windows_node_dir_prefers_portable_root(self, tmp_path, monkeypatch):
         home = tmp_path / "hermes"
