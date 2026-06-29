@@ -700,3 +700,57 @@ def test_strip_slash_enum_ignores_non_string_enum_values():
     props = tools[0]["function"]["parameters"]["properties"]
     assert props["level"]["enum"] == [1, 2, 3]
     assert props["flag"]["enum"] == [True, False]
+
+
+# ---------------------------------------------------------------------------
+# Double-wrapped tool collapse (Venice strict-provider 400 class).
+# A tool whose ``function`` is itself an OpenAI envelope must be collapsed to a
+# single envelope before send, or strict providers reject the whole request
+# with "Extra inputs are not permitted, field: tools[N].function.type /
+# tools[N].function.function". See _sanitize_single_tool.
+# ---------------------------------------------------------------------------
+
+def _double_wrapped(name: str, parameters: dict) -> dict:
+    """A tool that has been enveloped twice."""
+    inner = {"name": name, "description": "d", "parameters": parameters}
+    return {"type": "function", "function": {"type": "function", "function": inner}}
+
+
+def test_double_wrapped_tool_is_collapsed_to_single_envelope():
+    tools = [_double_wrapped("venice_characters", {"type": "object", "properties": {}})]
+    out = sanitize_tool_schemas(tools)
+    fn = out[0]["function"]
+    # No nested envelope keys remain — this is what Venice was 400ing on.
+    assert "type" not in fn
+    assert "function" not in fn
+    assert fn["name"] == "venice_characters"
+    assert fn["parameters"] == {"type": "object", "properties": {}}
+    assert out[0]["type"] == "function"
+
+
+def test_triple_wrapped_tool_is_fully_collapsed():
+    inner = {"name": "t", "description": "d", "parameters": {"type": "object", "properties": {}}}
+    tools = [{"type": "function", "function": {
+        "type": "function", "function": {"type": "function", "function": inner}}}]
+    out = sanitize_tool_schemas(tools)
+    fn = out[0]["function"]
+    assert "function" not in fn and "type" not in fn
+    assert fn["name"] == "t"
+
+
+def test_well_formed_tool_is_unchanged_by_collapse():
+    """Idempotency: a normal single-wrapped tool's inner dict has no
+    ``type == "function"`` so the collapse loop never runs."""
+    tools = [_tool("normal", {"type": "object", "properties": {"x": {"type": "string"}}})]
+    out = sanitize_tool_schemas(tools)
+    fn = out[0]["function"]
+    assert fn["name"] == "normal"
+    assert fn["parameters"]["properties"]["x"]["type"] == "string"
+    assert "function" not in fn
+
+
+def test_double_wrapped_collapse_does_not_mutate_input():
+    tools = [_double_wrapped("t", {"type": "object", "properties": {}})]
+    snapshot = copy.deepcopy(tools)
+    sanitize_tool_schemas(tools)
+    assert tools == snapshot

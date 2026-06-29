@@ -68,6 +68,27 @@ def _sanitize_single_tool(tool: dict) -> dict:
     if not isinstance(fn, dict):
         return out
 
+    # Collapse accidentally double-wrapped tool schemas before anything else.
+    # A well-formed OpenAI tool is::
+    #     {"type": "function", "function": {"name", "description", "parameters"}}
+    # If a registrant hands in an *already* enveloped schema it gets wrapped a
+    # second time upstream, producing::
+    #     {"type": "function", "function": {"type": "function", "function": {...}}}
+    # Strict providers (Venice) reject this with "Extra inputs are not permitted,
+    # field: tools[N].function.type / tools[N].function.function" and 400 the
+    # entire request — a silent, customer-facing chat death. registry.py has a
+    # defensive unwrap on its own output, but other assembly paths (dynamic
+    # schema rebuilds, MCP/tool-search wrap sites) and a stale in-process tool-
+    # definition cache can re-introduce the double-wrap after that point. This
+    # sanitizer is the single chokepoint every tool array passes through right
+    # before the API call, so collapsing here closes the whole class regardless
+    # of how — or how many times — the wrap was introduced. Idempotent: a valid
+    # inner function dict carries name/description/parameters, never
+    # ``type == "function"``, so the loop never runs for well-formed tools.
+    while fn.get("type") == "function" and isinstance(fn.get("function"), dict):
+        out["function"] = fn["function"]
+        fn = out["function"]
+
     params = fn.get("parameters")
     # Missing / non-dict parameters → substitute the minimal valid shape.
     if not isinstance(params, dict):
