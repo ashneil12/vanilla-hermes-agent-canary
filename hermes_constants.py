@@ -53,36 +53,66 @@ def _get_platform_default_hermes_home() -> Path:
 
 
 # The Docker image bakes its code tree at ``/opt/hermes`` as a read-only,
-# root-owned mount (``chmod -R a-w``) and ships the writable data volume at
-# ``/opt/data`` (the image's ``ENV HERMES_HOME=/opt/data``).  ``/opt/hermes``
-# is therefore NEVER a valid Hermes home — anything written under it (chat
-# uploads, auth.json, config.yaml, sessions) fails with EACCES.
+# root-owned mount (``chmod -R a-w``).  It is NEVER a valid Hermes home —
+# anything written under it (chat uploads, auth.json, config.yaml, sessions)
+# fails with EACCES.  When ``HERMES_HOME`` is lost (a stale entrypoint leaving
+# ``HOME=/opt/hermes``, or a persisted ``.env`` clobbering it), the platform
+# default resolves into this read-only tree.
+#
+# The redirect target must be a home the CURRENT uid can actually write AND
+# that the agent shares: the webfree split deploy mounts the uid-1024
+# webui-state at ``/home/hermes/.hermes`` (shared with the gateway that later
+# reads attachments); the single-container deploy uses the ``/opt/data``
+# volume.  We never hardcode one — ``/opt/data`` is owned by uid 10000 and is
+# NOT writable from the uid-1024 dashboard container, so redirecting there
+# would only relocate the EACCES.  Probe candidates for "is a dir AND writable
+# by THIS uid" instead.
 _DOCKER_INSTALL_DIR = Path("/opt/hermes")
-_DOCKER_DATA_HOME = Path("/opt/data")
+# Preference order; an operator can prepend one via HERMES_WRITE_SAFE_ROOT.
+_DOCKER_DATA_HOME_CANDIDATES = (Path("/home/hermes/.hermes"), Path("/opt/data"))
 _install_dir_home_warned: bool = False
+
+
+def _writable_data_home() -> Path | None:
+    """First existing, current-uid-writable data-home candidate, or None."""
+    candidates: list[Path] = []
+    override = os.environ.get("HERMES_WRITE_SAFE_ROOT", "").strip()
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(_DOCKER_DATA_HOME_CANDIDATES)
+    for cand in candidates:
+        try:
+            if cand.is_dir() and os.access(cand, os.W_OK):
+                return cand
+        except OSError:
+            continue
+    return None
 
 
 def _redirect_install_dir_home(home: Path) -> Path:
     """Redirect a Hermes home that landed inside the read-only install tree.
 
-    If ``HERMES_HOME`` is lost before the process starts — e.g. an old
-    entrypoint left ``HOME=/opt/hermes`` and s6's ``/init`` scrubbed the
-    environ so the image's ``ENV HERMES_HOME=/opt/data`` never arrived — the
-    platform default resolves to ``/opt/hermes/.hermes`` and every write fails
-    with ``[Errno 13] Permission denied: '/opt/hermes'``.  Detect that
-    dead-end and fall back to the writable ``/opt/data`` volume so the agent
-    self-heals instead of bricking uploads.
+    If ``HERMES_HOME`` is lost (a stale entrypoint left ``HOME=/opt/hermes``,
+    or a persisted ``.env`` clobbered it), the platform default resolves to
+    ``/opt/hermes/.hermes`` and every write fails with
+    ``[Errno 13] Permission denied: '/opt/hermes'``.  Detect that dead-end and
+    fall back to a writable, agent-shared data home (see candidates above) so
+    the agent self-heals instead of bricking uploads.
 
-    Gated on ``/opt/data`` existing, which is the marker that we are in that
-    image and the redirect target is real.  On dev hosts, Windows, and
-    correctly-wired containers (HERMES_HOME pointing anywhere outside the
-    install tree) it returns ``home`` unchanged with no filesystem probe.
+    Returns ``home`` unchanged on every normal path (home outside the install
+    tree) with no filesystem probe.  Only when ``home`` is inside the read-only
+    tree do we probe for a writable target; if NONE is writable by the current
+    uid we return ``home`` unchanged so the failure stays VISIBLE rather than
+    silently relocating to another unwritable (or unreadable-by-the-agent) path.
     """
     try:
         in_install_tree = home == _DOCKER_INSTALL_DIR or _DOCKER_INSTALL_DIR in home.parents
     except (OSError, ValueError):
         return home
-    if not in_install_tree or not _DOCKER_DATA_HOME.is_dir():
+    if not in_install_tree:
+        return home
+    target = _writable_data_home()
+    if target is None:
         return home
 
     global _install_dir_home_warned
@@ -94,15 +124,15 @@ def _redirect_install_dir_home(home: Path) -> Path:
             f"[HERMES_HOME guard] Resolved Hermes home {str(home)!r} is inside "
             f"the read-only install tree {str(_DOCKER_INSTALL_DIR)!r} — writes "
             f"there fail with EACCES. HERMES_HOME was lost before this process "
-            f"started; falling back to {str(_DOCKER_DATA_HOME)!r}. Set "
-            f"HERMES_HOME explicitly to silence this."
+            f"started; falling back to {str(target)!r}. Set HERMES_HOME "
+            f"explicitly to silence this."
         )
         try:
             sys.stderr.write(msg + "\n")
             sys.stderr.flush()
         except Exception:
             pass
-    return _DOCKER_DATA_HOME
+    return target
 
 
 def get_hermes_home() -> Path:
@@ -123,7 +153,7 @@ def get_hermes_home() -> Path:
     """
     override = get_hermes_home_override()
     if override:
-        return Path(override)
+        return _redirect_install_dir_home(Path(override))
 
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:

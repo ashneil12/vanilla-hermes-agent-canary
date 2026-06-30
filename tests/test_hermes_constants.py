@@ -117,22 +117,25 @@ class TestGetHermesHome:
 
 class TestRedirectInstallDirHome:
     """Guard: a Hermes home resolving into the read-only /opt/hermes tree
-    (HERMES_HOME lost + HOME=/opt/hermes) must redirect to /opt/data."""
+    (HERMES_HOME lost / HOME=/opt/hermes) redirects to a writable, agent-shared
+    data home — probed for is-dir + writable, NOT a hardcoded /opt/data (which
+    is owned by uid 10000 and unwritable from the uid-1024 dashboard)."""
 
-    def _wire_install_tree(self, tmp_path, monkeypatch, *, data_exists=True):
-        """Point the guard's constants at a fake install tree under tmp_path."""
+    def _wire_install_tree(self, tmp_path, monkeypatch, *, candidate_exists=True):
+        """Point the guard at a fake install tree + one data-home candidate."""
         install_dir = tmp_path / "opt" / "hermes"
-        data_home = tmp_path / "opt" / "data"
+        data_home = tmp_path / "home" / "hermes" / ".hermes"
         install_dir.mkdir(parents=True)
-        if data_exists:
+        if candidate_exists:
             data_home.mkdir(parents=True)
         monkeypatch.setattr(hermes_constants, "_DOCKER_INSTALL_DIR", install_dir)
-        monkeypatch.setattr(hermes_constants, "_DOCKER_DATA_HOME", data_home)
+        monkeypatch.setattr(hermes_constants, "_DOCKER_DATA_HOME_CANDIDATES", (data_home,))
         monkeypatch.setattr(hermes_constants, "_install_dir_home_warned", False)
+        monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
         return install_dir, data_home
 
     def test_fallback_into_install_tree_redirects(self, tmp_path, monkeypatch):
-        """HERMES_HOME unset + HOME=/opt/hermes → /opt/hermes/.hermes → redirect."""
+        """HERMES_HOME unset + HOME=/opt/hermes → /opt/hermes/.hermes → writable home."""
         install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: install_dir)
@@ -145,9 +148,9 @@ class TestRedirectInstallDirHome:
         monkeypatch.setenv("HERMES_HOME", str(install_dir / ".hermes"))
         assert get_hermes_home() == data_home
 
-    def test_no_redirect_when_data_volume_absent(self, tmp_path, monkeypatch):
-        """Off the Docker image (no /opt/data) the home is left untouched."""
-        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch, data_exists=False)
+    def test_no_redirect_when_no_writable_candidate(self, tmp_path, monkeypatch):
+        """No candidate dir exists → home left UNCHANGED so the failure stays visible."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch, candidate_exists=False)
         bad = install_dir / ".hermes"
         monkeypatch.setenv("HERMES_HOME", str(bad))
         assert get_hermes_home() == bad
@@ -155,10 +158,42 @@ class TestRedirectInstallDirHome:
     def test_normal_home_untouched(self, tmp_path, monkeypatch):
         """A HERMES_HOME outside the install tree is never redirected."""
         install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
-        good = tmp_path / "home" / "hermes" / ".hermes"
+        good = tmp_path / "elsewhere" / ".hermes"
         good.mkdir(parents=True)
         monkeypatch.setenv("HERMES_HOME", str(good))
         assert get_hermes_home() == good
+
+    def test_first_existing_candidate_wins(self, tmp_path, monkeypatch):
+        """The first existing+writable candidate is chosen; a missing one is skipped."""
+        install_dir = tmp_path / "opt" / "hermes"
+        install_dir.mkdir(parents=True)
+        missing = tmp_path / "first" / "missing"
+        present = tmp_path / "second" / ".hermes"
+        present.mkdir(parents=True)
+        monkeypatch.setattr(hermes_constants, "_DOCKER_INSTALL_DIR", install_dir)
+        monkeypatch.setattr(hermes_constants, "_DOCKER_DATA_HOME_CANDIDATES", (missing, present))
+        monkeypatch.setattr(hermes_constants, "_install_dir_home_warned", False)
+        monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(install_dir / ".hermes"))
+        assert get_hermes_home() == present
+
+    def test_write_safe_root_env_takes_precedence(self, tmp_path, monkeypatch):
+        """HERMES_WRITE_SAFE_ROOT, when set + writable, is preferred over defaults."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        forced = tmp_path / "forced" / ".hermes"
+        forced.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(forced))
+        monkeypatch.setenv("HERMES_HOME", str(install_dir / ".hermes"))
+        assert get_hermes_home() == forced
+
+    def test_override_branch_also_guarded(self, tmp_path, monkeypatch):
+        """A context override pointing into the install tree is redirected too."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        token = hermes_constants.set_hermes_home_override(str(install_dir / ".hermes"))
+        try:
+            assert get_hermes_home() == data_home
+        finally:
+            hermes_constants.reset_hermes_home_override(token)
 
 
 class TestHermesManagedNode:

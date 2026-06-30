@@ -234,6 +234,20 @@ def load_hermes_dotenv(
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
 
+    # HERMES_HOME and HOME are infrastructure the container/CLI injects, and they
+    # decide WHERE every subsequent write lands. A stale or legacy persisted .env
+    # (or the managed .env) that still carries a HERMES_HOME=/HOME= line must
+    # NEVER clobber them via override=True: doing so repoints the agent at a
+    # read-only/legacy tree (e.g. the build-time WORKDIR /opt/hermes) and
+    # EACCESes every write — chat uploads, auth.json, sessions. That was the
+    # webfree-split "official-dashboard upload [Errno 13] '/opt/hermes/.hermes'"
+    # bug: the dashboard process, unlike the gateway supervisor, had nothing to
+    # restore HERMES_HOME after this load. Snapshot the authoritative live values
+    # and restore them after the override loads so the environment always wins
+    # over the file. (Profile switching sets HERMES_HOME via the environment or a
+    # context override, never via .env, so this never fights a legitimate value.)
+    _pinned_infra = {k: os.environ[k] for k in ("HERMES_HOME", "HOME") if os.environ.get(k)}
+
     if user_env.exists():
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
@@ -244,6 +258,9 @@ def load_hermes_dotenv(
 
     _apply_external_secret_sources(home_path)
     _apply_managed_env()
+
+    for _key, _value in _pinned_infra.items():
+        os.environ[_key] = _value
 
     return loaded
 

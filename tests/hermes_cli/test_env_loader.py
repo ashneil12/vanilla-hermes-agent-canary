@@ -103,3 +103,48 @@ def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
 
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"
+
+
+def test_persisted_env_cannot_clobber_live_hermes_home_and_home(tmp_path, monkeypatch):
+    """A stale/persisted .env carrying HERMES_HOME=/HOME= must NOT override the
+    container-injected live infra values. This was the webfree-split upload bug:
+    the official-dashboard process loaded its .env with override=True, the .env
+    repointed HERMES_HOME into the read-only /opt/hermes tree, and every write
+    EACCESed. Non-infra keys must still load normally."""
+    home = tmp_path / "home" / "hermes" / ".hermes"
+    home.mkdir(parents=True)
+    real_home = tmp_path / "home" / "hermes"
+    user_env = home / ".env"
+    user_env.write_text(
+        "HERMES_HOME=/opt/hermes/.hermes\n"
+        "HOME=/opt/hermes\n"
+        "OPENAI_API_KEY=from-dotenv\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    # Live infra values win over the file — uploads keep landing in the writable home.
+    assert os.getenv("HERMES_HOME") == str(home)
+    assert os.getenv("HOME") == str(real_home)
+    # Non-infra keys still load from the .env.
+    assert os.getenv("OPENAI_API_KEY") == "from-dotenv"
+
+
+def test_unset_infra_key_still_loads_from_env(tmp_path, monkeypatch):
+    """We only PIN already-set live infra values; if HERMES_HOME is unset
+    pre-load, the .env value still applies (the get_hermes_home guard backstops
+    a bad value), so we don't regress dev/CLI setups that define it in .env."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    target = tmp_path / "data"
+    target.mkdir()
+    (home / ".env").write_text(f"HERMES_HOME={target}\n", encoding="utf-8")
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("HERMES_HOME") == str(target)
