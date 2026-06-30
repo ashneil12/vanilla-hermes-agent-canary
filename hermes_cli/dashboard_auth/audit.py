@@ -52,14 +52,17 @@ class AuditEvent(enum.Enum):
 
 
 def _resolve_log_path() -> Path:
-    """``$HERMES_HOME/logs/dashboard-auth.log`` with the standard fallback.
+    """``$HERMES_HOME/logs/dashboard-auth.log`` via the guarded resolver.
 
-    Mirrors ``hermes_constants.get_hermes_home`` semantics: env var wins,
-    else ``~/.hermes``. A local copy avoids an import cycle with the
-    middleware which lives below ``hermes_cli``.
+    Calls ``hermes_constants.get_hermes_home`` directly — ``hermes_constants``
+    is a stdlib-only leaf module, so there is no import cycle with the
+    middleware below ``hermes_cli``. Going through it (rather than a bare
+    ``HERMES_HOME or ~/.hermes`` copy) means an env-stripped child
+    (HERMES_HOME unset, HOME=/opt/hermes) is redirected off the read-only
+    install tree instead of trying to write under /opt/hermes/.hermes.
     """
-    home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-    return Path(home) / "logs" / "dashboard-auth.log"
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "logs" / "dashboard-auth.log"
 
 
 def audit_log(event: AuditEvent, **fields: Any) -> None:

@@ -210,15 +210,24 @@ def get_default_hermes_root() -> Path:
 
     Import-safe — no dependencies beyond stdlib.
     """
+    # Every return is wrapped in _redirect_install_dir_home() — the SAME guard
+    # get_hermes_home() applies — so this resolver can never hand back a path
+    # inside the read-only install tree (/opt/hermes/.hermes). Without it, an
+    # env-stripped child (HERMES_HOME unset, HOME=/opt/hermes) got the raw
+    # native home and any downstream mkdir (kanban attachments, auth shared
+    # store, skill_manager, backup) raised "[Errno 13] Permission denied:
+    # '/opt/hermes/.hermes'" — surfacing as the document-attach toast on
+    # webfree boxes. The guard no-ops for every home outside /opt/hermes, so
+    # host/desktop installs and the /opt/data Docker layout are unaffected.
     native_home = _get_platform_default_hermes_home()
     env_home = os.environ.get("HERMES_HOME", "")
     if not env_home:
-        return native_home
+        return _redirect_install_dir_home(native_home)
     env_path = Path(env_home)
     try:
         env_path.resolve().relative_to(native_home.resolve())
         # HERMES_HOME is under ~/.hermes (normal or profile mode)
-        return native_home
+        return _redirect_install_dir_home(native_home)
     except ValueError:
         pass
 
@@ -227,10 +236,10 @@ def get_default_hermes_root() -> Path:
     # If the immediate parent dir is named "profiles", the root is
     # the grandparent — this covers Docker profiles correctly.
     if env_path.parent.name == "profiles":
-        return env_path.parent.parent
+        return _redirect_install_dir_home(env_path.parent.parent)
 
     # Not a profile path — HERMES_HOME itself is the root
-    return env_path
+    return _redirect_install_dir_home(env_path)
 
 
 def _get_packaged_data_dir(name: str) -> Path | None:

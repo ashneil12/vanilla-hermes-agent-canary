@@ -196,6 +196,30 @@ class TestRedirectInstallDirHome:
         finally:
             hermes_constants.reset_hermes_home_override(token)
 
+    def test_default_root_unset_home_redirects(self, tmp_path, monkeypatch):
+        """get_default_hermes_root() must apply the SAME guard as get_hermes_home().
+
+        Regression: an env-stripped child (HERMES_HOME unset, HOME=/opt/hermes)
+        got the raw native home /opt/hermes/.hermes from this resolver, and a
+        downstream mkdir (kanban attachments, auth shared store, backup) raised
+        "[Errno 13] Permission denied: '/opt/hermes/.hermes'" — the webchat
+        document-attach toast on webfree boxes. The resolver now redirects to
+        the writable data home, matching get_hermes_home().
+        """
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", lambda: install_dir)
+        assert get_default_hermes_root() == data_home
+        # And it agrees with get_hermes_home() so callers stay consistent.
+        monkeypatch.setattr(hermes_constants, "_profile_fallback_warned", True)
+        assert get_default_hermes_root() == get_hermes_home()
+
+    def test_default_root_explicit_home_in_install_tree_redirects(self, tmp_path, monkeypatch):
+        """An explicit HERMES_HOME under the read-only tree is redirected here too."""
+        install_dir, data_home = self._wire_install_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("HERMES_HOME", str(install_dir / ".hermes"))
+        assert get_default_hermes_root() == data_home
+
 
 class TestHermesManagedNode:
     def test_windows_node_dir_prefers_portable_root(self, tmp_path, monkeypatch):
