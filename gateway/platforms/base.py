@@ -658,10 +658,36 @@ async def _read_httpx_body_with_limit(response, *, media_type: str) -> bytes:
     return b"".join(chunks)
 
 
+def _ensure_media_cache_dir(current: Path, new_subpath: str, old_name: str, global_name: str) -> Path:
+    """Create and return a writable media-cache dir, self-healing a stale
+    import-time path.
+
+    The module-level ``*_CACHE_DIR`` constants resolve ``get_hermes_dir`` once,
+    at import. On the split-container (webfree) boxes the persisted
+    ``$HERMES_HOME`` volume can become writable *after* this module is imported,
+    so a constant captured while ``HOME`` still pointed at the read-only image
+    tree (``/opt/hermes``) makes every later ``mkdir`` raise
+    ``[Errno 13] Permission denied: '/opt/hermes/.hermes'`` — which is exactly
+    how document/voice attachments fail on send while inline-image parts (which
+    never touch these dirs) keep working. When the cached path can't be created
+    we re-resolve against the live ``get_hermes_home()`` (now writable) and
+    rebind the module global so the rest of the process uses the healed
+    location. Tests monkeypatch the constant to a writable ``tmp_path``; that
+    succeeds on the first ``mkdir`` and is left untouched.
+    """
+    try:
+        current.mkdir(parents=True, exist_ok=True)
+        return current
+    except OSError:
+        resolved = get_hermes_dir(new_subpath, old_name)
+        resolved.mkdir(parents=True, exist_ok=True)
+        globals()[global_name] = resolved
+        return resolved
+
+
 def get_image_cache_dir() -> Path:
     """Return the image cache directory, creating it if it doesn't exist."""
-    IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return IMAGE_CACHE_DIR
+    return _ensure_media_cache_dir(IMAGE_CACHE_DIR, "cache/images", "image_cache", "IMAGE_CACHE_DIR")
 
 
 def _looks_like_image(data: bytes) -> bool:
@@ -806,8 +832,7 @@ AUDIO_CACHE_DIR = get_hermes_dir("cache/audio", "audio_cache")
 
 def get_audio_cache_dir() -> Path:
     """Return the audio cache directory, creating it if it doesn't exist."""
-    AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return AUDIO_CACHE_DIR
+    return _ensure_media_cache_dir(AUDIO_CACHE_DIR, "cache/audio", "audio_cache", "AUDIO_CACHE_DIR")
 
 
 def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
@@ -912,8 +937,7 @@ SUPPORTED_VIDEO_TYPES = {
 
 def get_video_cache_dir() -> Path:
     """Return the video cache directory, creating it if it doesn't exist."""
-    VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return VIDEO_CACHE_DIR
+    return _ensure_media_cache_dir(VIDEO_CACHE_DIR, "cache/videos", "video_cache", "VIDEO_CACHE_DIR")
 
 
 def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
@@ -1445,8 +1469,7 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
 
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
-    DOCUMENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return DOCUMENT_CACHE_DIR
+    return _ensure_media_cache_dir(DOCUMENT_CACHE_DIR, "cache/documents", "document_cache", "DOCUMENT_CACHE_DIR")
 
 
 def cache_document_from_bytes(data: bytes, filename: str) -> str:
