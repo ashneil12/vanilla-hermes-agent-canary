@@ -14161,7 +14161,17 @@ def start_server(
     # injection / WS-auth paths can branch on it consistently.  Phase 3.5
     # uses this to decide whether to refuse the bind, log the gate-on
     # banner, and enable uvicorn proxy_headers.
-    app.state.auth_required = should_require_auth(host)
+    #
+    # Trusted-proxy escape hatch: when the dashboard is bound non-loopback but
+    # fronted by an authenticating reverse proxy (our edge Caddy injects the
+    # session bearer; :9119 is expose-only and never internet-published), the
+    # gate is redundant and would crash-loop the bind with no provider
+    # registered. HERMES_DASHBOARD_TRUST_PROXY=1 hands auth back to the proxy:
+    # auth_required=False, so the bind-refusal below is skipped and the legacy
+    # bearer-accepting middleware runs — the pre-June-2026 transparent behaviour.
+    app.state.auth_required = should_require_auth(host) and os.environ.get(
+        "HERMES_DASHBOARD_TRUST_PROXY", ""
+    ).strip().lower() not in ("1", "true", "yes")
 
     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
     # the hermes-0day MCP-persistence campaign abused unauthenticated public
