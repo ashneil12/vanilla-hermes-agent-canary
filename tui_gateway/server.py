@@ -9401,8 +9401,22 @@ def _attachment_ref_path(session: dict, target: Path) -> str:
 
 def _desktop_attachment_dir(session: dict) -> Path:
     root = Path(_session_cwd(session)).resolve() / ".hermes" / "desktop-attachments"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+    except OSError:
+        # The session cwd can be a READ-ONLY tree. On webfree boxes the TUI /
+        # slash-worker runs with cwd=/opt/hermes (the immutable install dir),
+        # so <cwd>/.hermes/desktop-attachments raises
+        # "[Errno 13] Permission denied: '/opt/hermes/.hermes'" and the whole
+        # document-attach prompt fails ("Prompt failed"). Images dodge this —
+        # they're sent as inline image parts and never staged here. Fall back to
+        # the writable Hermes home; the agent reads the file by the absolute
+        # @file: ref (_attachment_ref_path already returns the absolute path for
+        # targets outside the session workspace).
+        fallback = get_hermes_home() / "desktop-attachments"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def _sanitize_attachment_name(name: str) -> str:

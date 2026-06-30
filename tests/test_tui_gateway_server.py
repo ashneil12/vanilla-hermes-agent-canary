@@ -4015,6 +4015,55 @@ def test_file_attach_uploads_remote_file_into_session_workspace(monkeypatch, tmp
         server._sessions.pop("sid", None)
 
 
+def test_file_attach_falls_back_to_hermes_home_when_cwd_readonly(monkeypatch, tmp_path):
+    """Regression: on webfree boxes the TUI/slash-worker runs with cwd=/opt/hermes
+    (the read-only install tree), so staging a document attachment under
+    <cwd>/.hermes/desktop-attachments raised "[Errno 13] Permission denied:
+    '/opt/hermes/.hermes'" and the whole prompt failed ("Prompt failed").
+    The attachment dir must fall back to the writable Hermes home.
+    """
+    # A session cwd that cannot host <cwd>/.hermes/... — nested under a regular
+    # file so mkdir(parents=True) raises OSError even for root, mirroring the
+    # read-only /opt/hermes install tree.
+    blocker = tmp_path / "opt_hermes_readonly"
+    blocker.write_text("not a directory")
+    writable_home = tmp_path / "home" / ".hermes"
+    writable_home.mkdir(parents=True)
+    monkeypatch.setattr(server, "get_hermes_home", lambda: writable_home)
+
+    fake_cli = types.ModuleType("cli")
+    fake_cli._detect_file_drop = lambda raw: None
+    fake_cli._split_path_input = lambda raw: (raw, "")
+    fake_cli._resolve_attachment_path = lambda raw: None
+
+    server._sessions["sid"] = _session(cwd=str(blocker))
+    monkeypatch.setitem(sys.modules, "cli", fake_cli)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "file.attach",
+                "params": {
+                    "session_id": "sid",
+                    "path": "/Users/alice/Downloads/report.txt",
+                    "name": "report.txt",
+                    "data_url": "data:text/plain;base64,aGVsbG8gd29ybGQ=",
+                },
+            }
+        )
+
+        stored = writable_home / "desktop-attachments" / "report.txt"
+        assert resp["result"]["attached"] is True
+        assert resp["result"]["uploaded"] is True
+        assert Path(resp["result"]["path"]) == stored.resolve()
+        assert stored.read_text(encoding="utf-8") == "hello world"
+        # Target is outside the session workspace, so the ref is the absolute path.
+        assert "desktop-attachments/report.txt" in resp["result"]["ref_text"]
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_file_attach_copies_gateway_visible_file_outside_workspace(monkeypatch, tmp_path):
     """Local case: gateway can see the file but it's outside the workspace → copy in."""
     workspace = tmp_path / "workspace"
