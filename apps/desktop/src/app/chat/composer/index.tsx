@@ -2049,6 +2049,11 @@ export function ChatBar({
       onPickFiles={onPickFiles}
       onPickFolders={onPickFolders}
       onPickImages={onPickImages}
+      onWebAttachFiles={
+        onAttachDroppedItems
+          ? files => void onAttachDroppedItems(files.map(file => ({ file })))
+          : undefined
+      }
       state={state}
     />
   )
