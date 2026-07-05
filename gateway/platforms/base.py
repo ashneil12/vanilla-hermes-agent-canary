@@ -698,9 +698,8 @@ def _ensure_media_cache_dir(current: Path, new_subpath: str, old_name: str, glob
 
 def get_image_cache_dir() -> Path:
     """Return the image cache directory, creating it if it doesn't exist."""
-    d = _resolve_cache_dir("IMAGE_CACHE_DIR", "cache/images", "image_cache")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    current = _resolve_cache_dir("IMAGE_CACHE_DIR", "cache/images", "image_cache")
+    return _ensure_media_cache_dir(current, "cache/images", "image_cache", "IMAGE_CACHE_DIR")
 
 
 def _looks_like_image(data: bytes) -> bool:
@@ -845,9 +844,8 @@ AUDIO_CACHE_DIR = get_hermes_dir("cache/audio", "audio_cache")
 
 def get_audio_cache_dir() -> Path:
     """Return the audio cache directory, creating it if it doesn't exist."""
-    d = _resolve_cache_dir("AUDIO_CACHE_DIR", "cache/audio", "audio_cache")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    current = _resolve_cache_dir("AUDIO_CACHE_DIR", "cache/audio", "audio_cache")
+    return _ensure_media_cache_dir(current, "cache/audio", "audio_cache", "AUDIO_CACHE_DIR")
 
 
 def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
@@ -952,9 +950,8 @@ SUPPORTED_VIDEO_TYPES = {
 
 def get_video_cache_dir() -> Path:
     """Return the video cache directory, creating it if it doesn't exist."""
-    d = _resolve_cache_dir("VIDEO_CACHE_DIR", "cache/videos", "video_cache")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    current = _resolve_cache_dir("VIDEO_CACHE_DIR", "cache/videos", "video_cache")
+    return _ensure_media_cache_dir(current, "cache/videos", "video_cache", "VIDEO_CACHE_DIR")
 
 
 def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
@@ -1549,9 +1546,8 @@ def _strip_media_tag_directives(text: str) -> str:
 
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
-    d = _resolve_cache_dir("DOCUMENT_CACHE_DIR", "cache/documents", "document_cache")
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    current = _resolve_cache_dir("DOCUMENT_CACHE_DIR", "cache/documents", "document_cache")
+    return _ensure_media_cache_dir(current, "cache/documents", "document_cache", "DOCUMENT_CACHE_DIR")
 
 
 def cache_document_from_bytes(data: bytes, filename: str) -> str:
