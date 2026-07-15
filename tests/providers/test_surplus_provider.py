@@ -138,8 +138,12 @@ class TestSurplusModelOrdering:
 
         result = provider_model_ids("surplus")
 
-        # Sorted case-insensitively (alphabetical family grouping).
-        assert result == sorted(unsorted, key=str.lower)
+        # Composed contract (2026-07-15 sync): curated fallback picks lead the
+        # picker (upstream), then the live remainder sorted case-insensitively
+        # so families cluster (hermes-fork).
+        curated = ["claude-opus-4.6", "llama-3.3-70b"]
+        remainder = sorted((m for m in unsorted if m not in curated), key=str.lower)
+        assert result == curated + remainder
         # The variants the user couldn't find are now neighbours.
         assert (
             abs(
