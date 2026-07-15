@@ -7,7 +7,7 @@ import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { DesktopInstallOverlay } from '@/components/desktop-install-overlay'
 import { GatewayConnectingOverlay } from '@/components/gateway-connecting-overlay'
 import { DesktopOnboardingOverlay } from '@/components/onboarding'
-import { Pane, PaneMain } from '@/components/pane-shell'
+import { Pane, PANE_CLOSE_REVEAL_EVENT, PaneMain } from '@/components/pane-shell'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { isFocusWithin } from '@/lib/keybinds/combo'
@@ -25,9 +25,11 @@ import {
   $fileBrowserOpen,
   $panesFlipped,
   $pinnedSessionIds,
+  CHAT_SIDEBAR_PANE_ID,
   FILE_BROWSER_DEFAULT_WIDTH,
   FILE_BROWSER_MAX_WIDTH,
   FILE_BROWSER_MIN_WIDTH,
+  FILE_BROWSER_PANE_ID,
   pinSession,
   PREVIEW_PANE_ID,
   restoreWorktree,
@@ -217,6 +219,20 @@ export function DesktopController() {
   const routeTokenRef = useRef(routeToken)
   routeTokenRef.current = routeToken
   const getRouteToken = useCallback(() => routeTokenRef.current, [])
+
+  // Narrow (phone) widths: any navigation — picking a session, New Session,
+  // opening a route from the revealed sidebar — retires the pinned pane reveals
+  // so the overlay never sits on top of the view the user just navigated to.
+  // location.key changes on every navigate(), including same-path ones.
+  useEffect(() => {
+    if (!narrowViewport || typeof window === 'undefined') {
+      return
+    }
+
+    for (const id of [CHAT_SIDEBAR_PANE_ID, FILE_BROWSER_PANE_ID, REVIEW_PANE_ID]) {
+      window.dispatchEvent(new CustomEvent(PANE_CLOSE_REVEAL_EVENT, { detail: { id } }))
+    }
+  }, [location.key, narrowViewport])
 
   const {
     agentsOpen,

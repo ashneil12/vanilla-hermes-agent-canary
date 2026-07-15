@@ -138,7 +138,7 @@ export function SidebarCronJobsSection({
           <SidebarPanelLabel>{label}</SidebarPanelLabel>
           <span className="text-[0.6875rem] font-medium text-(--ui-text-quaternary)">{countLabel}</span>
           <DisclosureCaret
-            className="text-(--ui-text-tertiary) opacity-0 transition group-hover/section-label:opacity-100"
+            className="text-(--ui-text-tertiary) opacity-0 transition group-hover/section-label:opacity-100 touch:opacity-100"
             open={open}
           />
         </button>
@@ -225,17 +225,17 @@ function CronJobSidebarRow({
           <DisclosureCaret
             className={cn(
               'shrink-0 text-(--ui-text-tertiary) transition',
-              expanded ? 'opacity-100' : 'opacity-0 group-hover/cron:opacity-100'
+              expanded ? 'opacity-100' : 'opacity-0 group-hover/cron:opacity-100 touch:opacity-100'
             )}
             open={expanded}
           />
         </button>
         {/* Trailing cluster: countdown by default, quick actions on hover. */}
         <div className="flex items-center gap-0.5 justify-self-end pr-1">
-          <span className="text-[0.6875rem] text-(--ui-text-tertiary) tabular-nums group-hover/cron:hidden">
+          <span className="text-[0.6875rem] text-(--ui-text-tertiary) tabular-nums group-hover/cron:hidden touch:hidden">
             {meta}
           </span>
-          <div className="hidden items-center gap-0.5 group-hover/cron:flex">
+          <div className="hidden items-center gap-0.5 group-hover/cron:flex touch:flex">
             <Tip label={c.triggerNow}>
               <button
                 aria-label={c.triggerNow}

@@ -3,21 +3,17 @@ import { useNavigate } from 'react-router-dom'
 
 import { $terminalTakeover, setTerminalTakeover } from '@/app/right-sidebar/store'
 import { closeActiveTerminal, createTerminal, cycleTerminal } from '@/app/right-sidebar/terminal/terminals'
-import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
-import { matchesQuery } from '@/hooks/use-media-query'
 import { PROFILE_SLOT_COUNT, SESSION_SLOT_COUNT } from '@/lib/keybinds/actions'
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from '@/lib/keybinds/combo'
 import { $repoStatus } from '@/store/coding-status'
 import { toggleCommandPalette } from '@/store/command-palette'
 import { $capture, $comboIndex, endCapture, setBinding, toggleKeybindPanel } from '@/store/keybinds'
 import {
-  CHAT_SIDEBAR_PANE_ID,
-  FILE_BROWSER_PANE_ID,
   requestSessionSearchFocus,
   setFileBrowserOpen,
-  toggleFileBrowserOpen,
+  toggleFileBrowserView,
   togglePanesFlipped,
-  toggleSidebarOpen
+  toggleSidebarView
 } from '@/store/layout'
 import {
   $newChatProfile,
@@ -45,7 +41,6 @@ import { openNewSessionInNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
 import { requestComposerFocus, requestVoiceToggle } from '../chat/composer/focus'
-import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '../layout-constants'
 import {
   AGENTS_ROUTE,
   ARTIFACTS_ROUTE,
@@ -148,20 +143,8 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // through instead of silently doing nothing).
     'workspace.newWorktree': () => $repoStatus.get() && requestNewWorktree(),
 
-    'view.toggleSidebar': () => {
-      if (matchesQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)) {
-        window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: CHAT_SIDEBAR_PANE_ID } }))
-      } else {
-        toggleSidebarOpen()
-      }
-    },
-    'view.toggleRightSidebar': () => {
-      if (matchesQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)) {
-        window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: FILE_BROWSER_PANE_ID } }))
-      } else {
-        toggleFileBrowserOpen()
-      }
-    },
+    'view.toggleSidebar': toggleSidebarView,
+    'view.toggleRightSidebar': toggleFileBrowserView,
     'view.toggleReview': toggleReview,
     'view.showFiles': showFiles,
     'view.showTerminal': () => setTerminalTakeover(!$terminalTakeover.get()),

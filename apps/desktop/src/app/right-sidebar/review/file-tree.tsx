@@ -333,7 +333,7 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
           )}
         </span>
 
-        <span className="hidden shrink-0 items-center gap-0.5 group-hover/review-row:flex">
+        <span className="hidden shrink-0 items-center gap-0.5 group-hover/review-row:flex touch:flex">
           <Tip label={file.staged ? c.unstage : c.stage}>
             <Button
               aria-label={file.staged ? c.unstage : c.stage}
@@ -366,7 +366,7 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
 
         <DiffCount
           added={node.added}
-          className="text-[0.64rem] leading-4 group-hover/review-row:hidden"
+          className="text-[0.64rem] leading-4 group-hover/review-row:hidden touch:hidden"
           removed={node.removed}
         />
         {file.staged && (

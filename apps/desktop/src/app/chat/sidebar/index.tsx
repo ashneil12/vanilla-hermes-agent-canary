@@ -166,7 +166,7 @@ const GROUP_BODY = cn(SCROLL_Y, COMPACT_FLAT)
 // (group/section lives on SidebarSectionHeader), mirroring the artifacts/file
 // browser header affordances. focus-visible keeps them keyboard-reachable.
 const HEADER_ACTION_BTN =
-  'text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100'
+  'text-(--ui-text-tertiary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100 touch:opacity-100'
 
 // The view toggle (overview group toggle / in-project back) is the one control
 // that stays visible at all times — it's the stable navigation affordance, not

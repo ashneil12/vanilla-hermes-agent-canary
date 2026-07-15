@@ -67,7 +67,7 @@ export function WorkspaceAddButton({ label, onClick }: { label: string; onClick:
   return (
     <button
       aria-label={label}
-      className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100"
+      className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100 touch:opacity-100"
       onClick={onClick}
       type="button"
     >
@@ -113,7 +113,7 @@ export function WorkspaceMenu({ path, onRemove }: { path: null | string; onRemov
       <DropdownMenuTrigger asChild>
         <button
           aria-label={p.menu}
-          className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100 data-[state=open]:opacity-100"
+          className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100 data-[state=open]:opacity-100 touch:opacity-100"
           onClick={event => event.stopPropagation()}
           type="button"
         >
@@ -234,7 +234,7 @@ export function StartWorkButton({ repoPath, onStarted }: { repoPath: string; onS
     <>
       <button
         aria-label={p.startWork}
-        className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100"
+        className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100 touch:opacity-100"
         onClick={() => {
           setConvertMode(false)
           setName('')
@@ -378,7 +378,7 @@ export function WorkspaceHeader({
           <SidebarCount>{count}</SidebarCount>
         </span>
         <DisclosureCaret
-          className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100"
+          className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100 touch:opacity-100"
           open={open}
         />
       </button>

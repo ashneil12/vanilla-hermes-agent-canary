@@ -241,7 +241,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
           // surface below it — the original look.
           'mx-2 overflow-hidden rounded-b-none border-b border-b-transparent pt-0.5',
           'transition-opacity duration-200 ease-out',
-          scrolledUp ? 'opacity-30 group-hover/composer:opacity-100' : 'opacity-100'
+          scrolledUp ? 'opacity-30 group-hover/composer:opacity-100 touch:opacity-100' : 'opacity-100'
         )}
       >
         {sections.map(section => (

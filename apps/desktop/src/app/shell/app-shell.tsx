@@ -160,7 +160,9 @@ export function AppShell({
 
   return (
     <SidebarProvider
-      className="h-screen min-h-0 flex-col bg-background"
+      // dvh, not vh: mobile Safari's 100vh is the LARGE viewport, which pushes
+      // the statusbar/composer under the browser toolbar. Desktop is identical.
+      className="h-dvh min-h-0 flex-col bg-background"
       onOpenChange={setSidebarOpen}
       open={sidebarOpen}
       style={

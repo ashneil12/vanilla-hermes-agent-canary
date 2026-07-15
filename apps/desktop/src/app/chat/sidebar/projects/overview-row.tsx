@@ -142,7 +142,7 @@ export function ProjectOverviewRow({
               type="button"
             >
               <DisclosureCaret
-                className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100"
+                className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100 touch:opacity-100"
                 open={open}
               />
             </button>
