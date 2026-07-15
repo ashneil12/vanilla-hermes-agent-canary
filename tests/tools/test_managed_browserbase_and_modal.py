@@ -578,21 +578,44 @@ def test_terminal_tool_respects_direct_modal_mode_without_falling_back_to_manage
             patch.object(terminal_tool, "is_managed_tool_gateway_ready", return_value=True),
             patch.object(Path, "exists", return_value=False),
         ):
-            with pytest.raises(ValueError, match="direct Modal credentials"):
-                terminal_tool._create_environment(
-                    env_type="modal",
-                    image="python:3.11",
-                    cwd="/root",
-                    timeout=60,
-                    container_config={
-                        "container_cpu": 1,
-                        "container_memory": 2048,
-                        "container_disk": 1024,
-                        "container_persistent": True,
-                        "modal_mode": "direct",
-                    },
-                    task_id="task-modal-direct-only",
-                )
+            # Non-strict (default): direct-mode with no creds must NOT silently
+            # switch to MANAGED modal just because the gateway is up. Under the
+            # never-brick contract it now degrades to the LOCAL environment
+            # rather than raising — a LocalEnvironment result proves it did not
+            # fall back to managed modal.
+            result = terminal_tool._create_environment(
+                env_type="modal",
+                image="python:3.11",
+                cwd="/root",
+                timeout=60,
+                container_config={
+                    "container_cpu": 1,
+                    "container_memory": 2048,
+                    "container_disk": 1024,
+                    "container_persistent": True,
+                    "modal_mode": "direct",
+                },
+                task_id="task-modal-direct-only",
+            )
+            assert isinstance(result, terminal_tool._LocalEnvironment)
+
+            # terminal.strict_backend=true restores the hard error.
+            with patch.dict(os.environ, {"TERMINAL_STRICT_BACKEND": "1"}):
+                with pytest.raises(ValueError, match="direct Modal credentials"):
+                    terminal_tool._create_environment(
+                        env_type="modal",
+                        image="python:3.11",
+                        cwd="/root",
+                        timeout=60,
+                        container_config={
+                            "container_cpu": 1,
+                            "container_memory": 2048,
+                            "container_disk": 1024,
+                            "container_persistent": True,
+                            "modal_mode": "direct",
+                        },
+                        task_id="task-modal-direct-only-strict",
+                    )
 
 
 class TestShellEscapeBypass:
