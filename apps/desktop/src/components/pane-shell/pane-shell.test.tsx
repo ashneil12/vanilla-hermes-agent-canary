@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { $paneStates, setPaneOpen, setPaneWidthOverride } from '@/store/panes'
 
-import { Pane, PaneMain, PaneShell } from './pane-shell'
+import { Pane, PANE_CLOSE_REVEAL_EVENT, PANE_TOGGLE_REVEAL_EVENT, PaneMain, PaneShell } from './pane-shell'
 
 function gridContainer(rendered: ReturnType<typeof render>): HTMLElement {
   const root = rendered.container.firstElementChild
@@ -153,7 +153,9 @@ describe('PaneShell composition', () => {
 
     const rendered = render(
       <PaneShell>
-        <Pane id="files" side="left" width="240px">
+        {/* Overrides only apply to resizable panes (fixed-width panes ignore
+            stale persisted overrides) — matches trackForPane's gate. */}
+        <Pane id="files" resizable side="left" width="240px">
           files
         </Pane>
         <PaneMain>main</PaneMain>
@@ -329,5 +331,119 @@ describe('PaneShell composition', () => {
     fireEvent.pointerUp(window, { clientX: 760 })
 
     expect($paneStates.get().preview?.widthOverride).toBe(340)
+  })
+})
+
+describe('collapsed hover-reveal pin (touch path)', () => {
+  beforeEach(() => {
+    $paneStates.set({})
+    window.localStorage.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
+    $paneStates.set({})
+    window.localStorage.clear()
+  })
+
+  function renderCollapsedPane() {
+    return render(
+      <PaneShell>
+        <Pane forceCollapsed hoverReveal id="chat-sidebar" side="left" width="240px">
+          <span data-testid="sidebar-content">sidebar</span>
+        </Pane>
+        <PaneMain>
+          <button data-testid="main-button" type="button">
+            main
+          </button>
+          <button data-pane-trigger="chat-sidebar" data-testid="sidebar-toggle" type="button">
+            toggle
+          </button>
+        </PaneMain>
+      </PaneShell>
+    )
+  }
+
+  function revealCell(rendered: ReturnType<typeof render>): HTMLElement {
+    const cell = rendered.container.querySelector('[data-pane-id="chat-sidebar"]')
+
+    if (!(cell instanceof HTMLElement)) {
+      throw new Error('Expected collapsed pane cell')
+    }
+
+    return cell
+  }
+
+  const toggleReveal = () =>
+    fireEvent(window, new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'chat-sidebar' } }))
+
+  it('pins the reveal on the toggle event and unpins on a second toggle', () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+
+    toggleReveal()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('open')
+
+    toggleReveal()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+  })
+
+  it('unpins on the close event without toggling back open', () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    toggleReveal()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('open')
+
+    const close = () => fireEvent(window, new CustomEvent(PANE_CLOSE_REVEAL_EVENT, { detail: { id: 'chat-sidebar' } }))
+
+    close()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+
+    close()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+  })
+
+  it('ignores toggle/close events for other pane ids', () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    fireEvent(window, new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'file-browser' } }))
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+  })
+
+  it('dismisses the pinned reveal on pointerdown outside the pane', () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    toggleReveal()
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('open')
+
+    fireEvent.pointerDown(rendered.getByTestId('main-button'))
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('closed')
+  })
+
+  it('keeps the pin on pointerdown inside the pane', () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    toggleReveal()
+    fireEvent.pointerDown(rendered.getByTestId('sidebar-content'))
+
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('open')
+  })
+
+  it("defers to the pane's own trigger so its toggle wins the tap", () => {
+    const rendered = renderCollapsedPane()
+    const cell = revealCell(rendered)
+
+    toggleReveal()
+    fireEvent.pointerDown(rendered.getByTestId('sidebar-toggle'))
+
+    // Still pinned after pointerdown — the trigger's click handler (which
+    // dispatches the toggle event) owns the state change instead.
+    expect(cell.getAttribute('data-pane-hover-reveal')).toBe('open')
   })
 })

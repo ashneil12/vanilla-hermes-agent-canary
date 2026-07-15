@@ -14,9 +14,11 @@ import {
   $fileBrowserOpen,
   $panesFlipped,
   $sidebarOpen,
-  toggleFileBrowserOpen,
+  CHAT_SIDEBAR_PANE_ID,
+  FILE_BROWSER_PANE_ID,
+  toggleFileBrowserView,
   togglePanesFlipped,
-  toggleSidebarOpen
+  toggleSidebarView
 } from '@/store/layout'
 
 import { appViewForPath, isOverlayView } from '../routes'
@@ -33,6 +35,8 @@ export interface TitlebarTool {
   href?: string
   icon: ReactNode
   onSelect?: () => void
+  /** Pane id this tool toggles — rendered as data-pane-trigger so the pane's collapsed-overlay tap-outside dismissal ignores it. */
+  paneTrigger?: string
   title?: string
   to?: string
 }
@@ -71,8 +75,13 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   // swaps which pane each one toggles. Default: sessions left, file browser
   // right. Flipped: file browser left, sessions right. Sidebar toggles never
   // carry an active highlight — they're plain show/hide affordances.
-  const fileBrowserEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
-  const sessionsEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
+  // View-level toggles (not the raw store ones): below the collapse breakpoint
+  // they drive the pane's reveal pin instead of the invisible 0px-track open
+  // state — the raw toggles made these buttons dead on phones. paneId marks the
+  // button as its pane's trigger so the overlay's tap-outside dismissal defers
+  // to the button's own toggle.
+  const fileBrowserEdge = { open: fileBrowserOpen, paneId: FILE_BROWSER_PANE_ID, toggle: toggleFileBrowserView }
+  const sessionsEdge = { open: sidebarOpen, paneId: CHAT_SIDEBAR_PANE_ID, toggle: toggleSidebarView }
   const leftEdge = panesFlipped ? fileBrowserEdge : sessionsEdge
   const rightEdge = panesFlipped ? sessionsEdge : fileBrowserEdge
 
@@ -84,7 +93,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       onSelect: () => {
         triggerHaptic('tap')
         leftEdge.toggle()
-      }
+      },
+      paneTrigger: leftEdge.paneId
     },
     {
       icon: <Codicon name="arrow-swap" />,
@@ -106,7 +116,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     onSelect: () => {
       triggerHaptic('tap')
       rightEdge.toggle()
-    }
+    },
+    paneTrigger: rightEdge.paneId
   }
 
   // Static system tools — always pinned to the screen's right edge.
@@ -227,6 +238,7 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
         aria-label={tool.label}
         aria-pressed={tool.active ?? undefined}
         className={className}
+        data-pane-trigger={tool.paneTrigger}
         disabled={tool.disabled}
         onClick={() => {
           if (tool.to) {

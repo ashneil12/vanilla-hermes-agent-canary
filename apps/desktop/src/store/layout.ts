@@ -1,5 +1,8 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 
+import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '@/app/layout-constants'
+import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
+import { matchesQuery } from '@/hooks/use-media-query'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { arraysEqual, insertUniqueId } from '@/lib/storage'
 
@@ -193,6 +196,29 @@ export function toggleSidebarOpen() {
 
 export function toggleFileBrowserOpen() {
   togglePane(FILE_BROWSER_PANE_ID)
+}
+
+// View-level toggles for every user-facing "show/hide this rail" control
+// (titlebar buttons, keybinds). Below the collapse breakpoint the panes are
+// force-collapsed hover-reveal overlays whose store-open state renders a 0px
+// track — toggling it does nothing visible (the bug that made the titlebar
+// buttons dead on phones). There the reveal pin is the real toggle.
+function togglePaneView(paneId: string, toggleOpen: () => void) {
+  if (typeof window !== 'undefined' && matchesQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)) {
+    window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: paneId } }))
+
+    return
+  }
+
+  toggleOpen()
+}
+
+export function toggleSidebarView() {
+  togglePaneView(CHAT_SIDEBAR_PANE_ID, toggleSidebarOpen)
+}
+
+export function toggleFileBrowserView() {
+  togglePaneView(FILE_BROWSER_PANE_ID, toggleFileBrowserOpen)
 }
 
 export function setFileBrowserOpen(open: boolean) {

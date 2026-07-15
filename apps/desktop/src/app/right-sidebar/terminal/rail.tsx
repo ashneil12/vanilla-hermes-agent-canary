@@ -95,7 +95,7 @@ export function TerminalRail() {
         <Tip label={t.rightSidebar.terminalHide} side="left">
           <button
             aria-label={t.rightSidebar.terminalHide}
-            className={cn(RAIL_ACTION, 'opacity-0 transition-opacity group-hover/rail:opacity-100')}
+            className={cn(RAIL_ACTION, 'opacity-0 transition-opacity group-hover/rail:opacity-100 touch:opacity-100')}
             onClick={() => setTerminalTakeover(false)}
             type="button"
           >

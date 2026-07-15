@@ -67,7 +67,7 @@ function SidebarSectionHeader({
         >
           {labelBody}
           <DisclosureCaret
-            className="text-(--ui-text-tertiary) opacity-0 transition group-hover/section-label:opacity-100"
+            className="text-(--ui-text-tertiary) opacity-0 transition group-hover/section-label:opacity-100 touch:opacity-100"
             open={open}
           />
         </button>

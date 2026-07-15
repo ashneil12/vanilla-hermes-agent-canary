@@ -14,6 +14,7 @@ import {
   useState
 } from 'react'
 
+import { matchesQuery } from '@/hooks/use-media-query'
 import { cn } from '@/lib/utils'
 import { $paneStates, ensurePaneRegistered, setPaneHeightOverride, setPaneWidthOverride } from '@/store/panes'
 
@@ -122,8 +123,15 @@ const HOVER_REVEAL_TRIGGER_WIDTH = 14
 const HOVER_REVEAL_EDGE_GUTTER = 'calc(0.5rem + 2px)'
 
 // Fired (window CustomEvent<{ id }>) to toggle a force-collapsed pane's reveal
-// from the keyboard, since its store-open toggle is a no-op while collapsed.
+// from the keyboard or the titlebar buttons, since its store-open toggle is a
+// no-op while collapsed. The only reveal path on touch screens, where the CSS
+// hover reveal can never engage (Tailwind gates hover: behind (hover: hover)).
 export const PANE_TOGGLE_REVEAL_EVENT = 'hermes:pane-toggle-reveal'
+
+// Fired to unpin a forced reveal without toggling — e.g. after a navigation
+// picked from inside the revealed pane, so the overlay doesn't sit over the
+// destination view.
+export const PANE_CLOSE_REVEAL_EVENT = 'hermes:pane-close-reveal'
 
 const widthToCss = (value: WidthValue | undefined, fallback: string) =>
   value === undefined ? fallback : typeof value === 'number' ? `${value}px` : value
@@ -401,10 +409,60 @@ export function Pane({
       }
     }
 
-    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+    const onClose = (e: Event) => {
+      if ((e as CustomEvent<{ id: string }>).detail?.id === id) {
+        setForced(false)
+      }
+    }
 
-    return () => window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+    window.addEventListener(PANE_CLOSE_REVEAL_EVENT, onClose)
+
+    return () => {
+      window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, onToggle)
+      window.removeEventListener(PANE_CLOSE_REVEAL_EVENT, onClose)
+    }
   }, [id, overlayActive])
+
+  // Tap-outside dismissal for the pinned reveal — the light-dismiss model touch
+  // users expect from an overlay. Skips the pane itself and any control marked
+  // as this pane's trigger (data-pane-trigger), whose own toggle must win —
+  // otherwise pointerdown-unpin + click-toggle would re-pin in one tap.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !forced) {
+      return
+    }
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target
+
+      if (!(target instanceof Node)) {
+        return
+      }
+
+      if (paneRef.current?.contains(target)) {
+        return
+      }
+
+      if (
+        target instanceof Element &&
+        // The pane's own toggle owns the state change (pointerdown-unpin +
+        // click-toggle would otherwise re-pin in one tap). Radix portals
+        // (menus/dialogs launched FROM the revealed pane render outside it in
+        // the DOM) must not count as outside either, or using a session's ⋯
+        // menu would yank the sidebar shut mid-interaction.
+        target.closest(`[data-pane-trigger="${id}"], [data-radix-popper-content-wrapper], [role="dialog"]`)
+      ) {
+        return
+      }
+
+      setForced(false)
+    }
+
+    window.addEventListener('pointerdown', onPointerDown, true)
+
+    return () => window.removeEventListener('pointerdown', onPointerDown, true)
+  }, [forced, id])
 
   // Keep contents mounted while collapsed so reveal is a pure CSS transform.
   useEffect(() => {
@@ -504,6 +562,14 @@ export function Pane({
           aria-hidden="true"
           className="pointer-events-auto absolute inset-y-0 z-30 [-webkit-app-region:no-drag]"
           data-pane-reveal-trigger=""
+          // Touch has no hover to engage the reveal, so the edge strip doubles
+          // as a tap target there. Hover devices keep the strip inert (their
+          // reveal is the CSS hover slide) so desktop behavior is unchanged.
+          onClick={() => {
+            if (matchesQuery('(hover: none)')) {
+              setForced(v => !v)
+            }
+          }}
           style={{ [edge]: HOVER_REVEAL_EDGE_GUTTER, width: HOVER_REVEAL_TRIGGER_WIDTH }}
         />
 

@@ -9,6 +9,12 @@
    (this variant) flatten everything into one shared scroll. See ChatSidebar. */
 @custom-variant compact (@media (max-height: 768px));
 
+/* Touch-first devices (phones/tablets — no hover anywhere). Tailwind v4 gates
+   hover:/group-hover: behind (hover: hover), so every hover-revealed control is
+   otherwise unreachable there; this variant is the reveal/upsize escape hatch.
+   Desktops with touchscreens still report hover:hover and keep desktop UX. */
+@custom-variant touch (@media (hover: none));
+
 @font-face {
   font-family: 'Collapse';
   font-style: normal;
@@ -1825,5 +1831,53 @@ text-* variant utilities. */ .btn-arc {
     left: 0;
     width: 100%;
     opacity: 0.4;
+  }
+}
+
+/* ── Touch layer ──────────────────────────────────────────────────────────────
+   Base adjustments for hover-less (touch-first) devices — phones and tablets
+   hitting the hosted web build. Pointer-hover desktops are untouched. */
+@media (hover: none) {
+  :root {
+    /* Titlebar buttons are the primary navigation on phones (sidebar toggle,
+       settings). The defaults (20/22px at the 16px root) are far below the
+       ~44px touch minimum — bump the shared control size; the titlebar's width
+       math derives from this var so the drag-region calcs stay consistent.
+       1.5rem (24px) is the ceiling that still fits the fixed 34px band
+       (controls-top 6px + 24px + the left cluster's 2px translate ≤ 34); the
+       ::before hit inset below stretches the effective target to ~36px. */
+    --titlebar-control-size: 1.5rem;
+    --titlebar-control-height: 1.5rem;
+  }
+
+  /* iOS Safari zoom-and-pans the page when a focused control's font is under
+     16px. Floor form controls and the contenteditable composer there — layout
+     text elsewhere is unaffected. Deliberately UNLAYERED: it must beat the
+     text-* utilities (layered) on the same elements. */
+  input,
+  select,
+  textarea,
+  [contenteditable='true'] {
+    font-size: max(1em, 16px);
+  }
+
+  /* Give every button a padded invisible hit area. Buttons keep their visual
+     size; the pseudo-element only widens the tap target. ::before, not ::after:
+     several buttons already use after:* utilities (their own hit expanders /
+     decorations) and no button in the tree uses before:*. MUST live in
+     @layer base: unlayered, position:relative would beat the LAYERED
+     .absolute/.fixed utilities (cascade layers, not specificity) and knock
+     every floating button — dialog close, scroll-to-bottom, attachment × —
+     back into normal flow on touch devices. In base, utilities win again. */
+  @layer base {
+    button {
+      position: relative;
+    }
+
+    button::before {
+      content: '';
+      position: absolute;
+      inset: -0.375rem;
+    }
   }
 }

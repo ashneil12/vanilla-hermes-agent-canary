@@ -62,6 +62,9 @@ export function StatusbarControls({ className, leftItems = [], items = [], ...pr
     <footer
       className={cn(
         'flex h-5 shrink-0 items-stretch justify-between gap-2 border-t border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background) px-1 py-0 text-(--ui-text-tertiary) [-webkit-app-region:no-drag]',
+        // Touch devices: a taller strip (h-5 ≈ 18px is untappable) and bottom
+        // padding clearing the iOS home indicator (env() is 0 elsewhere).
+        'touch:h-auto touch:min-h-7 touch:pb-[env(safe-area-inset-bottom)]',
         className
       )}
       data-slot="statusbar"

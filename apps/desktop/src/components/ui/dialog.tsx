@@ -69,7 +69,9 @@ function DialogContent({
 }) {
   const { t } = useI18n()
 
-  const widthClass = fitContent ? 'w-auto max-w-[92vw]' : 'w-full max-w-lg'
+  // Below sm the full-width card gets a small inset so it never sits flush
+  // against a phone's screen edges.
+  const widthClass = fitContent ? 'w-auto max-w-[92vw]' : 'w-[calc(100vw-1.5rem)] max-w-lg sm:w-full'
 
   const closeButton = showCloseButton ? (
     <DialogPrimitive.Close asChild data-slot="dialog-close-button">
