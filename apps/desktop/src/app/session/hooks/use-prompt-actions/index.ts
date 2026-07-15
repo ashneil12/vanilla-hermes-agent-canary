@@ -129,7 +129,15 @@ export async function uploadComposerAttachment(
   // Non-image file.
   let dataUrl: string | null = null
 
-  if (remote) {
+  // hermes-fork: the hosted web client has no local filesystem — its picked
+  // files already live on the gateway box (~/.hermes/uploads/...), so attach
+  // by path only and let gateway file.attach read them directly. The web-shim's
+  // readFileDataUrl only caches image previews; reading here would throw
+  // "Could not read <name>" for every non-image (June-2026 fix, re-applied
+  // after it was dropped in a fork reconcile — guarded by index.test.tsx).
+  const hostedWeb = Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
+
+  if (remote && !hostedWeb) {
     try {
       dataUrl = await readFileDataUrlForAttach(path)
     } catch (err) {

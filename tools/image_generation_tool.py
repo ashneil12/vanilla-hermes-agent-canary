@@ -1356,7 +1356,13 @@ def _dispatch_to_plugin_provider(
         except Exception as exc:
             logger.debug("image_gen auto-pair skipped: %s", exc)
             _ap = None
-        if _ap is None or getattr(_ap, "name", None) == "fal":
+        # hermes-fork narrowed 2026-07-15 (upstream inverse-collision:
+        # "DeepInfra chat credentials do not imply consent to image billing").
+        # Auto-pair is a HermesOS managed-stack feature and only ever meant
+        # the platform's Venice key; any other implicitly-available provider
+        # (deepinfra/xai registering off a chat key) must NOT be selected
+        # without explicit image_gen.provider consent.
+        if _ap is None or getattr(_ap, "name", None) != "venice":
             return None
         configured = _ap.name
 

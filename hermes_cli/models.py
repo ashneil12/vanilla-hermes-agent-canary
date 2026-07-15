@@ -2607,6 +2607,12 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
                             primary, secondary = live, curated
                         else:
                             primary, secondary = curated, live
+                            # hermes-fork: marketplace-scale live catalogs must
+                            # keep their non-curated remainder family-sorted or
+                            # the picker regresses to "model unfindable"
+                            # (claude-opus variants 60 rows apart). Curated
+                            # picks still lead per upstream's intent.
+                            secondary = _sort_discovered_model_ids(list(secondary))
                         merged = list(primary)
                         merged_lower = {m.lower() for m in primary}
                         for m in secondary:
