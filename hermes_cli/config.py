@@ -6901,6 +6901,7 @@ def write_platform_config_field(
 
 TERMINAL_CONFIG_ENV_MAP = {
     "backend": "TERMINAL_ENV",
+    "strict_backend": "TERMINAL_STRICT_BACKEND",
     "modal_mode": "TERMINAL_MODAL_MODE",
     "cwd": "TERMINAL_CWD",
     "timeout": "TERMINAL_TIMEOUT",

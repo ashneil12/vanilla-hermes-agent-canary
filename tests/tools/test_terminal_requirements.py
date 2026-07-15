@@ -19,6 +19,7 @@ def _clear_terminal_env(monkeypatch):
         "TERMINAL_SSH_HOST",
         "TERMINAL_SSH_PORT",
         "TERMINAL_SSH_USER",
+        "TERMINAL_STRICT_BACKEND",
         "TERMINAL_TIMEOUT",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
@@ -51,7 +52,7 @@ def test_unknown_terminal_env_logs_error_and_returns_false(monkeypatch, caplog):
     monkeypatch.setenv("TERMINAL_ENV", "unknown-backend")
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
@@ -65,7 +66,7 @@ def test_ssh_backend_without_host_or_user_logs_and_returns_false(monkeypatch, ca
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
@@ -83,7 +84,7 @@ def test_modal_backend_without_token_or_config_logs_specific_error(monkeypatch, 
     monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
@@ -140,7 +141,7 @@ def test_modal_backend_direct_mode_does_not_fall_back_to_managed(monkeypatch, ca
     monkeypatch.setattr(terminal_tool_module, "is_managed_tool_gateway_ready", lambda _vendor: True)
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
@@ -160,7 +161,7 @@ def test_modal_backend_managed_mode_does_not_fall_back_to_direct(monkeypatch, ca
     monkeypatch.setattr(terminal_tool_module, "is_managed_tool_gateway_ready", lambda _vendor: False)
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
@@ -178,10 +179,99 @@ def test_modal_backend_managed_mode_without_feature_flag_logs_clear_error(monkey
     monkeypatch.setattr(terminal_tool_module, "is_managed_tool_gateway_ready", lambda _vendor: False)
 
     with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
+        ok = terminal_tool_module._terminal_backend_ready()
 
     assert ok is False
     assert any(
         "Nous Tool Gateway access is not currently available" in record.getMessage()
         for record in caplog.records
     )
+
+
+# --- Auto-fallback contract (never brick the shell) --------------------------
+# check_terminal_requirements() keeps the terminal tool AVAILABLE even when the
+# configured non-local backend isn't ready, so _create_environment can fall
+# back to local at runtime instead of the agent losing its shell entirely.
+# terminal.strict_backend=true (TERMINAL_STRICT_BACKEND) restores hard-fail.
+
+
+def test_broken_backend_keeps_terminal_tool_available_non_strict(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")  # ssh with no host/user => not ready
+
+    with caplog.at_level(logging.WARNING):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    # Probe says not-ready, but the tool stays offered (falls back to local).
+    assert terminal_tool_module._terminal_backend_ready() is False
+    assert ok is True
+
+
+def test_broken_backend_disables_terminal_tool_in_strict_mode(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
+
+    assert terminal_tool_module.check_terminal_requirements() is False
+
+
+def test_broken_local_backend_still_disables_even_non_strict(monkeypatch):
+    # A failing *local* backend is a genuine problem, not something to mask
+    # behind fallback — the tool should be disabled.
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setattr(terminal_tool_module, "_terminal_backend_ready", lambda: False)
+
+    assert terminal_tool_module.check_terminal_requirements() is False
+
+
+def test_create_environment_falls_back_to_local_on_backend_failure(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+
+    def _boom(**_kwargs):
+        raise ImportError("Feature 'terminal.daytona' unavailable: not writable")
+
+    monkeypatch.setattr(terminal_tool_module, "_create_environment_impl", _boom)
+    # Drain any prior notice.
+    terminal_tool_module.get_backend_fallback_notice()
+
+    env = terminal_tool_module._create_environment(
+        env_type="daytona", image="", cwd=".", timeout=30,
+    )
+
+    assert isinstance(env, terminal_tool_module._LocalEnvironment)
+    notice = terminal_tool_module.get_backend_fallback_notice()
+    assert notice is not None and "daytona" in notice
+    # Notice is one-shot.
+    assert terminal_tool_module.get_backend_fallback_notice() is None
+
+
+def test_create_environment_reraises_in_strict_mode(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
+
+    def _boom(**_kwargs):
+        raise ImportError("boom")
+
+    monkeypatch.setattr(terminal_tool_module, "_create_environment_impl", _boom)
+
+    import pytest
+    with pytest.raises(ImportError):
+        terminal_tool_module._create_environment(
+            env_type="daytona", image="", cwd=".", timeout=30,
+        )
+
+
+def test_create_environment_never_masks_local_failure(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+
+    def _boom(**_kwargs):
+        raise RuntimeError("local is genuinely broken")
+
+    monkeypatch.setattr(terminal_tool_module, "_create_environment_impl", _boom)
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        terminal_tool_module._create_environment(
+            env_type="local", image="", cwd=".", timeout=30,
+        )

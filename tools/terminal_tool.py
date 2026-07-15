@@ -1387,7 +1387,79 @@ def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
     )
 
 
+# --- Terminal backend fallback ------------------------------------------------
+# A non-local backend (docker/modal/daytona/singularity/ssh) that fails to
+# initialise must NOT take down the terminal + execute_code tools and leave the
+# agent with no shell at all (issue: a user set terminal.backend=daytona, the
+# SDK couldn't lazy-install, and BOTH tools died with no way to recover from
+# inside). Unless the operator opts into strict mode, we fall back to the local
+# environment and surface a one-shot notice so the agent knows it's degraded.
+
+_last_backend_fallback: dict | None = None
+_backend_fallback_lock = threading.Lock()
+
+
+def _strict_backend_enabled() -> bool:
+    """True when a failed terminal backend should hard-fail instead of falling
+    back to local. Configured via terminal.strict_backend (bridged to
+    TERMINAL_STRICT_BACKEND). Default off — never brick the shell."""
+    return env_var_enabled("TERMINAL_STRICT_BACKEND")
+
+
+def _record_backend_fallback(env_type: str, reason: str) -> None:
+    global _last_backend_fallback
+    with _backend_fallback_lock:
+        _last_backend_fallback = {"backend": env_type, "reason": reason}
+
+
+def get_backend_fallback_notice() -> str | None:
+    """Return a human-readable advisory if the last environment creation fell
+    back to local, then clear it — so the notice is surfaced once, not spammed
+    on every subsequent command."""
+    global _last_backend_fallback
+    with _backend_fallback_lock:
+        info = _last_backend_fallback
+        _last_backend_fallback = None
+    if not info:
+        return None
+    return (
+        f"terminal.backend='{info['backend']}' could not start ({info['reason']}); "
+        f"commands are running in the LOCAL environment instead. Fix the backend "
+        f"or set terminal.backend=local to silence this. "
+        f"(terminal.strict_backend=true makes a broken backend a hard error.)"
+    )
+
+
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
+                        ssh_config: dict = None, container_config: dict = None,
+                        local_config: dict = None,
+                        task_id: str = "default",
+                        host_cwd: str = None):
+    """Create an execution environment, degrading to local when a non-local
+    backend can't initialise (unless terminal.strict_backend is set).
+
+    Thin wrapper over _create_environment_impl: a broken docker/modal/daytona/
+    singularity/ssh backend falls back to LocalEnvironment instead of raising,
+    which would otherwise disable the terminal + execute_code tools entirely."""
+    try:
+        return _create_environment_impl(
+            env_type=env_type, image=image, cwd=cwd, timeout=timeout,
+            ssh_config=ssh_config, container_config=container_config,
+            local_config=local_config, task_id=task_id, host_cwd=host_cwd,
+        )
+    except Exception as e:
+        if env_type == "local" or _strict_backend_enabled():
+            raise
+        logger.error(
+            "Terminal backend '%s' failed to initialise (%s); falling back to the "
+            "local environment. Set terminal.strict_backend=true to hard-fail instead.",
+            env_type, e,
+        )
+        _record_backend_fallback(env_type, str(e))
+        return _LocalEnvironment(cwd=cwd, timeout=timeout)
+
+
+def _create_environment_impl(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None,
                         task_id: str = "default",
@@ -2814,6 +2886,9 @@ def terminal_tool(
                 result_dict["sudo_auth_failed"] = True
             if sudo_cache_cleared:
                 result_dict["sudo_cache_cleared"] = True
+            backend_notice = get_backend_fallback_notice()
+            if backend_notice:
+                result_dict["warning"] = backend_notice
 
             return json.dumps(result_dict, ensure_ascii=False)
 
@@ -2830,8 +2905,9 @@ def terminal_tool(
         }, ensure_ascii=False)
 
 
-def check_terminal_requirements() -> bool:
-    """Check if all requirements for the terminal tool are met."""
+def _terminal_backend_ready() -> bool:
+    """Return True only if the *configured* terminal backend is ready to run
+    right now (SDK importable, daemon reachable, creds present, etc.)."""
     try:
         config = _get_env_config()
         env_type = config["env_type"]
@@ -2938,6 +3014,38 @@ def check_terminal_requirements() -> bool:
     except Exception as e:
         logger.error("Terminal requirements check failed: %s", e, exc_info=True)
         return False
+
+
+def check_terminal_requirements() -> bool:
+    """Gate for whether the terminal tool is offered to the model.
+
+    When the configured backend isn't ready we STILL keep the tool available
+    (return True) unless strict mode is set — _create_environment falls back to
+    local at runtime, so disabling the tool outright would leave the agent with
+    no shell at all. Only a broken *local* backend, or an explicit
+    terminal.strict_backend=true, disables the tool."""
+    try:
+        ready = _terminal_backend_ready()
+    except Exception as e:
+        logger.error("Terminal requirements check failed: %s", e, exc_info=True)
+        ready = False
+    if ready:
+        return True
+    if _strict_backend_enabled():
+        return False
+    try:
+        env_type = _get_env_config().get("env_type", "local")
+    except Exception:
+        env_type = "local"
+    if env_type == "local":
+        # Local itself failing is a real problem — don't mask it behind fallback.
+        return False
+    logger.warning(
+        "Terminal backend '%s' is not ready; keeping the terminal tool available "
+        "and falling back to local at runtime. Set terminal.strict_backend=true "
+        "to disable the tool instead.", env_type,
+    )
+    return True
 
 
 if __name__ == "__main__":
