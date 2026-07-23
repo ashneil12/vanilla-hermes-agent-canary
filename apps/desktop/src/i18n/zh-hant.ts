@@ -172,6 +172,15 @@ export const zhHant = defineLocale({
     message: reason => `軟體繪圖已啟用 — 偵測到遠端顯示（${reason}）。為防止畫面閃爍，已停用 GPU 加速。`
   },
 
+  billingBlock: {
+    titleNous: 'Nous 額度已用盡',
+    titleProvider: provider => `額度已用盡 — ${provider}`,
+    fallbackMessage: '您的帳戶額度已用盡。請儲值以繼續使用。',
+    openBilling: '開啟帳單',
+    addCredits: '新增額度',
+    dismiss: '忽略'
+  },
+
   titlebar: {
     hideSidebar: '隱藏側邊欄',
     showSidebar: '顯示側邊欄',
@@ -2371,7 +2380,10 @@ export const zhHant = defineLocale({
       placeholder: '輸入您的答案…',
       skip: '略過',
       skipped: '已略過',
-      continueLabel: '繼續'
+      continueLabel: '繼續',
+      lateAnswer: (question, choice) => `關於「${question}」 — 我的回答: ${choice}`,
+      lateAnswerTip: '將此回答起草為後續訊息',
+      lateAnswerHint: '此問題已不再等待回答。選擇一個選項會將其起草為後續訊息。'
     },
     tool: {
       code: '程式碼',

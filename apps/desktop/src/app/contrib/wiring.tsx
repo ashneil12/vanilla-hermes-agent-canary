@@ -29,11 +29,12 @@ import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChat
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
+import { $billingSettingsRequest } from '@/store/billing-block'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { $filePreviewTarget, $previewTarget } from '@/store/preview'
 import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '@/store/profile'
-import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '@/store/projects'
+import { $startWorkSessionRequest, followActiveSessionCwd } from '@/store/projects'
 import {
   $activeSessionId,
   $connection,
@@ -50,8 +51,6 @@ import {
   sessionPinId,
   setAwaitingResponse,
   setBusy,
-  setCurrentBranch,
-  setCurrentCwd,
   setCurrentModel,
   setCurrentModelSource,
   setCurrentProvider,
@@ -91,6 +90,7 @@ import { useRouteResume } from '../session/hooks/use-route-resume'
 import { useSessionActions } from '../session/hooks/use-session-actions'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
 import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
+import { startWorkspaceSession } from '../session/workspace-session-target'
 import { useOverlayRouting } from '../shell/hooks/use-overlay-routing'
 import { useWindowControlsOverlayWidth } from '../shell/hooks/use-window-controls-overlay-width'
 import { titlebarControlsPosition } from '../shell/titlebar'
@@ -129,6 +129,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
+  // Billing recovery routes to Settings → Billing from surfaces without router
+  // context (the sticky toast). The shell owns `navigate`, so it consumes the
+  // intent counter here; the ref skips the initial mount value.
+  const billingSettingsSeenRef = useRef(0)
   const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
@@ -136,7 +140,20 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
+  const billingSettingsRequest = useStore($billingSettingsRequest)
   const currentCwd = useStore($currentCwd)
+
+  useEffect(() => {
+    if (billingSettingsRequest === billingSettingsSeenRef.current) {
+      return
+    }
+
+    billingSettingsSeenRef.current = billingSettingsRequest
+
+    if (billingSettingsRequest > 0) {
+      navigate(`${SETTINGS_ROUTE}?tab=billing`)
+    }
+  }, [billingSettingsRequest, navigate])
   const freshDraftReady = useStore($freshDraftReady)
   const resumeFailedSessionId = useStore($resumeFailedSessionId)
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
@@ -239,10 +256,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     requestGateway
   })
 
-  const { refreshHermesConfig, sttEnabled, voiceMaxRecordingSeconds } = useHermesConfig({
-    activeSessionIdRef,
-    refreshProjectBranch
-  })
+  const { refreshHermesConfig, sttEnabled, voiceMaxRecordingSeconds } = useHermesConfig({ activeSessionIdRef })
 
   const { refreshCurrentModel, selectModel, updateModelOptionsCache } = useModelControls({
     queryClient,
@@ -453,33 +467,16 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // also drills the sidebar into that project so the new lane is visible.
   const startSessionInWorkspace = useCallback(
     (path: null | string) => {
-      startFreshSessionDraft()
-
-      // A worktree lane carries its own path; the trunk "+" can be path-less
-      // (the main checkout is implicit), so fall back to the active project's
-      // root instead of no-op'ing on null.
-      const target = path?.trim() || resolveNewSessionCwd()
-
-      if (!target) {
-        return
-      }
-
-      setCurrentCwd(target)
-      void requestGateway<{ branch?: string; cwd?: string }>('config.get', { key: 'project', cwd: target })
-        .then(info => {
-          const resolved = info.cwd || target
-
-          setCurrentCwd(resolved)
-          setCurrentBranch(info.branch || '')
-
-          if (path?.trim()) {
-            restoreWorktree(resolved)
-            void followActiveSessionCwd(resolved)
-          }
-        })
-        .catch(() => undefined)
+      startWorkspaceSession({
+        activeSessionIdRef,
+        followActiveSessionCwd,
+        onExplicitWorkspace: restoreWorktree,
+        path,
+        requestGateway,
+        startFreshSessionDraft
+      })
     },
-    [requestGateway, startFreshSessionDraft]
+    [activeSessionIdRef, requestGateway, startFreshSessionDraft]
   )
 
   // Composer "branch off into a new worktree": open a fresh session anchored
