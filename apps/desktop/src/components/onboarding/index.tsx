@@ -30,11 +30,19 @@ import {
 import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
 
 import { DocsLink, FlowPanel, Status } from './flow'
-import { FeaturedProviderRow, KeyProviderRow, ProviderRow, sortProviders } from './providers'
+import {
+  FeaturedProviderRow,
+  FireworksProviderRow,
+  OpenRouterProviderRow,
+  ProviderRow,
+  sortProviders
+} from './providers'
 
 export {
   FeaturedProviderRow,
+  FireworksProviderRow,
   KeyProviderRow,
+  OpenRouterProviderRow,
   ProviderRow,
   providerTitle,
   sortProviders
@@ -43,6 +51,7 @@ export {
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
   onCompleted?: () => void
+  profile: string
   requestGateway: OnboardingContext['requestGateway']
 }
 
@@ -56,6 +65,8 @@ export interface ApiKeyOption {
   short?: string
 }
 
+// Curated order mirrors CANONICAL_PROVIDERS: Fireworks sits #2 overall (after
+// Nous Portal OAuth), ahead of OpenRouter and the rest of the key catalog.
 const API_KEY_OPTIONS: ApiKeyOption[] = [
   // HermesOS: Venice leads the picker — the recommended provider. With managed
   // Venice, the key is injected for you (no paste needed); self-serve users can
@@ -69,16 +80,16 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
     docsUrl: 'https://venice.ai/settings/api'
   },
   {
-    id: 'openrouter',
-    name: 'OpenRouter',
-    envKey: 'OPENROUTER_API_KEY',
-    docsUrl: 'https://openrouter.ai/keys'
-  },
-  {
     id: 'fireworks',
     name: 'Fireworks AI',
     envKey: 'FIREWORKS_API_KEY',
     docsUrl: 'https://app.fireworks.ai/settings/users/api-keys'
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    envKey: 'OPENROUTER_API_KEY',
+    docsUrl: 'https://openrouter.ai/keys'
   },
   {
     id: 'openai',
@@ -180,17 +191,25 @@ function useApiKeyCatalog(): ApiKeyOption[] {
 // → surface-out (520ms, held back by [transition-delay:660ms]). Finalize after.
 const ONBOARDING_EXIT_MS = 1180
 
-export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway }: DesktopOnboardingOverlayProps) {
+export function DesktopOnboardingOverlay({
+  enabled,
+  onCompleted,
+  profile,
+  requestGateway
+}: DesktopOnboardingOverlayProps) {
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
-  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted })
-  ctxRef.current = { requestGateway, onCompleted }
+  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted, profile })
+  ctxRef.current = { requestGateway, onCompleted, profile }
 
   const ctx = useMemo<OnboardingContext>(
     () => ({
       requestGateway: (...args) => ctxRef.current.requestGateway(...args),
-      onCompleted: () => ctxRef.current.onCompleted?.()
+      onCompleted: () => ctxRef.current.onCompleted?.(),
+      get profile() {
+        return ctxRef.current.profile
+      }
     }),
     []
   )
@@ -423,10 +442,12 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   // Which key-form option to preselect when we flip to 'apikey' mode. The
   // OpenRouter row selects its key; the generic link lands on the first option.
   const [apiKeyInitialEnv, setApiKeyInitialEnv] = useState<string | undefined>(undefined)
+
   const openKeyForm = (envKey?: string) => {
     setApiKeyInitialEnv(envKey)
     setOnboardingMode('apikey')
   }
+
   const ordered = useMemo(() => (providers ? sortProviders(providers) : []), [providers])
   const hasOauth = ordered.length > 0
   const apiKeyOptions = useApiKeyCatalog()
@@ -471,12 +492,14 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
         <VeniceRecommendedCard onWantApiKey={() => setOnboardingMode('apikey')} />
         {featured ? <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} /> : null}
+        {/* Slot #2 — always visible, matching CANONICAL_PROVIDERS (Nous → Fireworks). */}
+        <FireworksProviderRow onClick={() => openKeyForm('FIREWORKS_API_KEY')} />
         {showRest ? (
           <>
             {rest.map(p => (
               <ProviderRow key={p.id} onSelect={select} provider={p} />
             ))}
-            <KeyProviderRow onClick={() => openKeyForm('OPENROUTER_API_KEY')} />
+            <OpenRouterProviderRow onClick={() => openKeyForm('OPENROUTER_API_KEY')} />
           </>
         ) : null}
       </div>
@@ -497,13 +520,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
             In manual mode the overlay already has a close affordance, so the
             "choose later" escape would be redundant — hide it. */}
         {manual ? <span /> : <ChooseLaterLink />}
-        <Button
-          className="-mr-2 font-medium"
-          onClick={() => openKeyForm()}
-          size="xs"
-          type="button"
-          variant="text"
-        >
+        <Button className="-mr-2 font-medium" onClick={() => openKeyForm()} size="xs" type="button" variant="text">
           {t.onboarding.haveApiKey}
         </Button>
       </div>
@@ -545,10 +562,12 @@ export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => vo
 
   useEffect(() => {
     let cancelled = false
+
     void (async () => {
       try {
         const s = await getStatus()
-        if (!cancelled) setDashboardUrl(s.dashboard_url ?? null)
+
+        if (!cancelled) {setDashboardUrl(s.dashboard_url ?? null)}
       } catch {
         /* status unavailable — leave null; click falls back to the API-key path */
       }
