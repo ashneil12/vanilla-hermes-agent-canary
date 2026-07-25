@@ -1,0 +1,5 @@
+name: opengateway-provider
+kind: model-provider
+version: 1.0.0
+description: OpenGateway (gitlawb's open OpenAI-compatible LLM gateway)
+author: HermesOS

@@ -70,6 +70,16 @@ export const PROVIDER_GROUPS: ProviderPrefix[] = [
     docsUrl: 'https://bankr.bot',
     priority: 1
   },
+  // HermesOS: OpenGateway — gitlawb's open, OpenAI-compatible LLM gateway. Any
+  // token works while the partnership window is open. The
+  // ``plugins/model-providers/opengateway`` profile auto-wires model discovery.
+  {
+    prefix: 'OPENGATEWAY_',
+    name: 'OpenGateway',
+    description: "gitlawb's open OpenAI-compatible LLM gateway — any token works",
+    docsUrl: 'https://opengateway.gitlawb.com',
+    priority: 1
+  },
   {
     prefix: 'NOUS_',
     name: 'Nous Portal',
