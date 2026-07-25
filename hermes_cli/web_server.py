@@ -19875,7 +19875,7 @@ if _WEBCHAT_DIST.exists() and (_WEBCHAT_DIST / "index.html").exists():
 
     def _serve_webchat_index(request: Request) -> HTMLResponse:
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        html = _webchat_index_path.read_text()
+        html = _webchat_index_path.read_text(encoding="utf-8")
         gated = bool(getattr(app.state, "auth_required", False))
         token_js = "" if gated else f'window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
         boot = (
