@@ -342,19 +342,17 @@ function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>)
   )
 }
 
-// Plain markdown images. Remote / data / blob URLs go straight to <img>. A bare
-// gateway path — the form a model instinctively writes, e.g.
-// ![preview](/workspace/shot.png) — is routed through MediaAttachment so it
-// resolves over the gateway (GET /api/media → data URL) instead of 404-ing as a
-// raw <img src="/workspace/...">. This makes plain `![](path)` behave like the
-// MEDIA: token, so the agent doesn't have to know the convention to show an image.
-function MarkdownImageOrMedia({ src, alt, ...props }: ComponentProps<'img'>) {
-  if (typeof src === 'string' && src && !/^(?:https?|data|blob):/i.test(src)) {
-    return <MediaAttachment path={src} />
-  }
-
-  return <MarkdownImage alt={alt} src={src} {...props} />
-}
+// hermes-fork note (2026-07-25 upstream sync): the fork used to wrap `img` in a
+// `MarkdownImageOrMedia` shim that diverted any bare gateway path (the form a
+// model instinctively writes, e.g. `![preview](/workspace/shot.png)`) into
+// MediaAttachment, so it resolved over the gateway instead of 404-ing as a raw
+// <img src="/workspace/...">. Upstream now does exactly that inside
+// MarkdownImage itself: non-inline srcs go through resolveMediaDisplaySrc(),
+// which hits the gateway bridge (/api/fs/read-data-url) in remote mode and
+// renders a real ZoomableImage, with an "Open image" fallback on failure. The
+// shim is therefore obsolete AND harmful — it intercepted bare paths before
+// MarkdownImage could resolve them and rendered a link instead of the image.
+// Do not reintroduce it; `img: MarkdownImage` is the fork's intent, upstreamed.
 
 interface MarkdownTextSurfaceProps {
   containerClassName?: string
@@ -512,8 +510,7 @@ function MarkdownTextSurface({ containerClassName, containerProps, defer }: Mark
         td: ({ className, ...props }: ComponentProps<'td'>) => (
           <td className={cn('px-2.5 py-1.5 align-top text-[0.8125rem] leading-snug', className)} {...props} />
         ),
-        // hermes-fork: route images through MarkdownImageOrMedia (Venice media-aware renderer)
-        img: MarkdownImageOrMedia,
+        img: MarkdownImage,
         // ```mermaid / ```svg fences route to their lazy renderers; every other
         // language falls back to the Shiki-highlighted code block.
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => (

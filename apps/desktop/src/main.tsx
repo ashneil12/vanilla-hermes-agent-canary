@@ -1,7 +1,6 @@
 // Install the hosted-web `window.hermesDesktop` bridge before anything reads
 // it. No-op under Electron (preload already defined the global).
 import './lib/web-shim'
-
 import './styles.css'
 // Side-effect: applies the persisted window translucency on load.
 import './store/translucency'
