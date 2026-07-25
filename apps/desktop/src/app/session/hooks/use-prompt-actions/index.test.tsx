@@ -3,6 +3,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { getSession } from '@/hermes'
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $notifications, clearNotifications } from '@/store/notifications'
@@ -25,6 +26,7 @@ import { uploadComposerAttachment, usePromptActions } from '.'
 
 vi.mock('@/hermes', () => ({
   getProfiles: vi.fn(async () => ({ profiles: [] })),
+  getSession: vi.fn(),
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_800_000,
   setApiRequestProfile: vi.fn(),
   transcribeAudio: vi.fn()
@@ -1448,7 +1450,8 @@ describe('usePromptActions restoreToMessage', () => {
       {
         session_id: RUNTIME_SESSION_ID,
         text: 'first prompt',
-        truncate_before_user_ordinal: 0
+        truncate_before_user_ordinal: 0,
+        confirm_empty_truncate: true
       },
       1_800_000
     )
@@ -1515,7 +1518,8 @@ describe('usePromptActions restoreToMessage', () => {
       {
         session_id: RUNTIME_SESSION_ID,
         text: 'first prompt',
-        truncate_before_user_ordinal: 0
+        truncate_before_user_ordinal: 0,
+        confirm_empty_truncate: true
       },
       1_800_000
     )
@@ -1560,7 +1564,8 @@ describe('usePromptActions restoreToMessage', () => {
       {
         session_id: RUNTIME_SESSION_ID,
         text: 'first prompt',
-        truncate_before_user_ordinal: 0
+        truncate_before_user_ordinal: 0,
+        confirm_empty_truncate: true
       },
       1_800_000
     )
@@ -1832,6 +1837,99 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
     expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
     expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
+  })
+
+  // #67603 (second symptom): a recovery resume must re-register on the session's
+  // OWNING profile. Resuming on whichever profile is live forks the conversation
+  // into the wrong profile's DB — the session then appears under both profiles.
+  it('carries the owning profile from the cache into the recovery resume', async () => {
+    setSessions(() => [sessionInfo({ id: STORED_SESSION_ID, profile: 'work' })])
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: RECOVERED_SESSION_ID } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await handle!.submitText('message after wake')).toBe(true)
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop', profile: 'work' })
+
+    setSessions(() => [])
+  })
+
+  // The session lives on another profile and is outside the paginated sidebar
+  // cache: resolve it by id across profiles rather than resuming profile-blind.
+  it('resolves the owning profile across profiles when the session is not cached', async () => {
+    // module-factory vi.fn is not reset by restoreAllMocks — reset explicitly in
+    // the finally below so this resolved value never leaks into sibling tests.
+    setSessions(() => [])
+    vi.mocked(getSession).mockResolvedValue(sessionInfo({ id: STORED_SESSION_ID, profile: 'work' }))
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: RECOVERED_SESSION_ID } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await handle!.submitText('message after wake')).toBe(true)
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop', profile: 'work' })
+
+    vi.mocked(getSession).mockReset()
+    setSessions(() => [])
   })
 
   it('background queue resume uses the queued stored id and leaves foreground runtime selected', async () => {
@@ -2360,6 +2458,7 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    setSessions(() => [])
   })
 
   it('aborts submit when the user switches sessions during session.resume (no misroute)', async () => {
@@ -2415,6 +2514,100 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
       session_id: STORED_SESSION_A,
       source: 'desktop'
     })
+  })
+
+  it('does not false-positive-abort when the session has rotated via compression (lineage root vs tip)', async () => {
+    // The composer keys drafts/attachments on the DURABLE lineage root
+    // (resolveComposerSessionKey / sessionPinId — survives auto-compression
+    // tip rotation), but selectedStoredSessionIdRef tracks the CURRENT TIP.
+    // For any session that has compressed at least once, root !== tip — if
+    // composerScope is compared against the raw tip, every legitimate submit
+    // into that session would look like drift.
+    const ROOT_ID = 'stored-root-original'
+    const TIP_ID = 'stored-tip-after-compression'
+
+    setSessions(() => [sessionInfo({ id: TIP_ID, _lineage_root_id: ROOT_ID })])
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={TIP_ID}
+      />
+    )
+
+    // The composer's scope is the lineage root (what resolveComposerSessionKey
+    // actually returns for this session) — a legitimate, non-drifted submit.
+    const ok = await handle!.submitText('message into the rotated session', { composerScope: ROOT_ID })
+
+    expect(ok).toBe(true)
+    expect(calls.some(c => c.method === 'prompt.submit')).toBe(true)
+  })
+
+  it('aborts submit when the composer scope disagrees with the resolved target (#59305)', async () => {
+    // The composer (ChatBar) and the session-side refs live in separate React
+    // subtrees; each can be internally consistent yet still disagree with each
+    // other at the instant of send if the two updated on different commits.
+    // composerScope carries the composer's own snapshot of "what session was
+    // loaded" into submit.ts, which must refuse to send when it disagrees with
+    // the session the submit is actually about to target.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_A}
+      />
+    )
+
+    const ok = await handle!.submitText('typed while B was on screen', { composerScope: STORED_SESSION_B })
+
+    expect(ok).toBe(false)
+    expect(calls.some(c => c.method === 'prompt.submit')).toBe(false)
+  })
+
+  it('submits normally when the composer scope agrees with the resolved target', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_A}
+      />
+    )
+
+    const ok = await handle!.submitText('typed while A was on screen', { composerScope: STORED_SESSION_A })
+
+    expect(ok).toBe(true)
+    expect(calls.some(c => c.method === 'prompt.submit')).toBe(true)
   })
 
   it('aborts recovery submit when the user switches sessions during timeout resume', async () => {
