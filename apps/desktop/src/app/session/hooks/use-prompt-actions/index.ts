@@ -43,6 +43,7 @@ import type {
   ImageAttachResponse,
   SessionRedirectResponse
 } from '../../../types'
+import { resolveSessionProfile } from '../use-session-actions/utils'
 
 import {
   applyBranchVisibility,
@@ -52,7 +53,8 @@ import {
   planEdit,
   planReload,
   planRestore,
-  runRewindSubmit
+  runRewindSubmit,
+  truncateSubmitParams
 } from './rewind'
 import { useSlashCommand } from './slash'
 import { useSubmitPrompt } from './submit'
@@ -609,9 +611,12 @@ export function usePromptActions({
 
       if (isSessionNotFoundError(err) && selectedStoredSessionIdRef.current) {
         try {
+          const resumeProfile = await resolveSessionProfile(selectedStoredSessionIdRef.current)
+
           const resumed = await requestGateway<{ session_id: string }>('session.resume', {
             session_id: selectedStoredSessionIdRef.current,
-            source: 'desktop'
+            source: 'desktop',
+            ...(resumeProfile ? { profile: resumeProfile } : {})
           })
 
           const recoveredId = resumed?.session_id
@@ -708,9 +713,12 @@ export function usePromptActions({
         // correction right after a reconnect isn't lost to the race.
         if (isSessionNotFoundError(err) && selectedStoredSessionIdRef.current) {
           try {
+            const resumeProfile = await resolveSessionProfile(selectedStoredSessionIdRef.current)
+
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
               session_id: selectedStoredSessionIdRef.current,
-              source: 'desktop'
+              source: 'desktop',
+              ...(resumeProfile ? { profile: resumeProfile } : {})
             })
 
             const recoveredId = resumed?.session_id
@@ -757,7 +765,11 @@ export function usePromptActions({
       try {
         await requestGateway(
           'prompt.submit',
-          { session_id: activeSessionId, text: plan.text, truncate_before_user_ordinal: plan.truncateOrdinal },
+          {
+            session_id: activeSessionId,
+            text: plan.text,
+            ...truncateSubmitParams(plan.truncateOrdinal)
+          },
           PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
         )
       } catch (err) {

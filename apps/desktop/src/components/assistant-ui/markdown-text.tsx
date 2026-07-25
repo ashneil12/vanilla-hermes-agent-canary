@@ -20,14 +20,14 @@ import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
 import {
   downloadGatewayMediaFile,
-  filePathFromMediaPath,
-  gatewayMediaDataUrl,
+  isInlineMediaSrc,
   isRemoteGateway,
   mediaExternalUrl,
   mediaKind,
   mediaName,
   mediaPathFromMarkdownHref,
-  mediaStreamUrl
+  mediaStreamUrl,
+  resolveMediaDisplaySrc
 } from '@/lib/media'
 import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { cn } from '@/lib/utils'
@@ -60,27 +60,13 @@ function preprocessWithTailRepair(text: string): string {
 }
 
 async function mediaSrc(path: string): Promise<string> {
-  if (/^(?:https?|data):/i.test(path)) {
-    return path
-  }
-
   // Stream audio/video through the custom protocol: data URLs are capped and
   // load the whole file into memory, which broke playback for larger videos.
   if (window.hermesDesktop && ['audio', 'video'].includes(mediaKind(path))) {
     return mediaStreamUrl(path)
   }
 
-  // Remote gateway: the image lives on the gateway machine, so read it over the
-  // authenticated API rather than this machine's disk.
-  if (window.hermesDesktop && isRemoteGateway()) {
-    return gatewayMediaDataUrl(path)
-  }
-
-  if (!window.hermesDesktop?.readFileDataUrl) {
-    return mediaExternalUrl(path)
-  }
-
-  return window.hermesDesktop.readFileDataUrl(filePathFromMediaPath(path))
+  return resolveMediaDisplaySrc(path)
 }
 
 function useOpenMediaFile(path: string) {
@@ -282,6 +268,65 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
 }
 
 function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>) {
+  const rawSrc = typeof src === 'string' ? src : ''
+  const [resolvedSrc, setResolvedSrc] = useState(() => (rawSrc && isInlineMediaSrc(rawSrc) ? rawSrc : ''))
+  const [failed, setFailed] = useState(false)
+  const { open, openFailed } = useOpenMediaFile(rawSrc)
+  const name = mediaName(rawSrc || String(alt || 'image'))
+
+  useEffect(() => {
+    let cancelled = false
+
+    setFailed(false)
+    setResolvedSrc(rawSrc && isInlineMediaSrc(rawSrc) ? rawSrc : '')
+
+    if (!rawSrc || isInlineMediaSrc(rawSrc)) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void resolveMediaDisplaySrc(rawSrc)
+      .then(value => {
+        if (!cancelled) {
+          setResolvedSrc(value)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFailed(true)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [rawSrc])
+
+  if (!rawSrc) {
+    return null
+  }
+
+  if (failed) {
+    return (
+      <span className="my-2 block text-sm text-muted-foreground">
+        Couldn&apos;t load {name}.{' '}
+        <button
+          className="bg-transparent font-medium text-foreground underline underline-offset-4 decoration-current/20 hover:text-foreground"
+          onClick={open}
+          type="button"
+        >
+          Open image
+        </button>
+        {openFailed && <OpenMediaFailedNote name={name} />}
+      </span>
+    )
+  }
+
+  if (!resolvedSrc) {
+    return <span className="my-2 block text-sm text-muted-foreground">Loading {name}...</span>
+  }
+
   return (
     <ZoomableImage
       alt={alt}
@@ -291,25 +336,23 @@ function MarkdownImage({ className, src, alt, ...props }: ComponentProps<'img'>)
       )}
       containerClassName="my-2 block w-fit max-w-full"
       slot="aui_markdown-image"
-      src={src}
+      src={resolvedSrc}
       {...props}
     />
   )
 }
 
-// Plain markdown images. Remote / data / blob URLs go straight to <img>. A bare
-// gateway path — the form a model instinctively writes, e.g.
-// ![preview](/workspace/shot.png) — is routed through MediaAttachment so it
-// resolves over the gateway (GET /api/media → data URL) instead of 404-ing as a
-// raw <img src="/workspace/...">. This makes plain `![](path)` behave like the
-// MEDIA: token, so the agent doesn't have to know the convention to show an image.
-function MarkdownImageOrMedia({ src, alt, ...props }: ComponentProps<'img'>) {
-  if (typeof src === 'string' && src && !/^(?:https?|data|blob):/i.test(src)) {
-    return <MediaAttachment path={src} />
-  }
-
-  return <MarkdownImage alt={alt} src={src} {...props} />
-}
+// hermes-fork note (2026-07-25 upstream sync): the fork used to wrap `img` in a
+// `MarkdownImageOrMedia` shim that diverted any bare gateway path (the form a
+// model instinctively writes, e.g. `![preview](/workspace/shot.png)`) into
+// MediaAttachment, so it resolved over the gateway instead of 404-ing as a raw
+// <img src="/workspace/...">. Upstream now does exactly that inside
+// MarkdownImage itself: non-inline srcs go through resolveMediaDisplaySrc(),
+// which hits the gateway bridge (/api/fs/read-data-url) in remote mode and
+// renders a real ZoomableImage, with an "Open image" fallback on failure. The
+// shim is therefore obsolete AND harmful — it intercepted bare paths before
+// MarkdownImage could resolve them and rendered a link instead of the image.
+// Do not reintroduce it; `img: MarkdownImage` is the fork's intent, upstreamed.
 
 interface MarkdownTextSurfaceProps {
   containerClassName?: string
@@ -467,8 +510,7 @@ function MarkdownTextSurface({ containerClassName, containerProps, defer }: Mark
         td: ({ className, ...props }: ComponentProps<'td'>) => (
           <td className={cn('px-2.5 py-1.5 align-top text-[0.8125rem] leading-snug', className)} {...props} />
         ),
-        // hermes-fork: route images through MarkdownImageOrMedia (Venice media-aware renderer)
-        img: MarkdownImageOrMedia,
+        img: MarkdownImage,
         // ```mermaid / ```svg fences route to their lazy renderers; every other
         // language falls back to the Shiki-highlighted code block.
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => (
