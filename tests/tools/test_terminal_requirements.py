@@ -284,6 +284,9 @@ def test_create_environment_never_masks_local_failure(monkeypatch):
         )
 def test_vercel_backend_without_sdk_logs_specific_error(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
+    # hermes-fork: never-brick default keeps the tool; strict mode is where
+    # upstream's "requirements not met" contract applies.
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: None)
 
@@ -299,6 +302,7 @@ def test_vercel_backend_without_sdk_logs_specific_error(monkeypatch, caplog):
 
 def test_vercel_backend_without_auth_logs_specific_error(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")  # hermes-fork: see above
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
 
@@ -355,6 +359,7 @@ def test_vercel_backend_accepts_blank_runtime(monkeypatch):
 
 def test_vercel_backend_rejects_unsupported_runtime(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")  # hermes-fork: see above
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node20")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
@@ -373,6 +378,7 @@ def test_vercel_backend_rejects_unsupported_runtime(monkeypatch, caplog):
 
 def test_vercel_backend_rejects_nondefault_disk(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")  # hermes-fork: see above
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "8192")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")

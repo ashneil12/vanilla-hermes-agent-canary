@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { DesktopUpdateStatus } from '@/global'
+
 const storage = new Map<string, string>()
 
 vi.mock('@/lib/storage', () => ({
@@ -63,7 +65,31 @@ const {
 
 const { setConnection } = await import('./session')
 
+// hermes-fork: shared fixtures kept from upstream. The
+// maybeNotifyUpdateAvailable suite they also served is intentionally NOT
+// taken (the fork removed the proactive update toast — managed-only), but
+// these helpers are used by the backend-update and poller suites below.
+const status = (over: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStatus => ({
+  supported: true,
+  behind: 3,
+  targetSha: 'sha-a',
+  fetchedAt: 0,
+  ...over
+})
+
 const lastToast = () => notifySpy.mock.calls.at(-1)?.[0] as { onDismiss: () => void }
+
+const setRemote = (on: boolean) =>
+  setConnection({
+    baseUrl: 'http://box:9119',
+    isFullscreen: false,
+    mode: on ? 'remote' : 'local',
+    nativeOverlayWidth: 0,
+    token: 't',
+    wsUrl: 'ws://box:9119',
+    logs: [],
+    windowButtonPosition: null
+  })
 
 describe('reportBackendContract', () => {
   beforeEach(() => {
