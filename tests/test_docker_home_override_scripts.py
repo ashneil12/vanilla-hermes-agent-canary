@@ -84,10 +84,13 @@ def test_stage2_hook_repairs_profiles_and_cron_ownership_on_every_boot() -> None
     """profiles/ and cron/ must both be reclaimed after root-context writes."""
     text = STAGE2_HOOK.read_text(encoding="utf-8")
 
-    assert 'if [ -d "$HERMES_HOME/profiles" ]; then' in text
+    # hermes-fork: upstream gated the recursive walk behind
+    # tree_has_non_hermes_owner (skip when already correct). Still
+    # every-boot, so assert the guard rather than the exact old line.
+    assert 'if [ -d "$HERMES_HOME/profiles" ]' in text
     assert 'chown_hermes_tree "$HERMES_HOME/profiles"' in text
     assert 'chown -R hermes:hermes "$HERMES_HOME/profiles" 2>/dev/null || true' not in text
 
-    assert 'if [ -d "$HERMES_HOME/cron" ]; then' in text
+    assert 'if [ -d "$HERMES_HOME/cron" ]' in text
     assert 'chown_hermes_tree "$HERMES_HOME/cron"' in text
     assert 'chown -R hermes:hermes "$HERMES_HOME/cron" 2>/dev/null || true' not in text

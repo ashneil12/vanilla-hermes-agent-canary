@@ -103,9 +103,8 @@ CONFIGURABLE_TOOLSETS = [
     ("vision",          "👁️  Vision / Image Analysis",  "vision_analyze"),
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
-    ("video_gen",       "🎬 Video Generation",          "video_generate (text-to-video + image-to-video)"),
-    ("crypto",          "⛓️  On-Chain (read-only)",     "crypto_rpc — read EVM/other chains via Venice RPC (balances, blocks, eth_call)"),
     ("video_gen",       "🎬 Video Generation",          "video_generate (text/image/reference)"),
+    ("crypto",          "⛓️  On-Chain (read-only)",     "crypto_rpc — read EVM/other chains via Venice RPC (balances, blocks, eth_call)"),
     ("bfl",             "🎬 BFL FLUX 3 Video",          "bfl_flux3_*"),
     ("x_search",        "🐦 X (Twitter) Search",        "x_search (requires xAI OAuth or XAI_API_KEY)"),
     # hermes-fork: keep moa in the tools checklist (upstream merge dropped it 2026-06-27)
@@ -165,9 +164,10 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-# hermes-fork: union — keep fork "moa" toolset off-by-default + upstream's "video_gen"
-_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
+# hermes-fork: union — keep the fork's "moa" off-by-default alongside
+# upstream's "video_gen" and "a2a". ONE assignment: a second one would
+# silently clobber the first.
+_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
 
 
 # Config-only capabilities: they appear in `hermes tools` for provider/API-key

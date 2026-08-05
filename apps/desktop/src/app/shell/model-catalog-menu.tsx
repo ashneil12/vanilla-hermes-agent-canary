@@ -532,6 +532,14 @@ function groupModels(
   const groups: ProviderGroup[] = []
 
   for (const provider of providers) {
+    // hermes-fork: skip providers the box has no usable credentials for —
+    // selecting one would persist a dead provider into config.yaml and
+    // brick new sessions at agent init. They stay reachable via the full
+    // model picker ("Add provider").
+    if (provider.authenticated === false) {
+      continue
+    }
+
     const allFamilies = collapseModelFamilies(provider.models ?? [])
 
     if (allFamilies.length === 0) {

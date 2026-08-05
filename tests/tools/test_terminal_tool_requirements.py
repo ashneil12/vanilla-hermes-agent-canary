@@ -315,6 +315,10 @@ class TestCheckFnTransientFailureSuppression:
         assert "execute_code" in names
 
     def test_terminal_and_execute_code_tools_hide_for_unsupported_vercel_runtime(self, monkeypatch):
+        # hermes-fork: the fork never-bricks the shell — a broken non-local
+        # backend keeps the tool and falls back to local at runtime. Strict
+        # mode is where upstream's hide-the-tool contract applies.
+        monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
         monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
         monkeypatch.setattr(
             terminal_tool_module,
@@ -337,6 +341,9 @@ class TestCheckFnTransientFailureSuppression:
         assert "execute_code" not in names
 
     def test_terminal_and_execute_code_tools_hide_for_vercel_without_auth(self, monkeypatch):
+        # hermes-fork: see the sibling test — strict mode is where the
+        # hide-the-tool contract applies for this fork.
+        monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
         monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
         monkeypatch.delenv("VERCEL_TOKEN", raising=False)
         monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
