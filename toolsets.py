@@ -34,9 +34,10 @@ _HERMES_CORE_TOOLS = [
     # Terminal + process management
     "terminal", "process",
     # Desktop GUI affordances: read the embedded terminal pane, close an agent's
-    # read-only terminal tab, open a URL/file in the preview pane, and focus a
-    # pane (all gated on HERMES_DESKTOP via check_fn — hidden outside the GUI).
-    "read_terminal", "close_terminal", "open_preview", "focus_pane",
+    # read-only terminal tab, open a URL/file in the preview pane, focus a
+    # pane, and react to a message with an emoji (all gated on HERMES_DESKTOP
+    # via check_fn — hidden outside the GUI).
+    "read_terminal", "close_terminal", "open_preview", "focus_pane", "react_to_message",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation + multimodal editing
@@ -67,6 +68,10 @@ _HERMES_CORE_TOOLS = [
     # ``toolset="config"`` — needs to be in core so the resolver's recovery
     # loop treats the toolset as a subset of the platform composite.
     "multimodal_set_model", "multimodal_get_settings",
+    # BFL FLUX 3 video generation
+    "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
+    "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",
+    "bfl_flux3_get_result", "bfl_flux3_prompting_guide",
     # Skills
     "skills_list", "skill_view", "skill_manage",
     # Browser automation
@@ -192,6 +197,25 @@ TOOLSETS = {
             "auto-routes. Configure via ``hermes tools`` → Video Generation."
         ),
         "tools": ["video_generate", "audio_generate", "audio_quote", "video_quote", "xai_video_edit", "xai_video_extend"],
+        "includes": []
+    },
+
+    "bfl": {
+        "description": (
+            "Black Forest Labs FLUX 3 video generation through the Nous tool "
+            "gateway: per-mode submit tools (text, image, keyframes, "
+            "continuation), a poll tool, and a prompting guide. Generations "
+            "take minutes, so submit returns a job id and the model polls for "
+            "the result."
+        ),
+        "tools": [
+            "bfl_flux3_text_to_video",
+            "bfl_flux3_image_to_video",
+            "bfl_flux3_keyframes_to_video",
+            "bfl_flux3_video_continuation",
+            "bfl_flux3_get_result",
+            "bfl_flux3_prompting_guide",
+        ],
         "includes": []
     },
 
@@ -488,6 +512,10 @@ TOOLSETS = {
             "read_file", "write_file", "patch", "search_files",
             # Vision + image generation
             "vision_analyze", "image_generate",
+            # BFL FLUX 3 video generation
+            "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
+            "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",
+            "bfl_flux3_get_result", "bfl_flux3_prompting_guide",
             # Skills
             "skills_list", "skill_view", "skill_manage",
             # Browser automation

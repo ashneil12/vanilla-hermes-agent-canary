@@ -68,8 +68,15 @@ def test_entrypoint_still_init_not_tini():
     The shim is for legacy external wrappers, not for the image's own
     runtime — that path must continue to use the canonical /init."""
     df = _dockerfile_text()
-    assert 'ENTRYPOINT [ "/init"' in df, (
-        "Dockerfile ENTRYPOINT must remain /init (s6-overlay). The "
+    # hermes-fork: upstream moved ENTRYPOINT to entrypoint-dispatch.sh,
+    # which execs /init when it is PID 1 (docker/entrypoint-dispatch.sh),
+    # so s6-overlay still owns the supervision tree. The guard that
+    # matters — the tini shim is NOT the runtime entrypoint — is kept.
+    assert 'ENTRYPOINT [ "/opt/hermes/docker/entrypoint-dispatch.sh" ]' in df, (
+        "Dockerfile ENTRYPOINT must remain the s6-overlay dispatcher. The "
         "tini shim is only for external wrappers that haven't been "
         "updated yet."
+    )
+    assert 'ENTRYPOINT [ "/usr/bin/tini"' not in df, (
+        "The tini compat shim must never become the image ENTRYPOINT."
     )
