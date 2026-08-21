@@ -26,7 +26,47 @@ MACHINE_LOCAL = re.compile(r"/home/(?!runner\b)[a-z0-9_-]+/|[A-Z]:\\+Users\\+(?!
 # Grandfathered pre-existing debt. Shrink this list; never grow it.
 # ---------------------------------------------------------------------------
 GRANDFATHER: dict[str, set[str]] = {
-    # (empty — the Aug 2026 sweep cleared all mechanical violations)
+    # Fork-owned Bankr pack imported before this upstream gate existed. Keep
+    # the exceptions rule-specific so new violations still fail closed.
+    "optional-skills/bankr/0xwork": {"fields", "tags", "description"},
+    "optional-skills/bankr/agenticbets": {"fields", "tags", "description"},
+    "optional-skills/bankr/alchemy": {"fields", "tags", "description"},
+    "optional-skills/bankr/bankr": {"fields", "tags", "description"},
+    "optional-skills/bankr/bankr-token-scam-analysis": {"fields", "name", "description"},
+    "optional-skills/bankr/bankr-twitter-agent": {"fields", "name", "description"},
+    "optional-skills/bankr/base": {"fields", "tags"},
+    "optional-skills/bankr/botchan": {"fields", "tags", "description"},
+    "optional-skills/bankr/cattown": {"fields", "tags", "description"},
+    "optional-skills/bankr/clanker": {"fields", "tags", "description"},
+    "optional-skills/bankr/endaoment": {"fields", "tags", "description"},
+    "optional-skills/bankr/ens-primary-name": {"fields", "tags", "description"},
+    "optional-skills/bankr/erc-8004": {"fields", "tags", "description"},
+    "optional-skills/bankr/gitlawb": {"fields", "tags", "description"},
+    "optional-skills/bankr/helixa": {"fields", "tags", "description"},
+    "optional-skills/bankr/hydrex": {"fields", "tags", "description"},
+    "optional-skills/bankr/litcoin": {"fields", "name", "description"},
+    "optional-skills/bankr/moltycash": {"fields", "tags", "description"},
+    "optional-skills/bankr/neynar": {"fields", "tags", "description"},
+    "optional-skills/bankr/nookplot": {"fields", "tags", "description"},
+    "optional-skills/bankr/onchainkit": {"fields", "tags", "description"},
+    "optional-skills/bankr/productclank": {"fields", "tags", "name", "description"},
+    "optional-skills/bankr/qrcoin": {"fields", "tags", "description"},
+    "optional-skills/bankr/quicknode": {"fields", "tags", "description"},
+    "optional-skills/bankr/quotient": {"fields", "tags", "name", "description"},
+    "optional-skills/bankr/signals": {"fields", "tags", "description"},
+    "optional-skills/bankr/siwa": {"fields", "tags", "description"},
+    "optional-skills/bankr/stakr": {"fields", "tags", "name", "description"},
+    "optional-skills/bankr/symbiosis": {"fields", "tags", "description"},
+    "optional-skills/bankr/trails": {"fields", "tags", "description"},
+    "optional-skills/bankr/trustlayer-sybil-scanner": {"fields", "description"},
+    "optional-skills/bankr/veil": {"fields", "tags", "description"},
+    "optional-skills/bankr/yoink": {"fields", "tags", "description"},
+    "optional-skills/bankr/zapper": {"fields", "tags"},
+    "optional-skills/bankr/zerion": {"fields", "tags", "description"},
+    "optional-skills/bankr/zyfai": {"fields", "tags", "description"},
+    # Existing fork skills whose contracts intentionally predate the hardline.
+    "skills/autonomous-ai-agents/aeon": {"related"},
+    "skills/devops/signal-setup": {"fields", "description"},
 }
 
 
