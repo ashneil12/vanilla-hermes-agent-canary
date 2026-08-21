@@ -131,12 +131,12 @@ import { TitlebarControls } from '../shell/titlebar-controls'
 import { UpdatesOverlay } from '../updates-overlay'
 
 import { ContribWiringContext } from './context'
-import { useBackgroundSync } from './hooks/use-background-sync'
-import { useDashboardBridge } from './hooks/use-dashboard-bridge'
 import {
   reconcileActiveTranscript,
-  resolveActiveTranscriptSession
+  resolveActiveTranscriptSession,
+  useBackgroundSync
 } from './hooks/use-background-sync'
+import { useDashboardBridge } from './hooks/use-dashboard-bridge'
 import { useDesktopIntegrations } from './hooks/use-desktop-integrations'
 import { usePetBridge } from './hooks/use-pet-bridge'
 import { useQuickEntryBridge } from './hooks/use-quick-entry-bridge'
