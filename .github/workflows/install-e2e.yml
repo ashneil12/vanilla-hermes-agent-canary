@@ -70,8 +70,12 @@ jobs:
         with:
           filter: blob:none
           fetch-tags: true
-          sparse-checkout: scripts/sandbox/pick-release-tags.sh
+          sparse-checkout: |
+            scripts/sandbox/fetch-release-tags.sh
+            scripts/sandbox/pick-release-tags.sh
           sparse-checkout-cone-mode: false
+      - name: Fetch authoritative upstream release tags
+        run: scripts/sandbox/fetch-release-tags.sh
       - id: pick
         run: |
           set -euo pipefail

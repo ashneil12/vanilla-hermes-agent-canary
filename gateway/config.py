@@ -37,6 +37,51 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     return is_truthy_value(value, default=default)
 
 
+def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
+    """Normalize the optional named-profile allowlist.
+
+    ``None`` preserves the historical serve-all behavior. A malformed outer
+    value fails safe to an empty list (default profile only); malformed list
+    entries are skipped with a warning.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        logger.warning(
+            "Invalid gateway.multiplex_profile_allowlist (expected a list, got %s); "
+            "serving only the default profile",
+            type(value).__name__,
+        )
+        return []
+
+    from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+    normalized: List[str] = []
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, str):
+            logger.warning(
+                "Skipping invalid gateway.multiplex_profile_allowlist entry %r "
+                "(expected a profile name)",
+                entry,
+            )
+            continue
+        try:
+            name = normalize_profile_name(entry)
+            validate_profile_name(name)
+        except ValueError:
+            logger.warning(
+                "Skipping invalid gateway.multiplex_profile_allowlist entry %r",
+                entry,
+            )
+            continue
+        if name == "default" or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return normalized
+
+
 # Recognized truthy / falsy tokens for the GATEWAY_MULTIPLEX_PROFILES operator
 # override. Anything not in either set — and a blank/whitespace value — is
 # treated as "unset" so it falls through to config.yaml rather than silently
@@ -925,6 +970,9 @@ class GatewayConfig:
     # phases) per-profile adapters/credentials are resolved. When False, the
     # gateway behaves exactly as before — single HERMES_HOME, no profile stamping.
     multiplex_profiles: bool = False
+    # Optional named-profile allowlist for multiplex mode. None preserves the
+    # historical serve-all behavior; [] serves only the default profile.
+    multiplex_profile_allowlist: Optional[List[str]] = None
 
     # Opt-in systemd event-loop watchdog. Zero preserves Type=simple and
     # disables sd_notify at runtime.
@@ -956,6 +1004,9 @@ class GatewayConfig:
     profile_routes: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.multiplex_profile_allowlist = _normalize_multiplex_profile_allowlist(
+            self.multiplex_profile_allowlist
+        )
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             self.systemd_watchdog_seconds
         )
@@ -1070,6 +1121,7 @@ class GatewayConfig:
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "multiplex_profiles": self.multiplex_profiles,
+            "multiplex_profile_allowlist": self.multiplex_profile_allowlist,
             "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
             "loop_watchdog": self.loop_watchdog,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
@@ -1133,7 +1185,14 @@ class GatewayConfig:
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
         multiplex_profiles = data.get("multiplex_profiles")
-        nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+        raw_gateway = data.get("gateway")
+        nested_gateway = raw_gateway if isinstance(raw_gateway, dict) else {}
+        if "multiplex_profile_allowlist" in data:
+            multiplex_profile_allowlist = data.get("multiplex_profile_allowlist")
+        else:
+            multiplex_profile_allowlist = nested_gateway.get(
+                "multiplex_profile_allowlist"
+            )
         if "systemd_watchdog_seconds" in data:
             systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
             systemd_watchdog_key = "systemd_watchdog_seconds"
@@ -1207,6 +1266,7 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
+            multiplex_profile_allowlist=multiplex_profile_allowlist,
             systemd_watchdog_seconds=systemd_watchdog_seconds,
             loop_watchdog=loop_watchdog,
             max_concurrent_sessions=max_concurrent_sessions,
@@ -1349,6 +1409,18 @@ def load_gateway_config() -> GatewayConfig:
             # ``hermes config set gateway.multiplex_profiles true``).
             if "multiplex_profiles" in yaml_cfg:
                 gw_data["multiplex_profiles"] = yaml_cfg["multiplex_profiles"]
+
+            if "multiplex_profile_allowlist" in yaml_cfg:
+                gw_data["multiplex_profile_allowlist"] = yaml_cfg[
+                    "multiplex_profile_allowlist"
+                ]
+            elif (
+                isinstance(gateway_section, dict)
+                and "multiplex_profile_allowlist" in gateway_section
+            ):
+                gw_data["multiplex_profile_allowlist"] = gateway_section[
+                    "multiplex_profile_allowlist"
+                ]
 
             # Profile-based routing rules: accept either top-level
             # ``profile_routes`` or the nested ``gateway.profile_routes`` form
@@ -2512,23 +2584,23 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             pass
 
     # Registry-driven enable for plugin platforms.  Built-ins have explicit
-    # blocks above; plugins expose check_fn() which is the single source of
-    # truth for "are my env vars set?".  When it returns True, ensure the
-    # platform is enabled so start() will create its adapter.  Plugins that
-    # need to seed ``PlatformConfig.extra`` from env vars (e.g. Google Chat's
+    # blocks above.  A plugin platform is enabled when its credentials are
+    # configured (``is_connected``) and its dependencies are either present
+    # (passive ``check_fn``) or installable on demand (``ensure_deps_fn``,
+    # run later by ``create_adapter()`` — never here).  Plugins that need to
+    # seed ``PlatformConfig.extra`` from env vars (e.g. Google Chat's
     # project_id / subscription_name) can supply ``env_enablement_fn`` on
     # their PlatformEntry — called here BEFORE adapter construction.
     #
     # Enablement gate (#31116): when a plugin registers ``is_connected``
     # (the "has the user actually configured credentials for this?" check),
     # we MUST consult it before flipping ``enabled = True``.  Otherwise
-    # ``check_fn`` alone — which for adapter plugins typically just
-    # verifies the SDK is importable / lazy-installs it — silently enables
-    # platforms the user never opted into, and the gateway then tries to
-    # connect to Discord / Teams / Google Chat with no token and emits
-    # noisy retry-forever errors.  ``_platform_status`` was already fixed
-    # for the same bug class in commit 7849a3d73; this is the runtime
-    # counterpart.
+    # ``check_fn`` alone — a passive "is the SDK importable?" probe —
+    # silently enables platforms the user never opted into, and the gateway
+    # then tries to connect to Discord / Teams / Google Chat with no token
+    # and emits noisy retry-forever errors.  ``_platform_status`` was
+    # already fixed for the same bug class in commit 7849a3d73; this is the
+    # runtime counterpart.
     try:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()  # idempotent
@@ -2623,20 +2695,25 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                         )
                         continue
             # Verify dependencies LAST — only for platforms that are already
-            # enabled or passed the credential gate above.  For adapter plugins
-            # ``check_fn`` lazy-INSTALLS the platform SDK (pip) as a side
-            # effect, so running it as an unconditional sweep over every
-            # registered platform made ``load_gateway_config()`` pip-install
-            # Discord/Telegram/Slack/Feishu/Dingtalk on every call — including
-            # the desktop/dashboard readiness probe (``GET /api/status``, which
-            # awaits this synchronously) — even when the user configured none
-            # of them.  That blocked startup until every install finished and
-            # caused the desktop app to time out and boot-loop (stuck at 94%).
+            # enabled or passed the credential gate above.  ``check_fn`` is a
+            # PASSIVE probe (never installs); a platform whose deps are
+            # missing but which registered ``ensure_deps_fn`` still gets
+            # enabled here — the registry's ``create_adapter()`` runs the
+            # active installer at gateway start, when the user actually
+            # wants the platform up.  Historically the ACTIVE installer was
+            # wired as ``check_fn`` and this sweep pip-installed
+            # Discord/Telegram/Slack/Feishu/Dingtalk SDKs on every
+            # ``load_gateway_config()`` call — including the desktop/dashboard
+            # readiness probe (``GET /api/status``) — blocking startup until
+            # every install finished and boot-looping the desktop app at 94%.
+            # The check_fn/ensure_deps_fn split (#79812) makes that
+            # impossible by construction.
             try:
-                if not entry.check_fn():
-                    continue
+                deps_ok = bool(entry.check_fn())
             except Exception as e:
                 logger.debug("check_fn for %s raised: %s", entry.name, e)
+                deps_ok = False
+            if not deps_ok and entry.ensure_deps_fn is None:
                 continue
             if platform not in config.platforms:
                 config.platforms[platform] = PlatformConfig()
@@ -2674,7 +2751,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # config.platforms for start_gateway()'s connect loop to bring it up. The
     # connected-checker (Platform.RELAY in _PLATFORM_CONNECTED_CHECKERS) keys on
     # extra["relay_url"], so mirror the URL into extra here.
-    relay_url_env = os.getenv("GATEWAY_RELAY_URL", "").strip()
+    relay_url_env = getenv("GATEWAY_RELAY_URL", "").strip()
     relay_url_yaml = ""
     existing_relay = config.platforms.get(Platform.RELAY)
     if existing_relay is not None:
@@ -2683,6 +2760,52 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if relay_url_val:
         relay_config = _enable_from_env(Platform.RELAY)
         relay_config.extra["relay_url"] = relay_url_val.rstrip("/")
+
+    # Relay-exclusive: a GATEWAY_RELAY_URL env stamp marks a connector-fronted
+    # deployment where the connector owns every platform connection. Any
+    # directly-connected messaging adapter in the same process would be a
+    # second, unmanaged ingress path (duplicate deliveries, split sessions,
+    # and a live socket that disarms scale-to-zero), so the env stamp disables
+    # all other messaging platforms — including ones explicitly enabled in
+    # config.yaml. Non-messaging surfaces (local, api_server, webhook — the
+    # same exclusion set as the scale-to-zero arm gate) are untouched.
+    # Deployments that configure relay only via gateway.relay_url in
+    # config.yaml keep the old additive behavior (relay beside direct
+    # adapters).
+    #
+    # Opt-out: GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true keeps direct
+    # adapters running beside the relay for deployments that intentionally
+    # mix both ingress paths. Like the trigger, it is a deploy-stamp env var,
+    # not a config.yaml setting. Both reads go through the profile-scope-aware
+    # getenv so multiplexed profiles see their own values, not the process
+    # globals.
+    allow_direct = is_truthy_value(
+        getenv("GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS", "")
+    )
+    if relay_url_env and not allow_direct:
+        non_messaging = {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}
+        for platform, platform_config in config.platforms.items():
+            if platform is Platform.RELAY or platform in non_messaging:
+                continue
+            if not platform_config.enabled:
+                continue
+            if platform_config.extra.get("_enabled_explicit"):
+                logger.warning(
+                    "Relay connector is configured via GATEWAY_RELAY_URL; "
+                    "disabling directly-connected platform '%s' even though "
+                    "it is explicitly enabled in this profile's configuration. "
+                    "All messaging goes through the connector on this "
+                    "deployment. Set GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true "
+                    "to keep direct platforms alongside the relay.",
+                    platform.value,
+                )
+            else:
+                logger.info(
+                    "Relay connector is configured via GATEWAY_RELAY_URL; "
+                    "disabling directly-connected platform '%s'.",
+                    platform.value,
+                )
+            platform_config.enabled = False
 
     for platform_config in config.platforms.values():
         platform_config.extra.pop("_enabled_explicit", None)
