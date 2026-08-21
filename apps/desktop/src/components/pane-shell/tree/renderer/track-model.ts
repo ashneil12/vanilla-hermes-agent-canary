@@ -14,7 +14,6 @@ import type { Contribution } from '@/contrib/types'
 import type { GroupNode, LayoutNode } from '../model'
 import { allPaneIds } from '../model'
 
-import type { DoubleTapContext } from './drag-session'
 import type { FloatingAnchor } from './floating-rect'
 
 export const MIN_PANE_PX = 80
@@ -58,19 +57,30 @@ interface PaneChrome extends PaneSizing {
   /** Spawn corner for `placement: 'floating'` (default `'top-right'`). The
    *  pane also TRACKS that corner's edges when the window resizes. */
   anchor?: FloatingAnchor
+  /** Keep this pane mounted when hidden even after the zone's bounded hot
+   *  cache fills. Reserved for stateful resources whose lifetime must not track
+   *  tab visibility (for example terminal PTYs). */
+  lifecycleKeepAlive?: boolean
   /** No Close in the tab menu — the one surface the app can't lose (the
    *  main workspace). Session tiles share `placement: 'main'` but close. */
   uncloseable?: boolean
+  /** Standing chrome tab (sessions / Bots) with NO close verb at all: no ✕,
+   *  no middle / ⌘-click, no Close menu rows. It is shown/hidden instead (the
+   *  zone menu's Show/Hide rows and a ⌘K toggle, via `setStripTabHidden`).
+   *  Close was too destructive for these: an accidental ✕ removed Bot Mode
+   *  until the next launch. The ✕ follows the verb (see `PaneTab.onClose`),
+   *  so dropping the verb here is what takes the chip off the tab. */
+  hideOnly?: boolean
   /** Wrap this pane's TAB (e.g. in a domain context menu — a session tile's
    *  pin/branch/rename/archive/delete). The wrapper must render `tab` as its
    *  interactive child; the zone's own strip menu still owns non-tab space. */
   tabWrap?: (tab: React.ReactElement) => React.ReactNode
   /** Override this pane's TAB drag (a session tab drags like a sidebar row —
    *  stack / split / composer-link — not the generic pane move). Given the
-   *  tab's tap (activate) + double-tap (hide header) so those gestures survive.
-   *  Returns whether it took the drag; `false` (or absent) defers to
-   *  `startPaneDrag` — e.g. the workspace tab on a fresh draft, nothing to link. */
-  tabDrag?: (event: React.PointerEvent<HTMLElement>, onTap: () => void, double?: DoubleTapContext) => boolean
+   *  tab's tap (activate) so that gesture survives. Returns whether it took the
+   *  drag; `false` (or absent) defers to `startPaneDrag` — e.g. the workspace
+   *  tab on a fresh draft, nothing to link. */
+  tabDrag?: (event: React.PointerEvent<HTMLElement>, onTap: () => void) => boolean
   /** Suppress the zone header while THIS pane is active — full-page views
    *  (artifacts/skills/plugin pages) are not tab-able surfaces. The flag is
    *  live: the workspace contribution re-registers it on route changes. */
@@ -80,6 +90,12 @@ interface PaneChrome extends PaneSizing {
    *  the tab and the sidebar row render status/color from the ONE primitive
    *  (self-subscribing — it updates without the strip re-registering). */
   tabLead?: () => React.ReactNode
+  /** This pane's TAB LABEL, when it changes faster than the contribution
+   *  should. A session pane whose draft is being typed renames on every
+   *  debounce beat; re-registering `title` that often would re-render the
+   *  whole panes area, so the label subscribes for itself instead. Absent, or
+   *  returning nothing, falls back to `title`. */
+  tabTitle?: () => React.ReactNode
 }
 
 export const paneChrome = (c: Contribution | undefined) => (c?.data ?? {}) as PaneChrome

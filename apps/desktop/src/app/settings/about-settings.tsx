@@ -6,13 +6,15 @@ import { BrandMark } from '@/components/brand-mark'
 // in-app self-update controls are intentionally absent. We keep ONLY the imports
 // the passive "automatic updates" note needs — do NOT re-take upstream's
 // self-update UI imports (Button/Codicon/checkUpdates/startActiveUpdate/etc.).
+import { Button } from '@/components/ui/button'
 import { useI18n } from '@/i18n'
-import { RefreshCw } from '@/lib/icons'
+import { AlertTriangle, ExternalLink, RefreshCw } from '@/lib/icons'
 import { $desktopVersion, refreshDesktopVersion } from '@/store/updates'
 
 import { ListRow, SectionHeading, SettingsContent } from './primitives'
 import { UninstallSection } from './uninstall-section'
 
+const INSTALLER_URL = 'https://hermes-agent.nousresearch.com/'
 export function AboutSettings() {
   const { t } = useI18n()
   const a = t.settings.about
@@ -34,6 +36,31 @@ export function AboutSettings() {
             {version?.appVersion ? a.version(version.appVersion) : a.versionUnavailable}
           </p>
         </div>
+        {version?.bundleOutOfSync && (
+          <div className="mx-auto w-full max-w-2xl rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-left text-sm">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div className="min-w-0">
+                <p className="font-medium">{a.bundleOutOfSync}</p>
+                <p className="mt-1 text-xs text-muted-foreground">{a.bundleOutOfSyncDesc}</p>
+                <Button asChild className="mt-2" size="sm" variant="textStrong">
+                  <a
+                    href={INSTALLER_URL}
+                    onClick={event => {
+                      event.preventDefault()
+                      void window.hermesDesktop?.openExternal?.(INSTALLER_URL)
+                    }}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <ExternalLink className="size-3" />
+                    {a.bundleOutOfSyncAction}
+                  </a>
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="mx-auto mt-4 w-full max-w-2xl">

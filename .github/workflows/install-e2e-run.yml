@@ -56,6 +56,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fork repositories do not mirror upstream's vYYYY release tags. The
+      # install-ref matrix uses those tags, and the sandbox needs the same refs
+      # locally to build its fake remote and install the historical version.
+      - name: Fetch authoritative upstream release tags
+        run: scripts/sandbox/fetch-release-tags.sh
+
       # bubblewrap + slirp4netns are what the sandbox is built on; util-linux
       # supplies the `unshare` that builds the multi-uid userns for the
       # user-level (non-root) install.

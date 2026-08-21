@@ -321,6 +321,10 @@ export function DesktopOnboardingOverlay({
         bare && leaving ? '[transition-delay:660ms]' : '',
         leaving ? 'pointer-events-none opacity-0' : 'opacity-100'
       )}
+      // Masks the whole app until onboarding finishes — must stay filled under
+      // window glass or the shell shows through. Contract:
+      // `[data-glass-opaque]` in styles.css.
+      data-glass-opaque=""
     >
       <div
         className={cn(
@@ -480,9 +484,11 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   const select = (p: OAuthProvider) => void startProviderOAuth(p, ctx)
   const featured = ordered.find(p => p.id === FEATURED_ID) ?? null
   const rest = featured ? ordered.filter(p => p.id !== FEATURED_ID) : ordered
-  // Collapse the secondary providers behind a disclosure only when Nous
-  // Portal is present to anchor the choice — otherwise show the full list.
-  const collapsible = Boolean(featured) && rest.length > 0
+  // Collapse the secondary providers behind a disclosure whenever Nous Portal
+  // is present to anchor the choice — otherwise show the full list. The
+  // Fireworks/OpenRouter key rows always live behind the disclosure, so the
+  // toggle is warranted even when there are no other OAuth providers.
+  const collapsible = Boolean(featured)
   const showRest = !collapsible || showAll
 
   return (
@@ -490,10 +496,11 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
         <VeniceRecommendedCard onWantApiKey={() => setOnboardingMode('apikey')} />
         {featured ? <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} /> : null}
-        {/* Slot #2 — always visible, matching CANONICAL_PROVIDERS (Nous → Fireworks). */}
-        <FireworksProviderRow onClick={() => openKeyForm('FIREWORKS_API_KEY')} />
         {showRest ? (
           <>
+            {/* Fireworks leads the expanded alternatives, matching
+                CANONICAL_PROVIDERS (Nous → Fireworks). */}
+            <FireworksProviderRow onClick={() => openKeyForm('FIREWORKS_API_KEY')} />
             {rest.map(p => (
               <ProviderRow key={p.id} onSelect={select} provider={p} />
             ))}
@@ -736,7 +743,7 @@ export function ApiKeyForm({
           autoFocus
           className="font-mono"
           onChange={e => setValue(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && void submit()}
+          onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && void submit()}
           placeholder={
             currentRedacted ??
             (alreadySet ? t.onboarding.replaceCurrent : option.placeholder || t.onboarding.pasteApiKey)
@@ -749,7 +756,7 @@ export function ApiKeyForm({
             autoComplete="off"
             className="font-mono"
             onChange={e => setLocalKey(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && void submit()}
+            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && void submit()}
             placeholder={t.onboarding.localApiKeyPlaceholder}
             type="password"
             value={localKey}
