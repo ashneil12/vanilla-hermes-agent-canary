@@ -329,8 +329,18 @@ COPY --chown=hermes:hermes --from=webchat_build /webchat_dist /opt/hermes/hermes
 # ---------- Permissions ----------
 # Link hermes-agent itself (editable). Deps are already installed in the
 # cached layer above; `--no-deps` makes this a fast egg-link creation with no
-# resolution or downloads.
-RUN uv pip install --no-cache-dir --no-deps -e "."
+# resolution or downloads. Key this layer by the source revision explicitly:
+# the dependency cache can otherwise restore editable metadata produced for an
+# older project version even though the current source tree was copied above.
+# Remove that stale metadata before reinstalling so importlib.metadata and the
+# console entry point describe the same commit as /opt/hermes.
+ARG HERMES_GIT_SHA=
+RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" && \
+    rm -rf \
+        .venv/lib/python*/site-packages/hermes_agent-*.dist-info \
+        .venv/lib/python*/site-packages/__editable__.hermes_agent-*.pth \
+        hermes_agent*.egg-info && \
+    uv pip install --no-cache-dir --no-deps -e "."
 
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are
 # already root-owned (COPY, uv sync, npm install all run as root) and
@@ -367,9 +377,8 @@ RUN mkdir -p /opt/hermes/bin && \
 #
 # The arg is optional — local `docker build` without --build-arg simply
 # omits the file, and the runtime falls back to live-git lookup.  CI
-# (.github/workflows/docker.yml) passes ${{ github.sha }} so
+# (.github/workflows/docker-publish.yml) passes ${{ github.sha }} so
 # every published image has it.
-ARG HERMES_GIT_SHA=
 RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
         printf '%s\n' "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha; \
     fi

@@ -59,6 +59,8 @@ jobs:
           load: true
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}:test
+          build-args: |
+            HERMES_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -69,6 +71,25 @@ jobs:
           docker run --rm \
             -v /tmp/hermes-test:/opt/data \
             "$IMAGE:test" --help
+
+      - name: Test packaged Hermes version
+        run: |
+          docker run --rm \
+            --entrypoint /opt/hermes/.venv/bin/python \
+            "$IMAGE:test" \
+            -c '
+          import tomllib
+          from importlib.metadata import version
+
+          with open("/opt/hermes/pyproject.toml", "rb") as stream:
+              expected = tomllib.load(stream)["project"]["version"]
+          actual = version("hermes-agent")
+          if actual != expected:
+              raise SystemExit(
+                  f"Hermes package metadata mismatch: expected={expected} actual={actual}"
+              )
+          print(f"Hermes package metadata matches source: {actual}")
+          '
 
       - name: Test dashboard subcommand
         run: |
@@ -122,6 +143,8 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            HERMES_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -146,6 +169,8 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            HERMES_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
