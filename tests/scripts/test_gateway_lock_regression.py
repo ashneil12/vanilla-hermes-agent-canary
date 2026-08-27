@@ -235,6 +235,28 @@ def test_fixture_freshness_precedes_private_import_homes(tmp_path):
         worker.prepare_fixture()
 
 
+def assert_worker_rejects_non_linux_before_platform_calls(tmp_path, capsys):
+    with patch.object(sys, "argv", ["worker", "owner", "b" * 32]):
+        worker = load_script("gateway_lock_worker")
+    worker.ROOT = tmp_path / "must-not-be-created"
+    with patch.object(worker.signal, "signal", side_effect=AssertionError("platform signal accessed")) as register:
+        assert worker.main() == 1
+    register.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "FAIL" and receipt["check"] == "linux-worker"
+    assert not worker.ROOT.exists()
+
+
+@pytest.mark.macos_only
+def test_worker_rejects_native_macos_before_platform_calls(tmp_path, capsys):
+    assert_worker_rejects_non_linux_before_platform_calls(tmp_path, capsys)
+
+
+@pytest.mark.windows_only
+def test_worker_rejects_native_windows_before_platform_calls(tmp_path, capsys):
+    assert_worker_rejects_non_linux_before_platform_calls(tmp_path, capsys)
+
+
 @pytest.mark.linux_only
 @pytest.mark.parametrize("behavior_ok,cleanup_ok", [(True, True), (False, True), (True, False), (False, False)])
 def test_injected_cli_requires_behavior_and_cleanup_without_sibling_read(monkeypatch, behavior_ok, cleanup_ok):

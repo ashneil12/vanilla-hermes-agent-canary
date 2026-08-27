@@ -203,14 +203,25 @@ def reader(status, namespace):
 
 
 def main():
-    signal.signal(signal.SIGALRM, alarm_handler)
-    signal.signal(signal.SIGTERM, alarm_handler)
-    signal.alarm(WORKER_SECONDS)
     status = None
+    arm_alarm = None
     try:
+        # Reject unsupported hosts before touching POSIX-only primitives.
         require(sys.platform.startswith("linux"), "linux-worker")
+        alarm_signal = getattr(signal, "SIGALRM", None)
+        arm_alarm = getattr(signal, "alarm", None)
+        get_uid = getattr(os, "getuid", None)
+        get_gid = getattr(os, "getgid", None)
+        require(
+            alarm_signal is not None and callable(arm_alarm)
+            and callable(get_uid) and callable(get_gid),
+            "linux-worker-primitives",
+        )
+        signal.signal(alarm_signal, alarm_handler)
+        signal.signal(signal.SIGTERM, alarm_handler)
+        arm_alarm(WORKER_SECONDS)
         require(ROLE in ("owner", "reader") and len(RUN_ID) == 32, "worker-arguments")
-        require(os.getuid() == os.getgid() == 10000, "unprivileged-worker")
+        require(get_uid() == get_gid() == 10000, "unprivileged-worker")
         require(os.getpid() == 1, "private-pid-one")
         require(ROOT.is_dir() and ROOT.stat().st_uid == 10000, "test-volume-owner")
         os.environ["HERMES_HOME"] = str(prepare_fixture())
@@ -234,7 +245,8 @@ def main():
     finally:
         if status is not None:
             status.release_gateway_runtime_lock()
-        signal.alarm(0)
+        if callable(arm_alarm):
+            arm_alarm(0)
 
 
 if __name__ == "__main__":
