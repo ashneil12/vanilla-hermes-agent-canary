@@ -15,13 +15,19 @@
  *    route.
  *  - OS conveniences (notify, clipboard, open-external, image save, mic) map
  *    to standard browser APIs.
- *  - LOCAL-only features (terminal PTY, local FS browse/preview/watch, native
+ *  - Terminal PTYs use the authenticated, session-scoped hosted sidecar when
+ *    available. An older/unsupported server reports a capability error.
+ *  - LOCAL-only features (local FS browse/preview/watch, native
  *    file dialogs, auto-update, bootstrap installer) are benign stubs — the
  *    side panels that use them are not on the chat critical path.
  *
  * This module is a SIDE-EFFECT import: it installs the global only when no
  * Electron bridge is present, so importing it under Electron is a no-op.
  */
+
+import { getApiRequestConnection, getApiRequestProfile } from '../api/client'
+
+import { createWebTerminal } from './web-terminal'
 
 interface WebRuntimeConfig {
   /** API base path that the edge proxy maps to the dashboard backend. */
@@ -331,37 +337,67 @@ function buildUrls(config: WebRuntimeConfig): { baseUrl: string; wsUrl: string }
   return { baseUrl, wsUrl }
 }
 
-async function fetchJson<T>(request: { path: string; method?: string; body?: unknown; timeoutMs?: number }): Promise<T> {
-  const config = resolveConfig()
+async function fetchJson<T>(request: { path: string; method?: string; body?: unknown; timeoutMs?: number; keepalive?: boolean }, config = resolveConfig()): Promise<T> {
   const { baseUrl } = buildUrls(config)
   const controller = new AbortController()
   const timeout = request.timeoutMs && request.timeoutMs > 0 ? request.timeoutMs : 30_000
   const timer = window.setTimeout(() => controller.abort(), timeout)
+
   try {
     const headers: Record<string, string> = {}
+
     if (config.token) {
       headers.Authorization = `Bearer ${config.token}`
     }
+
     let body: BodyInit | undefined
+
     if (request.body !== undefined && request.body !== null) {
       headers['Content-Type'] = 'application/json'
       body = JSON.stringify(request.body)
     }
+
+    const terminalRequest = request.path === '/api/desktop-terminal'
+
     const res = await fetch(`${baseUrl}${request.path}`, {
       method: request.method ?? (request.body !== undefined ? 'POST' : 'GET'),
       headers,
       body,
       signal: controller.signal,
-      credentials: 'omit'
+      credentials: 'omit',
+      // A redirect must not forward session credentials or typed shell input
+      // to a different endpoint, even when fetch strips the bearer header.
+      ...(terminalRequest ? { redirect: 'error' as const } : {}),
+      ...(request.keepalive ? { keepalive: true } : {})
     })
+
     const text = await res.text()
-    const data = text ? JSON.parse(text) : undefined
+    let data: unknown
+
+    try {
+      data = text ? JSON.parse(text) : undefined
+    } catch (error) {
+      if (terminalRequest) {
+        if ([404, 405, 501].includes(res.status)) {
+          throw new Error('This server does not support browser terminals')
+        }
+
+        throw new Error(`Terminal service returned a non-JSON response (HTTP ${res.status}); browser terminals may not be supported on this server`)
+      }
+
+      throw error
+    }
+
     if (!res.ok) {
       const message =
         (data && typeof data === 'object' && 'error' in data && (data as { error?: string }).error) ||
-        `HTTP ${res.status} for ${request.path}`
+        (terminalRequest && [404, 405, 501].includes(res.status)
+          ? 'This server does not support browser terminals'
+          : `HTTP ${res.status} for ${request.path}`)
+
       throw new Error(String(message))
     }
+
     return data as T
   } finally {
     window.clearTimeout(timer)
@@ -548,17 +584,20 @@ function installWebShim(): void {
     revealLogs: async () => ({ ok: false, path: '', error: 'unavailable on web' }),
     getRecentLogs: async () => ({ path: '', lines: [] as string[] }),
 
-    // Terminal side panel: no PTY in the browser.
-    terminal: {
-      start: async () => {
-        throw new Error('Terminal is not available in the web client')
+    terminal: createWebTerminal({
+      captureRequest: () => {
+        const terminalConfig = resolveConfig()
+        const { baseUrl } = buildUrls(terminalConfig)
+
+        if ((terminalConfig.apiBase && !terminalConfig.apiBase.startsWith('/')) || new URL(baseUrl).origin !== window.location.origin) {
+          throw new Error('Browser terminal requests must stay on this server')
+        }
+
+        return request => fetchJson(request, terminalConfig)
       },
-      write: async () => false,
-      resize: async () => false,
-      dispose: async () => true,
-      onData: () => noopUnsubscribe(),
-      onExit: () => noopUnsubscribe()
-    },
+      getProfile: getApiRequestProfile,
+      getConnectionId: getApiRequestConnection
+    }),
 
     onClosePreviewRequested: () => noopUnsubscribe(),
     onOpenUpdatesRequested: () => noopUnsubscribe(),
@@ -677,4 +716,3 @@ if (typeof window !== 'undefined' && !(window as unknown as { hermesDesktop?: un
 }
 
 export {}
-
