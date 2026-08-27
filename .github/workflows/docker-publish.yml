@@ -59,6 +59,8 @@ jobs:
           load: true
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}:test
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
           cache-from: type=gha
@@ -115,6 +117,16 @@ jobs:
             "$IMAGE:test" \
             -lc 'cd /opt/hermes && /usr/local/bin/uv pip install --python /opt/hermes/.venv/bin/python3 -q pytest pytest-timeout && /opt/hermes/.venv/bin/python3 -m pytest tests/tools/test_media_generation_wiring.py -q'
 
+
+      # Two real PID namespaces sharing only a fresh bounded test volume.
+      # A held lock must survive an unverified PID lookup before this image
+      # can be published. This runner is disposable, not a customer VM.
+      - name: Gateway lock PID namespace regression gate
+        timeout-minutes: 5
+        run: |
+          python3 -I -B scripts/ci/gateway_lock_regression.py \
+            "$IMAGE:test" "$GITHUB_SHA" \
+            --capacity-and-idle-preflight-confirmed
 
       - name: Log in to GitHub Container Registry
         if: >-

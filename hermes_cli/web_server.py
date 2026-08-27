@@ -1979,6 +1979,42 @@ _STATUS_ACTIVE_SESSIONS_TIMEOUT = 0.75
 # config surface.
 
 
+def _gateway_health_api_key() -> str:
+    """Resolve credentials for the process-owned gateway health listener.
+
+    The health URL does not change with the dashboard's selected UI profile.
+    Neither that profile's config nor its task-local secret scope may supply
+    credentials to this process-level target.
+    """
+    from gateway.config import Platform, _has_usable_api_server_key, load_gateway_config
+
+    # Match the gateway loader's env-over-config precedence without running its
+    # legacy platform/config bridges on every normal production health poll.
+    key = os.getenv("API_SERVER_KEY", "")
+    if _has_usable_api_server_key(key):
+        return key
+
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+    from hermes_constants import (
+        get_process_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    home_token = set_hermes_home_override(get_process_hermes_home())
+    secret_token = set_secret_scope(None)
+    try:
+        # Reuse canonical config.yaml/gateway.json precedence rather than a
+        # second parser. Its existing legacy config bridges still apply here.
+        platform = load_gateway_config().platforms.get(Platform.API_SERVER)
+        if platform is not None:
+            key = (platform.extra or {}).get("key", key)
+        return key if isinstance(key, str) else ""
+    finally:
+        reset_secret_scope(secret_token)
+        reset_hermes_home_override(home_token)
+
+
 def _probe_gateway_health() -> tuple[bool, dict | None]:
     """Probe the gateway via its HTTP health endpoint (cross-container).
 
@@ -2012,6 +2048,12 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
     for path in (f"{base}/health/detailed", f"{base}/health"):
         try:
             req = urllib.request.Request(path, method="GET")
+            if path.endswith("/health/detailed"):
+                key = _gateway_health_api_key()
+                if key:
+                    # Unlike a normal header, urllib does not copy this onto
+                    # redirected requests (including cross-origin redirects).
+                    req.add_unredirected_header("Authorization", f"Bearer {key}")
             with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
                 if resp.status == 200:
                     body = json.loads(resp.read())

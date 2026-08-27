@@ -64,6 +64,14 @@ export class JsonRpcGatewayError extends Error {
   }
 }
 
+/** A WebSocket handshake failed or timed out before the connection opened. */
+export class GatewayTransportError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GatewayTransportError'
+  }
+}
+
 export type WebSocketLike = WebSocket
 
 type PendingCall = {
@@ -208,7 +216,7 @@ export class JsonRpcGatewayClient {
         settled = true
         cleanup()
         this.setState('error')
-        reject(new Error(this.options.connectErrorMessage))
+        reject(new GatewayTransportError(this.options.connectErrorMessage))
       }
 
       socket.addEventListener('open', onOpen, { once: true })
@@ -236,7 +244,7 @@ export class JsonRpcGatewayClient {
           }
 
           this.setState('error')
-          reject(new Error(this.options.connectErrorMessage))
+          reject(new GatewayTransportError(this.options.connectErrorMessage))
         }, this.options.connectTimeoutMs)
       }
     })
