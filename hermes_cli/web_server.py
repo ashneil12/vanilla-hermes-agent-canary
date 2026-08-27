@@ -1946,7 +1946,10 @@ def _apply_main_model_assignment(
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
 _GATEWAY_HEALTH_TIMEOUT_MAX = 1.0
-_GATEWAY_HEALTH_ROUTE_TIMEOUT = 1.0
+# Detailed health can consume its entire request budget before basic health
+# starts. Allow both capped requests plus scheduling overhead, or the route
+# discards a successful basic response while still waiting for the worker.
+_GATEWAY_HEALTH_ROUTE_TIMEOUT = 2 * _GATEWAY_HEALTH_TIMEOUT_MAX + 0.25
 try:
     _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "1"))
 except (ValueError, TypeError):
@@ -3790,11 +3793,13 @@ async def get_status(profile: Optional[str] = None):
         # long-standing `monkeypatch.setattr(web_server, "get_running_pid_cached", ...)`
         # seam used across the test-suite still intercepts them.
         def _bounded_health_probe():
-            """Health probe with the route's blocking-call budget preserved.
+            """Wait for both bounded HTTP attempts before rejecting liveness.
 
             The resolver only reaches this rung when the local PID probe came
             up empty, so the timeout is paid at most once per request and only
             in the cross-container case that needs it.
+            This is not hard cancellation: the executor still joins its worker
+            on exit, including any time spent outside socket I/O.
             """
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(_probe_gateway_health)

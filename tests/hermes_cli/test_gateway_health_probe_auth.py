@@ -42,7 +42,8 @@ def _write_key(home: Path, key: str, filename: str = "config.yaml") -> None:
 
 
 @asynccontextmanager
-async def _gateway_server(api_server, requests, *, detail_gate=None, redirect=None):
+async def _gateway_server(api_server, requests, *, detail_gate=None, redirect=None,
+                          basic_delay=0, basic_gate=None):
     from gateway.config import PlatformConfig
 
     adapter = api_server.APIServerAdapter(
@@ -67,12 +68,18 @@ async def _gateway_server(api_server, requests, *, detail_gate=None, redirect=No
         return response
 
     async def basic(request):
-        response = await adapter._handle_health(request)
-        requests.append({
+        record = {
             "path": request.path,
             "authorization": request.headers.get("Authorization"),
-            "status": response.status,
-        })
+            "status": None,
+        }
+        requests.append(record)
+        if basic_gate is not None:
+            await basic_gate.wait()
+        if basic_delay:
+            await asyncio.sleep(basic_delay)
+        response = await adapter._handle_health(request)
+        record["status"] = response.status
         return response
 
     app = web.Application()
@@ -364,3 +371,100 @@ async def test_detailed_timeout_still_uses_unauthenticated_basic_health(
     assert [request["path"] for request in requests] == ["/health/detailed", "/health"]
     assert requests[0]["authorization"] == f"Bearer {GATEWAY_KEY}"
     assert requests[1]["authorization"] is None
+
+
+@pytest.mark.asyncio
+async def test_status_keeps_remote_gateway_alive_when_detailed_health_times_out(
+    probe_modules, monkeypatch,
+):
+    """The route must not discard its successful lightweight health result."""
+    ws, api_server = probe_modules
+    monkeypatch.setenv("API_SERVER_KEY", GATEWAY_KEY)
+    # Exercise the production timeout relationship: the detailed request may
+    # consume its entire HTTP budget before basic liveness is attempted.
+    monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", ws._GATEWAY_HEALTH_TIMEOUT_MAX)
+    monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+    monkeypatch.setattr(ws, "get_runtime_status_running_pid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+    requests = []
+    gate = asyncio.Event()
+    async with _gateway_server(api_server, requests, detail_gate=gate,
+                               basic_delay=0.2) as base:
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", base)
+        try:
+            result = await asyncio.wait_for(ws.get_status(), timeout=8)
+        finally:
+            gate.set()
+
+    assert [request["path"] for request in requests] == ["/health/detailed", "/health"]
+    assert requests[1]["status"] == 200
+    assert result["gateway_running"] is True
+    assert result["gateway_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_status_unavailable_gateway_still_returns_not_running(
+    probe_modules, monkeypatch,
+):
+    ws, api_server = probe_modules
+    monkeypatch.setenv("API_SERVER_KEY", GATEWAY_KEY)
+    monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+    monkeypatch.setattr(ws, "get_runtime_status_running_pid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+    requests = []
+    async with _gateway_server(api_server, requests) as base:
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", base)
+    # Use the real closed listener: neither HTTP attempt can reach a gateway.
+    result = await asyncio.wait_for(ws.get_status(), timeout=8)
+
+    assert requests == []
+    assert result["gateway_running"] is False
+    assert result["gateway_state"] != "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("both_requests_slow", [False, True])
+async def test_status_stalled_health_stays_bounded_without_extra_attempts(
+    probe_modules, monkeypatch, both_requests_slow,
+):
+    """More overall time must not extend either request's own socket budget."""
+    ws, api_server = probe_modules
+    # One case exercises both production 1s request budgets. The other keeps
+    # a shorter configured timeout and an immediate real detailed-auth failure.
+    monkeypatch.setenv("API_SERVER_KEY", GATEWAY_KEY if both_requests_slow else OTHER_KEY)
+    request_timeout = ws._GATEWAY_HEALTH_TIMEOUT_MAX if both_requests_slow else 0.2
+    monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", request_timeout)
+    open_request = ws.urllib.request.urlopen
+    request_timeouts = []
+
+    def observed_urlopen(request, *, timeout):
+        request_timeouts.append(timeout)
+        return open_request(request, timeout=timeout)
+
+    monkeypatch.setattr(ws.urllib.request, "urlopen", observed_urlopen)
+    monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+    monkeypatch.setattr(ws, "get_runtime_status_running_pid", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+    requests = []
+    gate = asyncio.Event()
+    async with _gateway_server(
+        api_server, requests, detail_gate=gate if both_requests_slow else None,
+        basic_gate=gate,
+    ) as base:
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", base)
+        try:
+            # The handlers cannot finish until after get_status returns. Real
+            # socket timeouts, not fixture releases, must bound the probe.
+            result = await asyncio.wait_for(ws.get_status(), timeout=8)
+        finally:
+            gate.set()
+
+    assert [request["path"] for request in requests] == ["/health/detailed", "/health"]
+    assert requests[0]["authorization"] == (
+        f"Bearer {GATEWAY_KEY}" if both_requests_slow else f"Bearer {OTHER_KEY}"
+    )
+    assert requests[1]["authorization"] is None
+    assert request_timeouts == [request_timeout, request_timeout]
+    assert all(timeout <= ws._GATEWAY_HEALTH_TIMEOUT_MAX for timeout in request_timeouts)
+    assert result["gateway_running"] is False
+    assert result["gateway_state"] != "running"
