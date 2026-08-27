@@ -1,10 +1,11 @@
 """Offline safety contracts; the publisher separately runs the real Linux test."""
 
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 import importlib.util
 import io
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import time
@@ -282,3 +283,129 @@ def test_injected_cli_requires_behavior_and_cleanup_without_sibling_read(monkeyp
     assert receipt["result"] == ("PASS" if expected_pass else "FAIL")
     factory.assert_called_once_with("/fake/docker", "local:exact", "b" * 40, "pass\n")
     fake.cleanup.assert_called_once_with()
+
+
+@pytest.fixture
+def worker():
+    with patch.object(sys, "argv", ["worker", "owner", "b" * 32]):
+        return load_script("gateway_lock_worker")
+
+
+@pytest.mark.parametrize("version", [(3, 44, 6), (3, 50, 7), (3, 51, 3), (3, 53, 4)])
+def test_sqlite_qualification_accepts_fixes_and_exercises_real_fts5(worker, monkeypatch, version):
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", version)
+    monkeypatch.setattr(sqlite3, "sqlite_version", ".".join(map(str, version)))
+    receipt = worker.check_sqlite_runtime()
+    assert receipt["executable"] == sys.executable
+    assert receipt["sqlite_version"] == sqlite3.sqlite_version
+    assert receipt["wal_reset_vulnerable"] is False
+    assert receipt["trigram_matches"] == 1
+    with closing(sqlite3.connect(":memory:")) as db:
+        assert receipt["sqlite_source_id"] == db.execute("SELECT sqlite_source_id()").fetchone()[0]
+
+
+@pytest.mark.parametrize("version", [(3, 44, 5), (3, 50, 4), (3, 50, 6), (3, 51, 2)])
+def test_sqlite_qualification_rejects_vulnerable_runtime_before_database_open(worker, monkeypatch, version):
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", version)
+    monkeypatch.setattr(sqlite3, "sqlite_version", ".".join(map(str, version)))
+    connect = Mock(side_effect=AssertionError("database must not be opened"))
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with pytest.raises(AssertionError, match="sqlite-wal-reset-fixed"):
+        worker.check_sqlite_runtime()
+    connect.assert_not_called()
+
+
+def test_sqlite_qualification_closes_database_when_fts5_is_unavailable(worker, monkeypatch):
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 51, 3))
+    monkeypatch.setattr(sqlite3, "sqlite_version", "3.51.3")
+    connect = sqlite3.connect
+    connections = []
+
+    def restricted_memory_database(path):
+        assert path == ":memory:"
+        db = connect(path)
+        db.set_authorizer(lambda action, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_CREATE_VTABLE else sqlite3.SQLITE_OK)
+        connections.append(db)
+        return db
+
+    monkeypatch.setattr(sqlite3, "connect", restricted_memory_database)
+    with pytest.raises(sqlite3.DatabaseError):
+        worker.check_sqlite_runtime()
+    assert worker.CHECK == "sqlite-fts5-trigram"
+    assert connections
+    for db in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            db.execute("SELECT 1")
+
+
+def test_owner_sqlite_failure_prevents_gateway_lock_exercise(worker, monkeypatch):
+    check = Mock(side_effect=AssertionError("sqlite-wal-reset-fixed"))
+    monkeypatch.setattr(worker, "check_sqlite_runtime", check)
+    status = Mock()
+    with pytest.raises(AssertionError, match="sqlite-wal-reset-fixed"):
+        worker.owner(status, "namespace")
+    check.assert_called_once_with()
+    assert not status.mock_calls
+
+
+def test_owner_includes_sqlite_receipt_once(worker, tmp_path, monkeypatch):
+    receipt = {"sqlite_version": "qualified"}
+    check = Mock(return_value=receipt)
+    monkeypatch.setattr(worker, "check_sqlite_runtime", check)
+    monkeypatch.setattr(worker, "ROOT", tmp_path)
+    monkeypatch.setattr(worker, "CASES", ())
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "sentinel").write_text(worker.RUN_ID, encoding="utf-8")
+    result = worker.owner(Mock(), "namespace")
+    check.assert_called_once_with()
+    assert result["sqlite_runtime"] is receipt
+
+
+@pytest.fixture
+def completed_workers(harness, monkeypatch):
+    receipts = {
+        "owner": {
+            "result": "PASS", "cases": ["default", "explicit-profile"],
+            "namespace": "owner-ns", "handoff_verified": True,
+            "sqlite_runtime": {
+                "executable": "/opt/hermes/.venv/bin/python", "sqlite_version": "3.51.3",
+                "sqlite_source_id": "fixed-build", "wal_reset_vulnerable": False, "trigram_matches": 1,
+            },
+        },
+        "reader": {
+            "result": "PASS", "cases": ["default", "explicit-profile"], "namespace": "reader-ns",
+            "pid_collision_rejected": True, "held_files_preserved": True, "second_acquisition_denied": True,
+            "release_cleanup_reacquisition": True, "other_profile_preserved": True,
+        },
+    }
+    for method in ("preflight", "create_volume", "create_container", "call"):
+        monkeypatch.setattr(harness, method, Mock())
+    monkeypatch.setattr(harness, "inspect_container", lambda role, _: {
+        **container_row(harness, role), "State": {"Status": "exited", "ExitCode": 0, "OOMKilled": False},
+    })
+    monkeypatch.setattr(harness, "receipts", lambda role: [receipts[role]])
+    return receipts
+
+
+def test_driver_requires_both_lock_and_sqlite_qualification(harness, completed_workers):
+    assert harness.run() == completed_workers
+
+
+@pytest.mark.parametrize("change", ["missing", "vulnerable", "wrong-interpreter", "fts5-failed", "missing-version", "missing-source-id"])
+def test_driver_rejects_missing_or_failed_sqlite_evidence(harness, completed_workers, change):
+    receipt = completed_workers["owner"]["sqlite_runtime"]
+    if change == "missing":
+        completed_workers["owner"].pop("sqlite_runtime")
+    elif change == "vulnerable":
+        receipt["wal_reset_vulnerable"] = True
+    elif change == "wrong-interpreter":
+        receipt["executable"] = "/usr/bin/python3"
+    elif change == "fts5-failed":
+        receipt["trigram_matches"] = 0
+    elif change == "missing-version":
+        receipt.pop("sqlite_version")
+    else:
+        receipt.pop("sqlite_source_id")
+    with pytest.raises(driver.Failure, match="sqlite"):
+        harness.run()

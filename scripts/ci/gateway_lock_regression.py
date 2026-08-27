@@ -266,6 +266,14 @@ class Harness:
                 time.sleep(0.2)
         require(evidence["owner"]["namespace"] != evidence["reader"]["namespace"], "namespaces-not-distinct")
         require(evidence["owner"].get("handoff_verified") is True, "owner-handoff-evidence")
+        sqlite_runtime = evidence["owner"].get("sqlite_runtime")
+        require(isinstance(sqlite_runtime, dict), "image-sqlite-runtime-evidence")
+        require(sqlite_runtime.get("executable") == "/opt/hermes/.venv/bin/python", "image-sqlite-interpreter")
+        require(sqlite_runtime.get("wal_reset_vulnerable") is False, "image-sqlite-wal-reset-fixed")
+        require(type(sqlite_runtime.get("trigram_matches")) is int and sqlite_runtime["trigram_matches"] == 1, "image-sqlite-fts5-trigram")
+        require(all(isinstance(sqlite_runtime.get(key), str) and sqlite_runtime[key] for key in (
+            "sqlite_version", "sqlite_source_id",
+        )), "image-sqlite-version-evidence")
         require(all(evidence["reader"].get(key) is True for key in (
             "pid_collision_rejected", "held_files_preserved", "second_acquisition_denied",
             "release_cleanup_reacquisition", "other_profile_preserved",

@@ -116,7 +116,36 @@ def check_owner_record(status, home, ready, namespace):
     require(not status._record_matches_live_gateway_pid(record, record["pid"]), "unrelated-local-pid-rejected")
 
 
+def check_sqlite_runtime():
+    """Qualify this image interpreter without opening any on-disk database."""
+    global CHECK
+    import sqlite3
+
+    from hermes_cli.sqlite_runtime import is_sqlite_wal_reset_vulnerable
+
+    vulnerable = is_sqlite_wal_reset_vulnerable(sqlite3.sqlite_version_info)
+    require(not vulnerable, "sqlite-wal-reset-fixed:" + sqlite3.sqlite_version)
+    CHECK = "sqlite-fts5-trigram"
+    db = sqlite3.connect(":memory:")
+    try:
+        # Same runtime contract as tests/docker/test_sqlite_runtime.py: a
+        # safe library must also retain the trigram tokenizer Hermes uses.
+        db.execute("CREATE VIRTUAL TABLE docs USING fts5(content, tokenize='trigram')")
+        db.execute("INSERT INTO docs VALUES ('hermes')")
+        matches = db.execute("SELECT count(*) FROM docs WHERE docs MATCH 'erm'").fetchone()[0]
+        source_id = db.execute("SELECT sqlite_source_id()").fetchone()[0]
+    finally:
+        db.close()
+    require(matches == 1, "sqlite-fts5-trigram")
+    return {
+        "executable": sys.executable, "python_version": list(sys.version_info[:3]),
+        "sqlite_version": sqlite3.sqlite_version, "sqlite_source_id": source_id,
+        "wal_reset_vulnerable": vulnerable, "trigram_matches": matches,
+    }
+
+
 def owner(status, namespace):
+    sqlite_runtime = check_sqlite_runtime()
     control = ROOT / "control"
     control_before = fingerprint(control / "sentinel")
     for case in CASES:
@@ -149,7 +178,7 @@ def owner(status, namespace):
         receive(case + ".reader-done.json")
         require(not (home / "gateway.pid").exists(), "reader-final-pid-cleanup")
         require(not (home / "gateway.lock").exists(), "reader-final-lock-cleanup")
-    return {"cases": list(CASES), "handoff_verified": True}
+    return {"cases": list(CASES), "handoff_verified": True, "sqlite_runtime": sqlite_runtime}
 
 
 def reader(status, namespace):
