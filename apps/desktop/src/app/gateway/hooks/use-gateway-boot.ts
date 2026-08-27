@@ -1,4 +1,4 @@
-import { isGatewayReauthRequired, resolveGatewayWsUrl } from '@hermes/shared'
+import { GatewayTransportError, isGatewayReauthRequired, resolveGatewayWsUrl } from '@hermes/shared'
 import { useEffect, useRef } from 'react'
 
 import type { HermesConnection } from '@/global'
@@ -175,11 +175,22 @@ export function useGatewayBoot({
       }
     }
 
-    // Whether the failed boot is a TRANSIENT remote fault main marked as
-    // retryable (dropped SSH/HTTP registered connection, mint timeout).
-    // Local failures and confirmed reauth rejections come back false and go
-    // straight to the recovery overlay.
-    const bootFailureIsRetryable = async (): Promise<boolean> => {
+    // Electron marks transient remote faults in boot progress. Hosted web has
+    // no main process to do that: a first handshake during a server restart
+    // must also get the bounded retry loop, before post-boot reconnect exists.
+    // Only transport failures qualify; auth/config errors still need recovery.
+    const bootFailureIsRetryable = async (error: unknown): Promise<boolean> => {
+      if (isGatewayReauthRequired(error)) {
+        return false
+      }
+
+      if (
+        (window as Window & { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__ === true &&
+        error instanceof GatewayTransportError
+      ) {
+        return true
+      }
+
       try {
         const snapshot = await desktop.getBootProgress()
 
@@ -728,7 +739,7 @@ export function useGatewayBoot({
           // exactly what manual re-entry forced. Exhausted retries, local
           // failures, and confirmed reauth rejections end in the real recovery
           // affordance (the boot-failure overlay), never an infinite spinner.
-          if (bootRetryAttempt < BOOT_RETRY_MAX_ATTEMPTS && (await bootFailureIsRetryable()) && !cancelled) {
+          if (bootRetryAttempt < BOOT_RETRY_MAX_ATTEMPTS && (await bootFailureIsRetryable(err)) && !cancelled) {
             const delay = reconnectBackoffDelayMs(bootRetryAttempt, { baseDelayMs: BOOT_RETRY_BASE_DELAY_MS })
             bootRetryAttempt += 1
             resumeDesktopBootForRetry(translateNow('boot.steps.retryingRemoteBackend'))

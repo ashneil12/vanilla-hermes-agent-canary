@@ -31,7 +31,7 @@ class FakeWebSocket {
   static CLOSED = 3
   // Flipped by the test: 'open' = next socket connects; 'fail' = next socket
   // errors (a dead remote). Mirrors a VPS going away after the first connect.
-  static mode: 'open' | 'fail' = 'open'
+  static mode: 'open' | 'fail' | 'hang' = 'open'
   static instances: FakeWebSocket[] = []
 
   readyState = 0
@@ -39,6 +39,11 @@ class FakeWebSocket {
 
   constructor(public url: string) {
     FakeWebSocket.instances.push(this)
+
+    if (FakeWebSocket.mode === 'hang') {
+      return
+    }
+
     const willOpen = FakeWebSocket.mode === 'open'
     // Resolve on the next microtask/macrotask so connect()'s promise wiring is
     // in place before open/error fires (matches real async socket handshake).
@@ -147,6 +152,33 @@ function Harness({
 }
 
 const originalWebSocket = globalThis.WebSocket
+const webWindow = window as Window & { __HERMES_WEB_CLIENT__?: boolean }
+let webDesktop: typeof window.hermesDesktop | undefined
+
+async function hostedDesktop() {
+  if (!webDesktop) {
+    delete (window as { hermesDesktop?: unknown }).hermesDesktop
+    await import('@/lib/web-shim')
+    webDesktop = window.hermesDesktop
+  }
+
+  // Exercise the real browser bridge, including its URL and boot-progress
+  // behavior. Only backend I/O is fake: the WS below and this default-cwd GET.
+  const desktop = {
+    ...webDesktop,
+    getBootProgress: vi.fn(webDesktop.getBootProgress),
+    getConnection: vi.fn(webDesktop.getConnection)
+  }
+
+  window.hermesDesktop = desktop
+  webWindow.__HERMES_WEB_CLIENT__ = true
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify({ branch: '', cwd: '/workspace' })))
+  )
+
+  return desktop
+}
 
 beforeEach(() => {
   // Drop any parked gateway left by a prior file/case (globalThis slot).
@@ -168,6 +200,7 @@ beforeEach(() => {
   FakeWebSocket.mode = 'open'
   FakeWebSocket.instances = []
   connectionApplied = null
+  delete webWindow.__HERMES_WEB_CLIENT__
   ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = fakeDesktop()
   $gatewayState.set('idle')
@@ -203,10 +236,177 @@ afterEach(() => {
   $connection.set(null)
   $profiles.set([])
   vi.useRealTimers()
+  vi.unstubAllGlobals()
   ;(globalThis as { WebSocket: unknown }).WebSocket = originalWebSocket
   delete (window as { hermesDesktop?: unknown }).hermesDesktop
+  delete webWindow.__HERMES_WEB_CLIENT__
   window.localStorage.removeItem('hermes.desktop.workspace-cwd')
   $currentCwd.set('')
+})
+
+describe('useGatewayBoot hosted startup (real web shim, hook and client)', () => {
+  beforeEach(() => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('recovers from the first socket error during a server restart without a reload', async () => {
+    const desktop = await hostedDesktop()
+    const snapshot = await desktop.getBootProgress()
+    expect(snapshot.retryable).not.toBe(true)
+    FakeWebSocket.mode = 'fail'
+
+    render(<Harness />)
+    await flushAsync()
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect($gatewayState.get()).toBe('error')
+    expect($desktopBoot.get().error).toBeNull()
+
+    FakeWebSocket.mode = 'open'
+    await advanceBackoff()
+
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(FakeWebSocket.instances[1].url).toBe(FakeWebSocket.instances[0].url)
+    expect($gatewayState.get()).toBe('open')
+    expect($desktopBoot.get().error).toBeNull()
+    expect($desktopBoot.get().running).toBe(false)
+  })
+
+  it('recovers from a first-handshake timeout and closes the half-open socket', async () => {
+    await hostedDesktop()
+    FakeWebSocket.mode = 'hang'
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('connecting')
+
+    await advanceBackoff()
+    expect(FakeWebSocket.instances[0].readyState).toBe(FakeWebSocket.CLOSED)
+    expect($desktopBoot.get().error).toBeNull()
+
+    FakeWebSocket.mode = 'open'
+    await advanceBackoff()
+
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect($gatewayState.get()).toBe('open')
+    expect($desktopBoot.get().running).toBe(false)
+    expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it.each(['fail', 'hang'] as const)('stops after the existing retry budget when handshakes %s', async mode => {
+    const desktop = await hostedDesktop()
+    FakeWebSocket.mode = mode
+    render(<Harness />)
+    await flushAsync()
+
+    // At most five retries, each with <=15s backoff and <=15s handshake.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200_000)
+    })
+    expect(FakeWebSocket.instances).toHaveLength(6)
+    expect(desktop.getConnection).toHaveBeenCalledTimes(6)
+    expect($desktopBoot.get().error).toBe('Could not connect to Hermes gateway')
+    expect($desktopBoot.get().running).toBe(false)
+
+    FakeWebSocket.mode = 'open'
+    await advanceBackoff()
+    expect(FakeWebSocket.instances).toHaveLength(6)
+  })
+
+  it('does not retry confirmed reauthentication even if boot progress says retryable', async () => {
+    const desktop = await hostedDesktop()
+    const connection = await desktop.getConnection()
+    desktop.getConnection.mockResolvedValue({ ...connection, authMode: 'oauth' })
+    desktop.getBootProgress.mockResolvedValue({ ...(await desktop.getBootProgress()), retryable: true })
+    desktop.getGatewayWsUrl = vi.fn(async () => ({
+      ok: false as const,
+      error: '401: expired session',
+      needsOauthLogin: true
+    }))
+    desktop.getConnection.mockClear()
+
+    render(<Harness />)
+    await flushAsync()
+    expect($desktopBoot.get().error).toContain('Sign in')
+    await advanceBackoff()
+    expect(desktop.getConnection).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('does not retry an invalid WebSocket URL', async () => {
+    const desktop = await hostedDesktop()
+    desktop.getConnection.mockResolvedValue({ ...(await desktop.getConnection()), wsUrl: 'https://bad.example' })
+    desktop.getConnection.mockClear()
+
+    render(<Harness />)
+    await flushAsync()
+    expect($desktopBoot.get().error).toContain('requires a ws:// or wss:// URL')
+    await advanceBackoff()
+    expect(desktop.getConnection).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('does not reinterpret an ordinary configuration error as a transport failure', async () => {
+    const desktop = await hostedDesktop()
+    desktop.getConnection.mockRejectedValue(new Error('Missing gateway configuration'))
+
+    render(<Harness />)
+    await flushAsync()
+    expect($desktopBoot.get().error).toBe('Missing gateway configuration')
+    await advanceBackoff()
+    expect(desktop.getConnection).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it.each(['fail', 'hang'] as const)('does not reconnect after unmount during a %s handshake', async mode => {
+    const desktop = await hostedDesktop()
+    FakeWebSocket.mode = mode
+    const view = render(<Harness />)
+    await flushAsync()
+    expect(FakeWebSocket.instances).toHaveLength(1)
+
+    view.unmount()
+    expect(FakeWebSocket.instances[0].readyState).toBe(FakeWebSocket.CLOSED)
+    FakeWebSocket.mode = 'open'
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await expect(reconnectGateway()).rejects.toThrow('Gateway reconnect is unavailable')
+      await vi.advanceTimersByTimeAsync(200_000)
+    })
+    expect(desktop.getConnection).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it('still reconnects after a successful hosted boot', async () => {
+    await hostedDesktop()
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    act(() => FakeWebSocket.instances[0].drop())
+    await advanceBackoff()
+
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect($gatewayState.get()).toBe('open')
+    expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it('does not change Electron boot retry policy for a socket failure', async () => {
+    const desktop = fakeDesktop()
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    FakeWebSocket.mode = 'fail'
+    render(<Harness />)
+    await flushAsync()
+
+    expect($desktopBoot.get().error).toBe('Could not connect to Hermes gateway')
+    await advanceBackoff()
+    expect(desktop.getConnection).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
 })
 
 // Let pending microtasks (awaits) AND the queued 0ms socket open/error fire.
