@@ -2339,7 +2339,10 @@ def get_running_pid(
         if _record_matches_live_gateway_pid(record, pid):
             return pid
 
-    _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+    # The runtime lock is held, so neither record being locally verifiable
+    # proves it is stale (the owner may be in another PID namespace). Keep
+    # both files intact: unlinking a held lock would let a second gateway
+    # acquire a new inode while the original gateway is still running.
     if pid_path is None:
         runtime_pid = get_runtime_status_running_pid()
         if runtime_pid is not None:
