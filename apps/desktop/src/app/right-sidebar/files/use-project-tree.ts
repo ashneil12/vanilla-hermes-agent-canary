@@ -2,7 +2,8 @@ import { useStore } from '@nanostores/react'
 import { atom } from 'nanostores'
 import { useCallback, useEffect, useMemo } from 'react'
 
-import { $connection } from '@/store/session'
+import { desktopDefaultCwd } from '@/lib/desktop-fs'
+import { $connection, setCurrentCwd } from '@/store/session'
 import { $workspaceChangeTick, consumeWorkspaceChange } from '@/store/workspace-events'
 
 import { clearProjectDirCache, type ProjectTreeEntry, readProjectDir } from './ipc'
@@ -153,11 +154,18 @@ function clearProjectTree() {
 /** Sessions record their launch cwd; deleted worktrees and remote-backend
  *  paths arrive here as directories that don't exist on this machine. Rather
  *  than bricking the tree, display the sanitized workspace fallback (main
- *  prefers the configured default project dir). Local connections only —
- *  remote trees are read through the remote bridge. */
-async function fallbackRootFor(cwd: string): Promise<string | null> {
-  if ($connection.get()?.mode === 'remote') {
-    return null
+ *  prefers the configured default project dir). Remote connections ask that
+ *  same backend for its default cwd so a Windows path cannot pin Linux to
+ *  ENOENT. */
+async function fallbackRootFor(cwd: string, sourceIsRemote: boolean): Promise<string | null> {
+  if (sourceIsRemote) {
+    try {
+      const fallback = (await desktopDefaultCwd())?.cwd?.trim() || ''
+
+      return fallback && fallback !== cwd ? fallback : null
+    } catch {
+      return null
+    }
   }
 
   const sanitize = window.hermesDesktop?.sanitizeWorkspaceCwd
@@ -208,11 +216,12 @@ async function loadRoot(cwd: string, { force = false }: { force?: boolean } = {}
     rootLoading: true
   })
 
+  const sourceIsRemote = $connection.get()?.mode === 'remote'
   let resolvedCwd = cwd
   let { entries, error } = await readProjectDir(cwd, cwd)
 
   if (error) {
-    const fallback = await fallbackRootFor(cwd)
+    const fallback = await fallbackRootFor(cwd, sourceIsRemote)
 
     if (fallback) {
       const retry = await readProjectDir(fallback, fallback)
@@ -221,6 +230,9 @@ async function loadRoot(cwd: string, { force = false }: { force?: boolean } = {}
         resolvedCwd = fallback
         entries = retry.entries
         error = undefined
+        if (sourceIsRemote) {
+          setCurrentCwd(fallback)
+        }
       }
     }
   }

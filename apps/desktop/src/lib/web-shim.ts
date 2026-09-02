@@ -423,15 +423,23 @@ function installWebShim(): void {
   const config = resolveConfig()
 
   const bridge = {
-    getConnection: async () => {
+    getConnection: async (profile?: null | string) => {
       const fresh = resolveConfig()
       const { baseUrl, wsUrl } = buildUrls(fresh)
+      const requestedProfile = (profile ?? '').trim()
+
       return {
         baseUrl,
         wsUrl,
         token: fresh.token,
         mode: 'remote' as const,
         source: 'env' as const,
+        // Hosted HermesOS exposes one multi-profile gateway. Mark named
+        // profile lookups as shared-primary so the renderer scopes RPCs with
+        // `profile` on the existing socket instead of dialing the same URL as
+        // a phantom secondary. The latter detaches the live runtime whenever
+        // its 20-second hydration attempt closes (#hosted-profile-loop).
+        ...(requestedProfile ? { profile: requestedProfile, sharedPrimary: true } : {}),
         isFullscreen: false,
         nativeOverlayWidth: 0,
         windowButtonPosition: null,

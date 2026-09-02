@@ -236,6 +236,46 @@ export function runBackup(): Promise<ActionResponse & { archive?: string }> {
   })
 }
 
+export interface DashboardBackupInfo {
+  archive: string
+  modified_at: number
+  name: string
+  size: number
+}
+
+export function getBackups(): Promise<{ backups: DashboardBackupInfo[] }> {
+  return hermesApi<{ backups: DashboardBackupInfo[] }>({ path: '/api/ops/backups' })
+}
+
+/** Open a completed dashboard backup as a streaming browser download.
+ *
+ * The archive can be large, so do not fetch it into renderer memory. The
+ * backend accepts its narrowly-scoped session token on this one download
+ * route, matching the existing files/download contract for shell-opened URLs.
+ */
+export async function openBackupDownload(archive: string): Promise<void> {
+  const target = archive.trim()
+
+  if (!target) {
+    throw new Error('Backup archive path is missing')
+  }
+
+  const connection = await window.hermesDesktop.getConnection()
+  const baseUrl = connection.baseUrl?.replace(/\/$/, '')
+
+  if (!baseUrl) {
+    throw new Error('Hermes backend URL is unavailable')
+  }
+
+  const url = new URL(`${baseUrl}/api/ops/backup/download`)
+  url.searchParams.set('archive', target)
+  if (connection.token) {
+    url.searchParams.set('token', connection.token)
+  }
+
+  await window.hermesDesktop.openExternal(url.toString())
+}
+
 export function runDebugShare(): Promise<DebugShareResponse> {
   return hermesApi<DebugShareResponse>({
     path: '/api/ops/debug-share',
