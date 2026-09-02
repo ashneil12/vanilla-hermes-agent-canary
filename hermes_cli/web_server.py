@@ -2394,7 +2394,8 @@ def _fs_find_git_root(start: Path) -> str | None:
 
 
 def _fs_default_cwd() -> str:
-    cfg_terminal = load_config().get("terminal") or {}
+    config = load_config()
+    cfg_terminal = config.get("terminal") or {}
     raw = str(cfg_terminal.get("cwd") or os.environ.get("TERMINAL_CWD") or "").strip()
     if raw and raw not in {".", "auto", "cwd"}:
         try:
@@ -2417,6 +2418,29 @@ def _fs_default_cwd() -> str:
         try:
             resolved = candidate.expanduser().resolve(strict=False)
             if resolved.is_dir() and os.access(resolved, os.W_OK):
+                configured_cwd = str(cfg_terminal.get("cwd") or "").strip()
+                stale_windows_cwd = (
+                    os.name != "nt"
+                    and bool(re.match(r"^\.?(?:[A-Za-z]:[\\/]|\\\\)", configured_cwd))
+                )
+                if candidate == _FS_HOSTED_WORKSPACE_ROOT and stale_windows_cwd:
+                    # Desktop profile data can be synced into a hosted Linux
+                    # agent. Once the safe hosted workspace has been selected,
+                    # repair that cross-platform value as well as returning a
+                    # fallback so Doctor, new sessions, and later restarts all
+                    # see the same valid workspace.
+                    with _CONFIG_MUTATION_LOCK:
+                        latest = load_config()
+                        latest_terminal = latest.get("terminal") or {}
+                        latest_cwd = str(latest_terminal.get("cwd") or "").strip()
+                        if os.name != "nt" and re.match(
+                            r"^\.?(?:[A-Za-z]:[\\/]|\\\\)", latest_cwd
+                        ):
+                            latest["terminal"] = {
+                                **latest_terminal,
+                                "cwd": str(resolved),
+                            }
+                            save_config(latest)
                 return str(resolved)
         except (OSError, RuntimeError):
             continue

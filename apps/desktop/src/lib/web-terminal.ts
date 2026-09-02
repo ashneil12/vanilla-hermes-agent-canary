@@ -480,15 +480,16 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
 
   return {
     async start(settings = {}): Promise<HermesTerminalSession> {
-      const profile = options.getProfile() || 'default'
+      // A hosted terminal belongs to the agent computer, not to the active
+      // chat persona. Named profiles share the same dashboard container and
+      // workspace volume, while the sidecar deliberately accepts only the
+      // machine-scoped `default` identity. Do not make selecting a bot disable
+      // the browser terminal.
+      const profile = 'default'
       const connection = options.getConnectionId()
 
       if (connection && connection !== 'local') {
         throw new Error('Browser terminals are not available for the selected remote connection')
-      }
-
-      if (profile !== 'default') {
-        throw new Error('Browser terminals currently support only the default profile')
       }
 
       const size = dimensions(settings.cols, settings.rows)

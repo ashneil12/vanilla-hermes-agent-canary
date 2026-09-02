@@ -102,11 +102,13 @@ def test_fs_default_cwd_recovers_stale_desktop_path_to_hosted_workspace(
     # Mirrors hosted WebUI: the persisted desktop cwd is invalid on Linux,
     # while the dashboard process itself starts in the read-only image tree.
     monkeypatch.setattr(web_server, "_FS_HOSTED_WORKSPACE_ROOT", hosted_workspace)
-    monkeypatch.setattr(
-        web_server,
-        "load_config",
-        lambda: {"terminal": {"cwd": "C:/Users/18584/Documents/Epifanio Brain"}},
-    )
+    config = {
+        "terminal": {"cwd": "C:/Users/18584/Documents/Epifanio Brain"},
+        "model": {"provider": "openai-codex"},
+    }
+    saved = []
+    monkeypatch.setattr(web_server, "load_config", lambda: config)
+    monkeypatch.setattr(web_server, "save_config", lambda value: saved.append(value))
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
     monkeypatch.chdir(image_checkout)
 
@@ -114,3 +116,28 @@ def test_fs_default_cwd_recovers_stale_desktop_path_to_hosted_workspace(
 
     assert response.status_code == 200
     assert response.json()["cwd"] == str(hosted_workspace.resolve())
+    assert saved == [
+        {
+            "terminal": {"cwd": str(hosted_workspace.resolve())},
+            "model": {"provider": "openai-codex"},
+        }
+    ]
+
+
+def test_fs_default_cwd_does_not_rewrite_missing_linux_workspace(
+    client, monkeypatch, tmp_path
+):
+    hosted_workspace = tmp_path / "workspace"
+    hosted_workspace.mkdir()
+    config = {"terminal": {"cwd": "/mnt/temporarily-unavailable"}}
+    saved = []
+    monkeypatch.setattr(web_server, "_FS_HOSTED_WORKSPACE_ROOT", hosted_workspace)
+    monkeypatch.setattr(web_server, "load_config", lambda: config)
+    monkeypatch.setattr(web_server, "save_config", lambda value: saved.append(value))
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    response = client.get("/api/fs/default-cwd")
+
+    assert response.status_code == 200
+    assert response.json()["cwd"] == str(hosted_workspace.resolve())
+    assert saved == []
