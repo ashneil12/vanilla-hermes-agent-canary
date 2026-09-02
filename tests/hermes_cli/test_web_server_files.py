@@ -132,6 +132,69 @@ def test_download_authenticates_via_query_token(forced_files_client):
     ).status_code == 401
 
 
+def test_backup_download_authenticates_via_query_token(
+    forced_files_client, monkeypatch
+):
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    archive = root / "hermes-backup-test.zip"
+    archive.write_bytes(b"backup-bytes")
+    monkeypatch.setattr(web_server, "_dashboard_backup_dir", lambda: root)
+
+    listed = client.get("/api/ops/backups")
+    assert listed.status_code == 200
+    assert listed.json()["backups"] == [
+        {
+            "archive": str(archive),
+            "name": archive.name,
+            "size": len(b"backup-bytes"),
+            "modified_at": archive.stat().st_mtime,
+        }
+    ]
+
+    del client.headers[web_server._SESSION_HEADER_NAME]
+
+    ok = client.get(
+        "/api/ops/backup/download",
+        params={"archive": str(archive), "token": web_server._SESSION_TOKEN},
+    )
+    assert ok.status_code == 200
+    assert ok.content == b"backup-bytes"
+    assert ok.headers["content-disposition"].startswith("attachment;")
+
+    assert client.get(
+        "/api/ops/backup/download",
+        params={"archive": str(archive), "token": "nope"},
+    ).status_code == 401
+
+
+def test_backup_listing_uses_default_root_not_profile_scope(
+    forced_files_client, monkeypatch, tmp_path
+):
+    import hermes_constants
+
+    client, _root = forced_files_client
+    process_home = tmp_path / "process-home"
+    backup_dir = process_home / "backups"
+    backup_dir.mkdir(parents=True)
+    archive = backup_dir / "hermes-backup-process.zip"
+    archive.write_bytes(b"process-backup")
+
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: process_home)
+    monkeypatch.setattr(
+        web_server,
+        "get_hermes_home",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("profile-scoped home must not select dashboard backups")
+        ),
+    )
+
+    listed = client.get("/api/ops/backups")
+
+    assert listed.status_code == 200
+    assert listed.json()["backups"][0]["archive"] == str(archive)
+
+
 def test_stream_requires_header_auth_and_supports_ranges(forced_files_client):
     client, root = forced_files_client
     file_path = _seed_file(client, root, name="out/demo.mp4")
@@ -373,5 +436,3 @@ def test_credential_dir_trees_blocked_on_subdir_descent(forced_files_client):
     # is filtered because the parent component is a credential dir.
     mcp_listing = client.get("/api/files", params={"path": str(mcp_dir)})
     assert [e["name"] for e in mcp_listing.json()["entries"]] == []
-
-

@@ -8,9 +8,11 @@ import {
   type CuratorStatusResponse,
   type DebugShareResponse,
   getActionStatus,
+  getBackups,
   getCuratorStatus,
   getMemoryStatus,
   type MemoryStatusResponse,
+  openBackupDownload,
   resetMemory,
   runBackup,
   runCurator,
@@ -56,6 +58,7 @@ export function MaintenancePanel() {
 
   const [actionName, setActionName] = useState<null | string>(null)
   const [actionStatus, setActionStatus] = useState<ActionStatusResponse | null>(null)
+  const [backupArchive, setBackupArchive] = useState<string | null>(null)
   const [curator, setCurator] = useState<CuratorStatusResponse | null>(null)
   const [curatorBusy, setCuratorBusy] = useState(false)
   const [memory, setMemory] = useState<MemoryStatusResponse | null>(null)
@@ -72,6 +75,9 @@ export function MaintenancePanel() {
       .catch(() => {})
     getMemoryStatus()
       .then(next => !cancelled && setMemory(next))
+      .catch(() => {})
+    getBackups()
+      .then(next => !cancelled && setBackupArchive(next.backups[0]?.archive?.trim() || null))
       .catch(() => {})
 
     return () => void (cancelled = true)
@@ -119,7 +125,7 @@ export function MaintenancePanel() {
   }, [actionName])
 
   const launch = useCallback(
-    async (label: string, start: () => Promise<ActionResponse>) => {
+    async <T extends ActionResponse,>(label: string, start: () => Promise<T>): Promise<null | T> => {
       setError('')
 
       try {
@@ -127,13 +133,33 @@ export function MaintenancePanel() {
         setActionStatus(null)
         setActionName(started.name)
         notify({ kind: 'success', title: mm.actionStarted(label), message: '' })
+        return started
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
         notifyError(err, mm.actionFailed(label))
+        return null
       }
     },
     [mm]
   )
+
+  const createBackup = useCallback(async () => {
+    setBackupArchive(null)
+    const started = await launch(mm.backup, runBackup)
+    setBackupArchive(started?.archive?.trim() || null)
+  }, [launch, mm.backup])
+
+  const downloadBackup = useCallback(async () => {
+    if (!backupArchive) {
+      return
+    }
+
+    try {
+      await openBackupDownload(backupArchive)
+    } catch (err) {
+      notifyError(err, mm.backupDownloadFailed)
+    }
+  }, [backupArchive, mm.backupDownloadFailed])
 
   const shareDebug = useCallback(async () => {
     setSharing(true)
@@ -216,8 +242,18 @@ export function MaintenancePanel() {
           description={mm.backupDesc}
           disabled={actionStatus?.running === true}
           label={mm.backup}
-          onRun={() => void launch(mm.backup, runBackup)}
+          onRun={() => void createBackup()}
         />
+        {backupArchive && !(actionName === 'backup' && actionStatus?.running) && (
+          <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3">
+            <span className="min-w-0 truncate text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
+              {mm.backupReady}
+            </span>
+            <Button onClick={() => void downloadBackup()} size="xs" variant="outline">
+              {mm.downloadBackup}
+            </Button>
+          </div>
+        )}
         <OpRow
           description={mm.debugShareDesc}
           disabled={sharing}

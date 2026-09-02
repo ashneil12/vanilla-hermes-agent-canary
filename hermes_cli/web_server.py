@@ -587,7 +587,10 @@ def _has_valid_session_token(request: Request) -> bool:
 # Routes that may also authenticate via a ``?token=`` query param, for download
 # links opened by the OS shell or a new browser tab where the session header
 # can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
-_QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
+_QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({
+    "/api/files/download",
+    "/api/ops/backup/download",
+})
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
@@ -2314,6 +2317,10 @@ _FS_MIME_TYPES = {
     ".webp": "image/webp",
 }
 
+# Hosted Hermes instances mount their persistent project volume here. Local
+# desktop installs normally have no /workspace, so this remains a no-op there.
+_FS_HOSTED_WORKSPACE_ROOT = Path("/workspace")
+
 
 def _fs_path(raw_path: str) -> Path:
     raw = str(raw_path or "").strip()
@@ -2396,6 +2403,23 @@ def _fs_default_cwd() -> str:
                 return str(candidate)
         except (OSError, RuntimeError):
             pass
+    # A hosted dashboard runs from the immutable image checkout at
+    # /opt/hermes. Falling back to Path.cwd() after a stale desktop path (for
+    # example C:/Users/...) therefore gives the file tree a real but read-only
+    # directory. Prefer the purpose-built persistent workspace volume, then
+    # the legacy Hermes-home workspace, whenever either is writable.
+    from hermes_constants import get_default_hermes_root
+
+    for candidate in (
+        _FS_HOSTED_WORKSPACE_ROOT,
+        get_default_hermes_root() / "workspace",
+    ):
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+            if resolved.is_dir() and os.access(resolved, os.W_OK):
+                return str(resolved)
+        except (OSError, RuntimeError):
+            continue
     return str(Path.cwd())
 
 
@@ -14348,12 +14372,53 @@ async def run_security_audit():
 
 
 def _dashboard_backup_dir() -> Path:
-    return get_hermes_home() / "backups"
+    # Backups created from the dashboard Maintenance surface belong to the
+    # installation-wide state volume, not whichever named profile happens to
+    # be active in this server task.  The dashboard CLI can keep a profile
+    # HERMES_HOME override in its inherited ContextVar; using get_hermes_home()
+    # there makes an existing root backup disappear from the listing even
+    # though it is mounted and readable.
+    # The dashboard CLI may also update process HERMES_HOME to the active
+    # profile after launch, so get_process_hermes_home() is not a stable root
+    # in this path.  The canonical resolver folds <root>/profiles/<name> back
+    # to <root> in both desktop and hosted layouts.
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "backups"
 
 
 def _new_dashboard_backup_path() -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     return _dashboard_backup_dir() / f"hermes-backup-{stamp}-{secrets.token_hex(4)}.zip"
+
+
+@app.get("/api/ops/backups")
+async def list_dashboard_backups():
+    backup_dir = _dashboard_backup_dir()
+    try:
+        candidates = sorted(
+            (path for path in backup_dir.glob("hermes-backup-*.zip") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:20]
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not list backups: {exc}")
+
+    backups = []
+    for path in candidates:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        backups.append(
+            {
+                "archive": str(path),
+                "name": path.name,
+                "size": stat.st_size,
+                "modified_at": stat.st_mtime,
+            }
+        )
+    return {"backups": backups}
 
 
 @app.post("/api/ops/backup")

@@ -89,3 +89,28 @@ def test_fs_endpoints_require_auth(tmp_path):
     assert list_response.status_code == 401
     assert read_response.status_code == 401
     assert default_response.status_code == 401
+
+
+def test_fs_default_cwd_recovers_stale_desktop_path_to_hosted_workspace(
+    client, monkeypatch, tmp_path
+):
+    hosted_workspace = tmp_path / "workspace"
+    hosted_workspace.mkdir()
+    image_checkout = tmp_path / "image-checkout"
+    image_checkout.mkdir()
+
+    # Mirrors hosted WebUI: the persisted desktop cwd is invalid on Linux,
+    # while the dashboard process itself starts in the read-only image tree.
+    monkeypatch.setattr(web_server, "_FS_HOSTED_WORKSPACE_ROOT", hosted_workspace)
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {"terminal": {"cwd": "C:/Users/18584/Documents/Epifanio Brain"}},
+    )
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.chdir(image_checkout)
+
+    response = client.get("/api/fs/default-cwd")
+
+    assert response.status_code == 200
+    assert response.json()["cwd"] == str(hosted_workspace.resolve())
