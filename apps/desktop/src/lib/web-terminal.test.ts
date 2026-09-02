@@ -168,18 +168,19 @@ describe('browser terminal session capability', () => {
     }])
   })
 
-  it('rejects nondefault profile and remote connection before any host operation', async () => {
+  it('uses the machine terminal for a named profile but rejects a remote connection', async () => {
     const h = harness()
     h.getProfile.mockReturnValue('customer-secondary')
-    await expect(h.terminal.start()).rejects.toThrow('only the default profile')
-    h.getProfile.mockReturnValue('default')
+    const namedProfile = await h.start()
+    expect(h.calls('start')[0].body).toMatchObject({ profile: 'default' })
+    await h.terminal.dispose(namedProfile.session.id)
     h.getConnectionId.mockReturnValue('remote-connection')
     await expect(h.terminal.start()).rejects.toThrow('selected remote connection')
-    expect(h.request).not.toHaveBeenCalled()
-    expect(h.captureRequest).not.toHaveBeenCalled()
+    expect(h.calls('start')).toHaveLength(1)
+    expect(h.captureRequest).toHaveBeenCalledOnce()
     h.getConnectionId.mockReturnValue('local')
     await h.start()
-    expect(h.calls('start')).toHaveLength(1)
+    expect(h.calls('start')).toHaveLength(2)
   })
 
   it('retains the actual server error rather than reporting success or losing it to shape validation', async () => {
