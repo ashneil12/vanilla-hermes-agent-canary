@@ -89,6 +89,7 @@ const registryOf = (ids: string[]) => ({
   secureTokenStorage: true,
   connections: ids.map(id => ({ id, kind: id === 'local' ? 'local' : 'remote', label: id }))
 })
+
 const status = (over: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStatus => ({
   supported: true,
   behind: 3,

@@ -254,18 +254,23 @@ describe('useProjectTree', () => {
 
   it('replaces a stale Windows cwd with the remote Linux workspace', async () => {
     const windowsCwd = 'C:/Users/18584/Documents/Epifanio Brain'
+
     const api = vi.fn(async ({ path }: { path: string }) => {
       if (path === '/api/fs/default-cwd') {
         return { branch: '', cwd: '/workspace' }
       }
+
       if (path.includes(encodeURIComponent(windowsCwd))) {
         return { entries: [], error: 'ENOENT' }
       }
+
       if (path.includes(encodeURIComponent('/workspace'))) {
         return { entries: [{ name: 'project', path: '/workspace/project', isDirectory: true }] }
       }
+
       throw new Error(`unexpected path ${path}`)
     })
+
     ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = { api, readDir }
     $connection.set({ baseUrl: 'https://agent.example', mode: 'remote', profile: 'epifanio' } as never)
     setCurrentCwd(windowsCwd)

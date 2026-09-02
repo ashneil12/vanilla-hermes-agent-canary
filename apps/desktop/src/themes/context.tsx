@@ -57,9 +57,13 @@ function readDashboardModeFromUrl(): ThemeMode | null {
 
   const theme = new URLSearchParams(window.location.search).get('theme')
 
-  if (theme === 'dark') {return 'dark'}
+  if (theme === 'dark') {
+    return 'dark'
+  }
 
-  if (theme === 'hermesos-light' || theme === 'light') {return 'light'}
+  if (theme === 'hermesos-light' || theme === 'light') {
+    return 'light'
+  }
 
   return null
 }
@@ -396,9 +400,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   )
 
   const [mode, setModeState] = useState<ThemeMode>(() =>
-    typeof window === 'undefined'
-      ? 'system'
-      : readDashboardModeFromUrl() ?? modePref.resolve(readBootProfileKey())
+    typeof window === 'undefined' ? 'system' : (readDashboardModeFromUrl() ?? modePref.resolve(readBootProfileKey()))
   )
 
   // Follow profile switches: paint the profile's assigned skin + mode and
@@ -502,12 +504,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
 
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent) {return}
+      if (event.source !== window.parent) {
+        return
+      }
 
       const data = event.data as
-        | { type?: unknown; source?: unknown; appearance?: { colorScheme?: unknown } }
-        | null
-        | undefined
+        { type?: unknown; source?: unknown; appearance?: { colorScheme?: unknown } } | null | undefined
 
       if (
         !data ||

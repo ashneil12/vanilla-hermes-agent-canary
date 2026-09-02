@@ -216,7 +216,12 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     keybindActionId: 'nav.artifacts'
   },
   // hermes-fork: HermesOS web-only — opens the full dashboard (telemetry/config/channels/TUI) at /dash.
-  { id: 'admin-panel', label: 'Admin Panel', icon: props => <Codicon name="dashboard" {...props} />, action: 'admin-panel' },
+  {
+    id: 'admin-panel',
+    label: 'Admin Panel',
+    icon: props => <Codicon name="dashboard" {...props} />,
+    action: 'admin-panel'
+  },
   {
     id: 'cron',
     label: '',

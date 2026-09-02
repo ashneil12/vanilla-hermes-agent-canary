@@ -5065,8 +5065,10 @@ describe('uploadComposerAttachment remote read failures', () => {
       })
 
       const calls: { method: string; params?: Record<string, unknown> }[] = []
+
       const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
         calls.push({ method, params })
+
         if (method === 'file.attach') {
           return {
             attached: true,
@@ -5074,6 +5076,7 @@ describe('uploadComposerAttachment remote read failures', () => {
             uploaded: true
           } as never
         }
+
         return {} as never
       })
 

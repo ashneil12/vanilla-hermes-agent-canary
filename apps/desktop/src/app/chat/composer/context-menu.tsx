@@ -69,6 +69,7 @@ export function ContextMenu({
   const isWebClient =
     typeof window !== 'undefined' &&
     Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
+
   const webAttach = isWebClient && Boolean(onWebAttachFiles)
   const filesInputRef = useRef<HTMLInputElement>(null)
   const imagesInputRef = useRef<HTMLInputElement>(null)
@@ -77,8 +78,10 @@ export function ContextMenu({
     if (!input || !onWebAttachFiles) {
       return
     }
+
     const files = Array.from(input.files ?? [])
     input.value = '' // reset so re-picking the same file fires change again
+
     if (files.length) {
       onWebAttachFiles(files)
     }
@@ -111,9 +114,7 @@ export function ContextMenu({
           <ContextMenuItem
             disabled={webAttach ? false : !onPickFiles}
             icon={FileText}
-            {...(webAttach
-              ? { onClick: () => filesInputRef.current?.click() }
-              : { onSelect: onPickFiles })}
+            {...(webAttach ? { onClick: () => filesInputRef.current?.click() } : { onSelect: onPickFiles })}
           >
             {c.files}
           </ContextMenuItem>
@@ -123,9 +124,7 @@ export function ContextMenu({
           <ContextMenuItem
             disabled={webAttach ? false : !onPickImages}
             icon={ImageIcon}
-            {...(webAttach
-              ? { onClick: () => imagesInputRef.current?.click() }
-              : { onSelect: onPickImages })}
+            {...(webAttach ? { onClick: () => imagesInputRef.current?.click() } : { onSelect: onPickImages })}
           >
             {c.images}
           </ContextMenuItem>

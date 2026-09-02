@@ -230,6 +230,7 @@ async function loadRoot(cwd: string, { force = false }: { force?: boolean } = {}
         resolvedCwd = fallback
         entries = retry.entries
         error = undefined
+
         if (sourceIsRemote) {
           setCurrentCwd(fallback)
         }

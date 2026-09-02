@@ -77,7 +77,8 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
     name: 'Venice',
     short: 'recommended · private frontier models',
     envKey: 'VENICE_API_KEY',
-    description: 'Private, uncensored frontier models. Managed by HermesOS when enabled — otherwise paste your own Venice key.',
+    description:
+      'Private, uncensored frontier models. Managed by HermesOS when enabled — otherwise paste your own Venice key.',
     docsUrl: 'https://venice.ai/settings/api'
   },
   {
@@ -572,7 +573,9 @@ export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => vo
       try {
         const s = await getStatus()
 
-        if (!cancelled) {setDashboardUrl(s.dashboard_url ?? null)}
+        if (!cancelled) {
+          setDashboardUrl(s.dashboard_url ?? null)
+        }
       } catch {
         /* status unavailable — leave null; click falls back to the API-key path */
       }
@@ -607,7 +610,6 @@ export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => vo
     </button>
   )
 }
-
 
 // Presentational two-column key picker. Onboarding feeds it its curated
 // options + a ctx-bound save; the Providers settings page feeds it the full

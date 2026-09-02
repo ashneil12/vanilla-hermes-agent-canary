@@ -9,7 +9,9 @@ class FakeSocket extends EventTarget {
   static instances: FakeSocket[] = []
   readonly url: string
   readyState = 0
-  close = vi.fn(() => { this.readyState = 3 })
+  close = vi.fn(() => {
+    this.readyState = 3
+  })
 
   constructor(url: string) {
     super()
@@ -35,7 +37,10 @@ class FakeSocket extends EventTarget {
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: Error) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes
+    reject = no
+  })
 
   return { promise, resolve, reject }
 }
@@ -73,9 +78,14 @@ function harness(handler?: (request: Request) => Promise<unknown>) {
 
   const getProfile = vi.fn<() => string | null>(() => null)
   const getConnectionId = vi.fn<() => string | null>(() => null)
-  const captureRequest = vi.fn(() => async <T>(params: Request) => await request(params) as T)
+  const captureRequest = vi.fn(
+    () =>
+      async <T>(params: Request) =>
+        (await request(params)) as T
+  )
   const terminal = createWebTerminal({ captureRequest, getProfile, getConnectionId })
-  const calls = (action: string) => request.mock.calls.map(([req]) => req).filter(req => (req.body as { action: string }).action === action)
+  const calls = (action: string) =>
+    request.mock.calls.map(([req]) => req).filter(req => (req.body as { action: string }).action === action)
 
   async function start() {
     const pending = terminal.start()
@@ -110,14 +120,18 @@ describe('browser terminal session capability', () => {
     const h = harness()
     const settled = vi.fn()
 
-    const pending = h.terminal.start({ cwd: '/workspace/project', cols: 110, rows: 32 }).then(value => { settled();
+    const pending = h.terminal.start({ cwd: '/workspace/project', cols: 110, rows: 32 }).then(value => {
+      settled()
 
- return value })
+      return value
+    })
 
     await flush()
     expect(settled).not.toHaveBeenCalled()
     expect(h.calls('start')[0]).toMatchObject({
-      path: '/api/desktop-terminal', method: 'POST', timeoutMs: 20_000,
+      path: '/api/desktop-terminal',
+      method: 'POST',
+      timeoutMs: 20_000,
       body: { action: 'start', cols: 110, rows: 32, cwd: '/workspace/project', profile: 'default' }
     })
     const socket = FakeSocket.instances[0]
@@ -125,7 +139,10 @@ describe('browser terminal session capability', () => {
     expect(url.host).toBe(window.location.host)
     expect(url.protocol).toBe('ws:')
     expect(url.pathname).toBe('/_sidecar/api/terminal/ws')
-    expect([...url.searchParams]).toEqual([['token', 'ticket-native-1'], ['includeScrollback', '1']])
+    expect([...url.searchParams]).toEqual([
+      ['token', 'ticket-native-1'],
+      ['includeScrollback', '1']
+    ])
     socket.open()
     await expect(pending).resolves.toEqual({ id: 'native-1', cwd: '/workspace', shell: 'bash' })
     expect(h.calls('start')).toHaveLength(1)
@@ -133,9 +150,14 @@ describe('browser terminal session capability', () => {
 
   it('uses wss for an https origin without accepting a server-specified host', async () => {
     const browser = window
-    vi.stubGlobal('window', new Proxy(browser, {
-      get(target, key) { return key === 'location' ? { origin: 'https://terminal.example' } : Reflect.get(target, key) }
-    }))
+    vi.stubGlobal(
+      'window',
+      new Proxy(browser, {
+        get(target, key) {
+          return key === 'location' ? { origin: 'https://terminal.example' } : Reflect.get(target, key)
+        }
+      })
+    )
     const h = harness()
     const { session, socket } = await h.start()
     expect(socket.url).toBe('wss://terminal.example/_sidecar/api/terminal/ws?token=ticket-native-1&includeScrollback=1')
@@ -158,14 +180,22 @@ describe('browser terminal session capability', () => {
     '/_sidecar/api/terminal/ws?token=a\\evil',
     null
   ])('rejects unsafe/malformed socket path %s and stops only the allocated session', async webSocketPath => {
-    const h = harness(async request => (request.body as { action: string }).action === 'start'
-      ? startReply('native-own', { webSocketPath }) : { ok: true })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start'
+        ? startReply('native-own', { webSocketPath })
+        : { ok: true }
+    )
 
     await expect(h.terminal.start()).rejects.toThrow('invalid terminal WebSocket path')
     expect(FakeSocket.instances).toHaveLength(0)
-    expect(h.calls('stop').map(req => req.body)).toEqual([{
-      action: 'stop', sessionKey: 'native-own', sessionToken: 'session-secret-native-own', profile: 'default'
-    }])
+    expect(h.calls('stop').map(req => req.body)).toEqual([
+      {
+        action: 'stop',
+        sessionKey: 'native-own',
+        sessionToken: 'session-secret-native-own',
+        profile: 'default'
+      }
+    ])
   })
 
   it('rejects nondefault profile and remote connection before any host operation', async () => {
@@ -190,15 +220,18 @@ describe('browser terminal session capability', () => {
   })
 
   it('cleans up a malformed successful start once it knows the session credentials', async () => {
-    const h = harness(async request => (request.body as { action: string }).action === 'start'
-      ? startReply('native-own', { shell: null }) : { ok: true })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? startReply('native-own', { shell: null }) : { ok: true }
+    )
 
     await expect(h.terminal.start()).rejects.toThrow('invalid terminal session details')
     expect(h.calls('stop')).toHaveLength(1)
   })
 
   it('does not stop a previous tab if a broken server returns its duplicate id', async () => {
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? startReply() : { ok: true })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? startReply() : { ok: true }
+    )
     const first = await h.start()
     await expect(h.terminal.start()).rejects.toThrow('duplicate terminal session')
     expect(h.calls('stop')).toHaveLength(0)
@@ -273,32 +306,42 @@ describe('browser terminal session capability', () => {
     expect(exit).toHaveBeenCalledExactlyOnceWith({ code: 0, signal: null })
   })
 
-  it.each([false, undefined])('requires a real stop after a closed frame with cleanupConfirmed=%s', async cleanupConfirmed => {
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? startReply() : { ok: false, error: 'Terminal cleanup could not be confirmed' })
-    const { session, socket } = await h.start()
-    const exit = vi.fn()
-    h.terminal.onExit(session.id, exit)
-    socket.message({ type: 'closed', reason: 'error', exitCode: null, signal: null, cleanupConfirmed })
-    expect(exit).toHaveBeenCalledExactlyOnceWith({ code: null, signal: null })
-    await expect(h.terminal.dispose(session.id)).resolves.toBe(false)
-    expect(h.calls('stop')).toHaveLength(1)
-    expect(h.calls('stop')[0].body).toMatchObject({ sessionKey: session.id, sessionToken: 'session-secret-native-1' })
-  })
+  it.each([false, undefined])(
+    'requires a real stop after a closed frame with cleanupConfirmed=%s',
+    async cleanupConfirmed => {
+      const h = harness(async request =>
+        (request.body as { action: string }).action === 'start'
+          ? startReply()
+          : { ok: false, error: 'Terminal cleanup could not be confirmed' }
+      )
+      const { session, socket } = await h.start()
+      const exit = vi.fn()
+      h.terminal.onExit(session.id, exit)
+      socket.message({ type: 'closed', reason: 'error', exitCode: null, signal: null, cleanupConfirmed })
+      expect(exit).toHaveBeenCalledExactlyOnceWith({ code: null, signal: null })
+      await expect(h.terminal.dispose(session.id)).resolves.toBe(false)
+      expect(h.calls('stop')).toHaveLength(1)
+      expect(h.calls('stop')[0].body).toMatchObject({ sessionKey: session.id, sessionToken: 'session-secret-native-1' })
+    }
+  )
 
-  it.each(['error', 'close'])('fails a %s during ticket attach, stops once, and never starts a replacement', async event => {
-    const h = harness()
-    const pending = h.terminal.start()
-    const rejected = expect(pending).rejects.toThrow('Could not attach the terminal WebSocket')
-    await flush()
-    const socket = FakeSocket.instances[0]
-    socket.dispatchEvent(new Event(event))
-    await rejected
-    expect(socket.close).toHaveBeenCalledOnce()
-    expect(h.calls('stop')).toHaveLength(1)
-    expect(h.calls('start')).toHaveLength(1)
-    expect(h.calls('attach')).toHaveLength(0)
-    expect(FakeSocket.instances).toHaveLength(1)
-  })
+  it.each(['error', 'close'])(
+    'fails a %s during ticket attach, stops once, and never starts a replacement',
+    async event => {
+      const h = harness()
+      const pending = h.terminal.start()
+      const rejected = expect(pending).rejects.toThrow('Could not attach the terminal WebSocket')
+      await flush()
+      const socket = FakeSocket.instances[0]
+      socket.dispatchEvent(new Event(event))
+      await rejected
+      expect(socket.close).toHaveBeenCalledOnce()
+      expect(h.calls('stop')).toHaveLength(1)
+      expect(h.calls('start')).toHaveLength(1)
+      expect(h.calls('attach')).toHaveLength(0)
+      expect(FakeSocket.instances).toHaveLength(1)
+    }
+  )
 
   it('bounds a silent WebSocket handshake and cleans it up', async () => {
     const h = harness()
@@ -318,13 +361,18 @@ describe('browser terminal session capability', () => {
     await rejected
     const second = await h.start()
     expect(second.session.id).toBe('native-2')
-    expect(FakeSocket.instances.map(socket => new URL(socket.url).searchParams.get('token'))).toEqual(['ticket-native-1', 'ticket-native-2'])
+    expect(FakeSocket.instances.map(socket => new URL(socket.url).searchParams.get('token'))).toEqual([
+      'ticket-native-1',
+      'ticket-native-2'
+    ])
     expect(h.calls('stop')).toHaveLength(1)
   })
 
   it('times out a lost start response but cleans up an eventual late response without opening a socket', async () => {
     const late = deferred<unknown>()
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? late.promise : { ok: true })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? late.promise : { ok: true }
+    )
     const rejected = expect(h.terminal.start()).rejects.toThrow('timed out')
     await vi.advanceTimersByTimeAsync(20_000)
     await rejected
@@ -332,12 +380,17 @@ describe('browser terminal session capability', () => {
     await flush()
     expect(FakeSocket.instances).toHaveLength(0)
     expect(h.calls('stop')).toHaveLength(1)
-    expect(h.calls('stop')[0].body).toMatchObject({ sessionKey: 'native-late', sessionToken: 'session-secret-native-late' })
+    expect(h.calls('stop')[0].body).toMatchObject({
+      sessionKey: 'native-late',
+      sessionToken: 'session-secret-native-late'
+    })
   })
 
   it('stops a late start after page disposal and never reports it as open', async () => {
     const late = deferred<unknown>()
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? late.promise : { ok: true })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? late.promise : { ok: true }
+    )
     const rejected = expect(h.terminal.start()).rejects.toThrow('page closed')
     await flush()
     window.dispatchEvent(new Event('pagehide'))
@@ -347,23 +400,26 @@ describe('browser terminal session capability', () => {
     expect(h.calls('stop')[0].keepalive).toBe(true)
   })
 
-  it.each(['pagehide', 'disconnect'])('does not report success when %s races the socket-open continuation', async event => {
-    const h = harness()
-    const rejected = expect(h.terminal.start()).rejects.toThrow(/cancelled|failed before it became ready/)
-    await flush()
-    const socket = FakeSocket.instances[0]
-    socket.open()
+  it.each(['pagehide', 'disconnect'])(
+    'does not report success when %s races the socket-open continuation',
+    async event => {
+      const h = harness()
+      const rejected = expect(h.terminal.start()).rejects.toThrow(/cancelled|failed before it became ready/)
+      await flush()
+      const socket = FakeSocket.instances[0]
+      socket.open()
 
-    if (event === 'pagehide') {
-      window.dispatchEvent(new Event('pagehide'))
-    } else {
-      socket.disconnect()
+      if (event === 'pagehide') {
+        window.dispatchEvent(new Event('pagehide'))
+      } else {
+        socket.disconnect()
+      }
+
+      await rejected
+      expect(h.calls('stop')).toHaveLength(1)
+      expect(socket.close).toHaveBeenCalledOnce()
     }
-
-    await rejected
-    expect(h.calls('stop')).toHaveLength(1)
-    expect(socket.close).toHaveBeenCalledOnce()
-  })
+  )
 
   it('serializes concurrent writes, UTF-8 chunks and resize without interleaving', async () => {
     const held = deferred<unknown>()
@@ -372,9 +428,13 @@ describe('browser terminal session capability', () => {
     const h = harness(async request => {
       const body = request.body as { action: string }
 
-      if (body.action === 'start') { return startReply() }
+      if (body.action === 'start') {
+        return startReply()
+      }
 
-      if (body.action === 'input' && ++inputCount === 1) { return held.promise }
+      if (body.action === 'input' && ++inputCount === 1) {
+        return held.promise
+      }
 
       return { ok: true }
     })
@@ -393,7 +453,11 @@ describe('browser terminal session capability', () => {
     expect(chunks.join('')).toBe(pasted + '\r')
     expect(chunks.every(chunk => new TextEncoder().encode(chunk).byteLength <= 4096)).toBe(true)
     expect(h.request.mock.calls.at(-1)?.[0].body).toMatchObject({ action: 'resize', cols: 120, rows: 40 })
-    expect(h.calls('input').every(request => (request.body as Record<string, unknown>).sessionToken === 'session-secret-native-1')).toBe(true)
+    expect(
+      h
+        .calls('input')
+        .every(request => (request.body as Record<string, unknown>).sessionToken === 'session-secret-native-1')
+    ).toBe(true)
   })
 
   it('disposal cancels queued input, closes the socket, and shares one actual stop request', async () => {
@@ -432,7 +496,9 @@ describe('browser terminal session capability', () => {
   })
 
   it('bounds control timeouts and never returns true for an uncertain write or stop', async () => {
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? startReply() : new Promise(() => {}))
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? startReply() : new Promise(() => {})
+    )
     const { session } = await h.start()
     const written = h.terminal.write(session.id, 'uncertain')
     await vi.advanceTimersByTimeAsync(10_000)
@@ -452,11 +518,17 @@ describe('browser terminal session capability', () => {
     const h = harness(async request => {
       const action = (request.body as { action: string }).action
 
-      if (action === 'start') { return startReply() }
+      if (action === 'start') {
+        return startReply()
+      }
 
-      if (action === 'input' && ++inputCount === 1) { return firstAck.promise }
+      if (action === 'input' && ++inputCount === 1) {
+        return firstAck.promise
+      }
 
-      if (action === 'input' && inputCount === 2) { return secondAck.promise }
+      if (action === 'input' && inputCount === 2) {
+        return secondAck.promise
+      }
 
       return { ok: true }
     })
@@ -479,7 +551,12 @@ describe('browser terminal session capability', () => {
     expect(h.calls('resize')).toHaveLength(0)
     secondAck.resolve({ ok: true })
     await expect(Promise.all([...writes, resize])).resolves.toEqual(Array(writes.length + 1).fill(true))
-    expect(h.request.mock.calls.slice(1).map(([request]) => (request.body as { action: string }).action)).toEqual(['input', 'input', 'resize', 'input'])
+    expect(h.request.mock.calls.slice(1).map(([request]) => (request.body as { action: string }).action)).toEqual([
+      'input',
+      'input',
+      'resize',
+      'input'
+    ])
     expect(h.calls('input').at(-1)?.body).toMatchObject({ data: '\r' })
   })
 
@@ -509,7 +586,9 @@ describe('browser terminal session capability', () => {
     expect(output).toHaveBeenCalledWith(expect.stringContaining('Terminal connection failed'))
     expect(exited).toHaveBeenCalledExactlyOnceWith({ code: null, signal: null })
     await expect(h.terminal.write(two.session.id, 'safe')).resolves.toBe(true)
-    expect(h.calls('stop').map(request => (request.body as { sessionKey: string }).sessionKey)).toEqual([one.session.id])
+    expect(h.calls('stop').map(request => (request.body as { sessionKey: string }).sessionKey)).toEqual([
+      one.session.id
+    ])
     expect(FakeSocket.instances).toHaveLength(2)
   })
 
@@ -520,7 +599,9 @@ describe('browser terminal session capability', () => {
     if (mode === 'bytes') {
       socket.message({ type: 'output', data: 'a'.repeat(256 * 1024) })
     } else {
-      for (let i = 0; i < 256; i += 1) { socket.message({ type: 'output', data: 'a' }) }
+      for (let i = 0; i < 256; i += 1) {
+        socket.message({ type: 'output', data: 'a' })
+      }
     }
 
     socket.message({ type: 'output', data: 'overflow' })
@@ -534,7 +615,13 @@ describe('browser terminal session capability', () => {
 
   it('bounds pasted input and pending operation count rather than buffering forever', async () => {
     const held = deferred<unknown>()
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? startReply() : (request.body as { action: string }).action === 'stop' ? { ok: true } : held.promise)
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start'
+        ? startReply()
+        : (request.body as { action: string }).action === 'stop'
+          ? { ok: true }
+          : held.promise
+    )
     const { session } = await h.start()
     const writes = Array.from({ length: 129 }, () => h.terminal.write(session.id, 'a'))
     held.resolve({ ok: true })
@@ -549,7 +636,9 @@ describe('browser terminal session capability', () => {
 
   it('returns only a fresh best-effort cwd, never the initial or prior value', async () => {
     let cwd: unknown = '/changed'
-    const h = harness(async request => (request.body as { action: string }).action === 'start' ? startReply() : { ok: true, cwd })
+    const h = harness(async request =>
+      (request.body as { action: string }).action === 'start' ? startReply() : { ok: true, cwd }
+    )
     const { session } = await h.start()
     await expect(h.terminal.cwd(session.id)).resolves.toBe('/changed')
     cwd = null
@@ -572,14 +661,18 @@ describe('browser terminal session capability', () => {
     await h.terminal.dispose(session.id)
     expect(otherRequest).not.toHaveBeenCalled()
     expect(h.captureRequest).toHaveBeenCalledOnce()
-    expect(h.request.mock.calls.every(([request]) => (request.body as { profile: string }).profile === 'default')).toBe(true)
+    expect(h.request.mock.calls.every(([request]) => (request.body as { profile: string }).profile === 'default')).toBe(
+      true
+    )
   })
 
   it('uses unique server sessions per tab, caps live tabs and cleans only its own ids on pagehide', async () => {
     const h = harness()
     const opened = []
 
-    for (let i = 0; i < 4; i += 1) { opened.push(await h.start()) }
+    for (let i = 0; i < 4; i += 1) {
+      opened.push(await h.start())
+    }
     expect(new Set(opened.map(({ session }) => session.id)).size).toBe(4)
     await expect(h.terminal.start()).rejects.toThrow('Close an existing terminal')
     await expect(h.terminal.write('not-owned', 'x')).resolves.toBe(false)
@@ -587,7 +680,12 @@ describe('browser terminal session capability', () => {
     await expect(h.terminal.dispose('not-owned')).resolves.toBe(false)
     window.dispatchEvent(new Event('pagehide'))
     await flush()
-    expect(h.calls('stop').map(request => (request.body as { sessionKey: string }).sessionKey).sort()).toEqual(opened.map(({ session }) => session.id).sort())
+    expect(
+      h
+        .calls('stop')
+        .map(request => (request.body as { sessionKey: string }).sessionKey)
+        .sort()
+    ).toEqual(opened.map(({ session }) => session.id).sort())
     expect(h.calls('stop').every(request => request.keepalive === true)).toBe(true)
     expect(opened.every(({ socket }) => socket.close.mock.calls.length === 1)).toBe(true)
   })
@@ -595,8 +693,12 @@ describe('browser terminal session capability', () => {
   it('ignores a broken subscriber without losing exit delivery or cleanup', async () => {
     const h = harness()
     const { session, socket } = await h.start()
-    h.terminal.onData(session.id, () => { throw new Error('unmounted') })
-    h.terminal.onExit(session.id, () => { throw new Error('unmounted') })
+    h.terminal.onData(session.id, () => {
+      throw new Error('unmounted')
+    })
+    h.terminal.onExit(session.id, () => {
+      throw new Error('unmounted')
+    })
     const remaining = vi.fn()
     h.terminal.onExit(session.id, remaining)
     socket.disconnect()
@@ -643,7 +745,12 @@ describe('web shim terminal integration', () => {
 
     for (const [url, init] of calls) {
       expect(url).toBe(`${window.location.origin}/desktop/api/desktop-terminal`)
-      expect(init).toMatchObject({ method: 'POST', credentials: 'omit', redirect: 'error', headers: { Authorization: 'Bearer native-api-secret', 'Content-Type': 'application/json' } })
+      expect(init).toMatchObject({
+        method: 'POST',
+        credentials: 'omit',
+        redirect: 'error',
+        headers: { Authorization: 'Bearer native-api-secret', 'Content-Type': 'application/json' }
+      })
     }
 
     expect(socket.url).not.toContain('native-api-secret')
@@ -651,21 +758,28 @@ describe('web shim terminal integration', () => {
     expect(calls[2][1]?.keepalive).toBe(true)
   })
 
-  it.each([404, 405, 501, 200])('reports unsupported HTML server HTTP %s honestly instead of a JSON parse crash', async status => {
-    const terminal = await install(async () => new Response('<html>Old server SPA</html>', { status }))
-    await expect(terminal.start()).rejects.toThrow(/browser terminals.*support|support.*browser terminals/)
-    expect(FakeSocket.instances).toHaveLength(0)
-    expect(fetch).toHaveBeenCalledOnce()
-  })
+  it.each([404, 405, 501, 200])(
+    'reports unsupported HTML server HTTP %s honestly instead of a JSON parse crash',
+    async status => {
+      const terminal = await install(async () => new Response('<html>Old server SPA</html>', { status }))
+      await expect(terminal.start()).rejects.toThrow(/browser terminals.*support|support.*browser terminals/)
+      expect(FakeSocket.instances).toHaveLength(0)
+      expect(fetch).toHaveBeenCalledOnce()
+    }
+  )
 
   it('retains a structured server denial and HTTP failures without mislabeling them successful', async () => {
-    const terminal = await install(async () => Response.json({ error: 'Terminal request is not authenticated' }, { status: 401 }))
+    const terminal = await install(async () =>
+      Response.json({ error: 'Terminal request is not authenticated' }, { status: 401 })
+    )
     await expect(terminal.start()).rejects.toThrow('Terminal request is not authenticated')
     expect(fetch).toHaveBeenCalledOnce()
   })
 
   it('retains a structured 404 from a capable server rather than claiming the capability is missing', async () => {
-    const terminal = await install(async () => Response.json({ error: 'Managed gateway container not found' }, { status: 404 }))
+    const terminal = await install(async () =>
+      Response.json({ error: 'Managed gateway container not found' }, { status: 404 })
+    )
     await expect(terminal.start()).rejects.toThrow('Managed gateway container not found')
   })
 
@@ -700,7 +814,9 @@ describe('web shim terminal integration', () => {
     const terminal = await install(async (_input, init) => {
       signal = init?.signal
 
-      return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))))
+      return new Promise((_resolve, reject) =>
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      )
     })
 
     const rejected = expect(terminal.start()).rejects.toThrow(/timed out|Aborted/)

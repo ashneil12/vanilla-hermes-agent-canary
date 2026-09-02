@@ -33,7 +33,9 @@ export function useDashboardBridge({ submitText }: { submitText: (text: string) 
     }
 
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== window.parent) {return}
+      if (event.source !== window.parent) {
+        return
+      }
 
       const data = event.data as { type?: unknown; source?: unknown; text?: unknown } | null | undefined
 
@@ -49,7 +51,9 @@ export function useDashboardBridge({ submitText }: { submitText: (text: string) 
 
       const text = data.text.trim()
 
-      if (!text) {return}
+      if (!text) {
+        return
+      }
 
       void submitTextRef.current(text)
     }

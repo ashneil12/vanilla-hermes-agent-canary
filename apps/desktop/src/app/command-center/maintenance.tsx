@@ -125,7 +125,7 @@ export function MaintenancePanel() {
   }, [actionName])
 
   const launch = useCallback(
-    async <T extends ActionResponse,>(label: string, start: () => Promise<T>): Promise<null | T> => {
+    async <T extends ActionResponse>(label: string, start: () => Promise<T>): Promise<null | T> => {
       setError('')
 
       try {
@@ -133,10 +133,12 @@ export function MaintenancePanel() {
         setActionStatus(null)
         setActionName(started.name)
         notify({ kind: 'success', title: mm.actionStarted(label), message: '' })
+
         return started
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
         notifyError(err, mm.actionFailed(label))
+
         return null
       }
     },

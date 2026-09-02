@@ -185,7 +185,12 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
     }
   }
 
-  function post(request: TerminalTransport, body: Record<string, unknown>, deadline: number, onLate?: (value: unknown) => void): Promise<unknown> {
+  function post(
+    request: TerminalTransport,
+    body: Record<string, unknown>,
+    deadline: number,
+    onLate?: (value: unknown) => void
+  ): Promise<unknown> {
     const timeoutMs = deadline - Date.now()
 
     if (timeoutMs <= 0) {
@@ -203,36 +208,55 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
       }, timeoutMs)
 
       Promise.resolve()
-        .then(() => request<unknown>({
-          path: API_PATH,
-          method: 'POST',
-          body,
-          timeoutMs,
-          ...(body.action === 'stop' ? { keepalive: true } : {})
-        }))
-        .then(value => {
-          if (settled) {
-            onLate?.(value)
+        .then(() =>
+          request<unknown>({
+            path: API_PATH,
+            method: 'POST',
+            body,
+            timeoutMs,
+            ...(body.action === 'stop' ? { keepalive: true } : {})
+          })
+        )
+        .then(
+          value => {
+            if (settled) {
+              onLate?.(value)
 
-            return
-          }
+              return
+            }
 
-          settled = true
-          window.clearTimeout(timer)
-          resolve(value)
-        }, error => {
-          if (!settled) {
             settled = true
             window.clearTimeout(timer)
-            reject(error)
+            resolve(value)
+          },
+          error => {
+            if (!settled) {
+              settled = true
+              window.clearTimeout(timer)
+              reject(error)
+            }
           }
-        })
+        )
     })
   }
 
-  function control(session: SessionIdentity, action: string, fields: Record<string, unknown> = {}, deadline = Date.now() + CONTROL_TIMEOUT_MS) {
-    return post(session.request, { ...fields, action, sessionKey: session.sessionKey, sessionToken: session.sessionToken, profile: session.profile }, deadline)
-      .then(checkedReply)
+  function control(
+    session: SessionIdentity,
+    action: string,
+    fields: Record<string, unknown> = {},
+    deadline = Date.now() + CONTROL_TIMEOUT_MS
+  ) {
+    return post(
+      session.request,
+      {
+        ...fields,
+        action,
+        sessionKey: session.sessionKey,
+        sessionToken: session.sessionToken,
+        profile: session.profile
+      },
+      deadline
+    ).then(checkedReply)
   }
 
   function stop(session: Session): Promise<boolean> {
@@ -240,7 +264,10 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
       return Promise.resolve(true)
     }
 
-    session.stop ??= control(session, 'stop').then(() => true, () => false)
+    session.stop ??= control(session, 'stop').then(
+      () => true,
+      () => false
+    )
 
     return session.stop
   }
@@ -319,7 +346,10 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(socketUrl(path))
       let connected = false
-      const timer = window.setTimeout(() => fail(session, 'Terminal WebSocket connection timed out'), CONNECT_TIMEOUT_MS)
+      const timer = window.setTimeout(
+        () => fail(session, 'Terminal WebSocket connection timed out'),
+        CONNECT_TIMEOUT_MS
+      )
 
       session.rejectStart = reject
 
@@ -362,11 +392,18 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
             throw new Error('Invalid terminal frame')
           }
 
-          if (message.type === 'output' && typeof message.data === 'string' && encoder.encode(message.data).byteLength <= MAX_OUTPUT_BYTES) {
+          if (
+            message.type === 'output' &&
+            typeof message.data === 'string' &&
+            encoder.encode(message.data).byteLength <= MAX_OUTPUT_BYTES
+          ) {
             output(session, message.data)
           } else if (message.type === 'closed') {
             if (
-              !(message.exitCode === null || (typeof message.exitCode === 'number' && Number.isInteger(message.exitCode))) ||
+              !(
+                message.exitCode === null ||
+                (typeof message.exitCode === 'number' && Number.isInteger(message.exitCode))
+              ) ||
               !(message.signal === null || (typeof message.signal === 'string' && message.signal.length <= 64))
             ) {
               throw new Error('Invalid terminal exit')
@@ -384,7 +421,12 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
       }
 
       function onError() {
-        fail(session, connected ? 'Terminal connection failed; open a new terminal to continue' : 'Could not attach the terminal WebSocket (the ticket may have expired)')
+        fail(
+          session,
+          connected
+            ? 'Terminal connection failed; open a new terminal to continue'
+            : 'Could not attach the terminal WebSocket (the ticket may have expired)'
+        )
       }
 
       function onClose() {
@@ -427,21 +469,23 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
 
     const deadline = Date.now() + CONTROL_TIMEOUT_MS
 
-    const result = session.queue.then(async () => {
-      if (session.disposed || session.exit) {
-        return false
-      }
+    const result = session.queue
+      .then(async () => {
+        if (session.disposed || session.exit) {
+          return false
+        }
 
-      try {
-        await work(deadline)
+        try {
+          await work(deadline)
 
-        return !session.disposed && !session.exit
-      } catch {
-        fail(session, 'Terminal control failed; open a new terminal to continue')
+          return !session.disposed && !session.exit
+        } catch {
+          fail(session, 'Terminal control failed; open a new terminal to continue')
 
-        return false
-      }
-    }).finally(() => releaseInput(session, bytes))
+          return false
+        }
+      })
+      .finally(() => releaseInput(session, bytes))
 
     session.queue = result
 
@@ -493,7 +537,10 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
 
       const size = dimensions(settings.cols, settings.rows)
 
-      if (settings.cwd !== undefined && (typeof settings.cwd !== 'string' || settings.cwd.length > 4096 || settings.cwd.includes('\0'))) {
+      if (
+        settings.cwd !== undefined &&
+        (typeof settings.cwd !== 'string' || settings.cwd.length > 4096 || settings.cwd.includes('\0'))
+      ) {
         throw new Error('Invalid terminal working directory')
       }
 
@@ -510,7 +557,12 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
       let response: unknown
 
       try {
-        response = await post(request, { action: 'start', ...size, ...(settings.cwd !== undefined ? { cwd: settings.cwd } : {}), profile }, Date.now() + START_TIMEOUT_MS, value => cleanupLateStart(value, profile, request))
+        response = await post(
+          request,
+          { action: 'start', ...size, ...(settings.cwd !== undefined ? { cwd: settings.cwd } : {}), profile },
+          Date.now() + START_TIMEOUT_MS,
+          value => cleanupLateStart(value, profile, request)
+        )
         pendingStarts -= 1
         awaitingReply = false
         const owned = identity(response, profile, request)
@@ -524,11 +576,34 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
           throw new Error('The server returned an invalid or duplicate terminal session')
         }
 
-        session = { ...owned, dataListeners: new Set(), exitListeners: new Set(), output: [], outputBytes: 0, exit: null, serverClosed: false, cleanupConfirmed: false, disposed: false, disconnect: null, rejectStart: null, stop: null, queue: Promise.resolve(), queuedBytes: 0, queuedOperations: 0, pendingInput: null }
+        session = {
+          ...owned,
+          dataListeners: new Set(),
+          exitListeners: new Set(),
+          output: [],
+          outputBytes: 0,
+          exit: null,
+          serverClosed: false,
+          cleanupConfirmed: false,
+          disposed: false,
+          disconnect: null,
+          rejectStart: null,
+          stop: null,
+          queue: Promise.resolve(),
+          queuedBytes: 0,
+          queuedOperations: 0,
+          pendingInput: null
+        }
         sessions.set(owned.sessionKey, session)
         const reply = checkedReply(response)
 
-        if (typeof reply.cwd !== 'string' || reply.cwd.length > 4096 || typeof reply.shell !== 'string' || !reply.shell || reply.shell.length > 128) {
+        if (
+          typeof reply.cwd !== 'string' ||
+          reply.cwd.length > 4096 ||
+          typeof reply.shell !== 'string' ||
+          !reply.shell ||
+          reply.shell.length > 128
+        ) {
           throw new Error('The server returned invalid terminal session details')
         }
 
@@ -592,7 +667,9 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
         // queued before this resize.
         session.pendingInput = null
 
-        return enqueue(session, 0, async deadline => { await control(session, 'resize', checked, deadline) })
+        return enqueue(session, 0, async deadline => {
+          await control(session, 'resize', checked, deadline)
+        })
       } catch {
         return Promise.resolve(false)
       }
@@ -663,7 +740,9 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
         }
       }
 
-      return () => { session.dataListeners.delete(listener) }
+      return () => {
+        session.dataListeners.delete(listener)
+      }
     },
     onExit(id, callback) {
       const session = sessions.get(id)
@@ -684,7 +763,9 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
         })
       }
 
-      return () => { session.exitListeners.delete(listener) }
+      return () => {
+        session.exitListeners.delete(listener)
+      }
     }
   }
 }

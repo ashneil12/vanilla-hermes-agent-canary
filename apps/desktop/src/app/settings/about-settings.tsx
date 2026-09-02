@@ -15,6 +15,7 @@ import { ListRow, SectionHeading, SettingsContent } from './primitives'
 import { UninstallSection } from './uninstall-section'
 
 const INSTALLER_URL = 'https://hermes-agent.nousresearch.com/'
+
 export function AboutSettings() {
   const { t } = useI18n()
   const a = t.settings.about

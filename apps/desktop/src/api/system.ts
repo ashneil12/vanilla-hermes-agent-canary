@@ -269,6 +269,7 @@ export async function openBackupDownload(archive: string): Promise<void> {
 
   const url = new URL(`${baseUrl}/api/ops/backup/download`)
   url.searchParams.set('archive', target)
+
   if (connection.token) {
     url.searchParams.set('token', connection.token)
   }

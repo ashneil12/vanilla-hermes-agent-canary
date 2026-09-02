@@ -80,20 +80,29 @@ function imageMimeForExtension(ext: string): string {
   switch (ext.replace(/^\./, '').toLowerCase()) {
     case 'bmp':
       return 'image/bmp'
+
     case 'gif':
       return 'image/gif'
+
     case 'jpg':
+
     case 'jpeg':
       return 'image/jpeg'
+
     case 'svg':
       return 'image/svg+xml'
+
     case 'tif':
+
     case 'tiff':
       return 'image/tiff'
+
     case 'webp':
       return 'image/webp'
+
     case 'ico':
       return 'image/x-icon'
+
     default:
       return 'image/png'
   }
@@ -101,14 +110,17 @@ function imageMimeForExtension(ext: string): string {
 
 function acceptFromFilters(filters?: WebShimSelectPathsOptions['filters']): string {
   const exts = new Set<string>()
+
   for (const filter of filters ?? []) {
     for (const ext of filter.extensions ?? []) {
       const clean = ext.trim().replace(/^\.+/, '')
+
       if (clean) {
         exts.add(`.${clean}`)
       }
     }
   }
+
   return [...exts].join(',')
 }
 
@@ -145,6 +157,7 @@ async function uploadAttachmentDataUrl({
 
 async function uploadBrowserFile(file: File): Promise<WebShimUploadedFile> {
   const dataUrl = await blobToDataUrl(file)
+
   const uploaded = await uploadAttachmentDataUrl({
     dataUrl,
     mimeType: file.type || 'application/octet-stream',
@@ -174,6 +187,7 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
     input.style.pointerEvents = 'none'
 
     const accept = acceptFromFilters(options.filters)
+
     if (accept) {
       input.accept = accept
     }
@@ -193,6 +207,7 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
       if (settled) {
         return
       }
+
       settled = true
       cleanup()
       resolve(paths)
@@ -213,6 +228,7 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
       if (!dialogOpened) {
         return
       }
+
       // macOS commits the file selection slightly AFTER focus returns, so give
       // `change` a generous grace before concluding the user cancelled. The
       // `cancel` event handles fast, reliable cancellation on modern browsers;
@@ -226,8 +242,10 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
 
     async function onChange() {
       const files = Array.from(input.files ?? [])
+
       if (!files.length) {
         settle([])
+
         return
       }
 
@@ -250,6 +268,7 @@ function selectBrowserFiles(options: WebShimSelectPathsOptions = {}): Promise<st
     window.addEventListener('focus', onWindowFocus)
 
     document.body.appendChild(input)
+
     try {
       input.click()
     } catch (err) {
@@ -275,18 +294,22 @@ function resolveConfig(): WebRuntimeConfig {
   // shim consumes — see hermesdeploy webui-handoff.ts). A direct/manual link
   // may use the plainer `#token=<bearer>`. Accept either; iframe_token wins.
   let token = ''
+
   try {
     const hash = window.location.hash.replace(/^#/, '')
     const params = new URLSearchParams(hash)
     const fromHash = params.get('iframe_token') || params.get('token')
+
     if (fromHash) {
       token = fromHash
+
       // Persist for reloads, then scrub the token out of the visible URL.
       try {
         sessionStorage.setItem('hermes_web_token', fromHash)
       } catch {
         /* ignore */
       }
+
       params.delete('iframe_token')
       params.delete('token')
       const rest = params.toString()
@@ -296,13 +319,16 @@ function resolveConfig(): WebRuntimeConfig {
   } catch {
     /* ignore */
   }
+
   // Image-served: the backend injects __HERMES_SESSION_TOKEN__ into index.html.
   if (!token && typeof w.__HERMES_SESSION_TOKEN__ === 'string' && w.__HERMES_SESSION_TOKEN__) {
     token = w.__HERMES_SESSION_TOKEN__
   }
+
   if (!token && typeof w.__HERMES_WEB_TOKEN__ === 'string') {
     token = w.__HERMES_WEB_TOKEN__
   }
+
   if (!token) {
     try {
       token = sessionStorage.getItem('hermes_web_token') ?? ''
@@ -315,6 +341,7 @@ function resolveConfig(): WebRuntimeConfig {
   // image-served — may legitimately be "" for root, so test by type) →
   // __HERMES_WEB_API_BASE__ (hand-deploy override) → "/desktop" default.
   let apiBase: string
+
   if (typeof w.__HERMES_BASE_PATH__ === 'string') {
     apiBase = w.__HERMES_BASE_PATH__
   } else if (typeof w.__HERMES_WEB_API_BASE__ === 'string') {
@@ -322,6 +349,7 @@ function resolveConfig(): WebRuntimeConfig {
   } else {
     apiBase = '/desktop'
   }
+
   apiBase = apiBase.replace(/\/$/, '')
 
   return { apiBase, token }
@@ -334,10 +362,14 @@ function buildUrls(config: WebRuntimeConfig): { baseUrl: string; wsUrl: string }
   const wsBase = `${wsProto}//${window.location.host}${config.apiBase}`
   const qs = config.token ? `?token=${encodeURIComponent(config.token)}` : ''
   const wsUrl = `${wsBase}/api/ws${qs}`
+
   return { baseUrl, wsUrl }
 }
 
-async function fetchJson<T>(request: { path: string; method?: string; body?: unknown; timeoutMs?: number; keepalive?: boolean }, config = resolveConfig()): Promise<T> {
+async function fetchJson<T>(
+  request: { path: string; method?: string; body?: unknown; timeoutMs?: number; keepalive?: boolean },
+  config = resolveConfig()
+): Promise<T> {
   const { baseUrl } = buildUrls(config)
   const controller = new AbortController()
   const timeout = request.timeoutMs && request.timeoutMs > 0 ? request.timeoutMs : 30_000
@@ -382,7 +414,9 @@ async function fetchJson<T>(request: { path: string; method?: string; body?: unk
           throw new Error('This server does not support browser terminals')
         }
 
-        throw new Error(`Terminal service returned a non-JSON response (HTTP ${res.status}); browser terminals may not be supported on this server`)
+        throw new Error(
+          `Terminal service returned a non-JSON response (HTTP ${res.status}); browser terminals may not be supported on this server`
+        )
       }
 
       throw error
@@ -476,6 +510,7 @@ function installWebShim(): void {
     testConnectionConfig: async () => {
       try {
         const status = await fetchJson<{ version?: string }>({ path: '/api/status' })
+
         return { baseUrl: `${window.location.origin}${config.apiBase}`, ok: true, version: status?.version ?? null }
       } catch {
         return { baseUrl: `${window.location.origin}${config.apiBase}`, ok: false, version: null }
@@ -489,20 +524,26 @@ function installWebShim(): void {
         if (typeof Notification === 'undefined') {
           return false
         }
+
         if (Notification.permission === 'granted') {
           new Notification(payload.title ?? 'Hermes', { body: payload.body, silent: payload.silent })
+
           return true
         }
+
         if (Notification.permission !== 'denied') {
           const perm = await Notification.requestPermission()
+
           if (perm === 'granted') {
             new Notification(payload.title ?? 'Hermes', { body: payload.body, silent: payload.silent })
+
             return true
           }
         }
       } catch {
         /* ignore */
       }
+
       return false
     },
 
@@ -510,6 +551,7 @@ function installWebShim(): void {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         stream.getTracks().forEach(t => t.stop())
+
         return true
       } catch {
         return false
@@ -532,6 +574,7 @@ function installWebShim(): void {
     writeClipboard: async (text: string) => {
       try {
         await navigator.clipboard.writeText(text)
+
         return true
       } catch {
         return false
@@ -544,6 +587,7 @@ function installWebShim(): void {
         const blob = await res.blob()
         const name = url.split('/').pop()?.split('?')[0] || 'image.png'
         triggerDownload(blob, name)
+
         return true
       } catch {
         return false
@@ -554,12 +598,15 @@ function installWebShim(): void {
       const mimeType = imageMimeForExtension(cleanExt)
       const blob = new Blob([data as BlobPart], { type: mimeType })
       const dataUrl = await blobToDataUrl(blob)
+
       const uploaded = await uploadAttachmentDataUrl({
         dataUrl,
         mimeType,
         name: `image.${cleanExt}`
       })
+
       uploadedPreviewDataUrls.set(uploaded.path, dataUrl)
+
       return uploaded.path
     },
     saveClipboardImage: async () => '',
@@ -597,7 +644,10 @@ function installWebShim(): void {
         const terminalConfig = resolveConfig()
         const { baseUrl } = buildUrls(terminalConfig)
 
-        if ((terminalConfig.apiBase && !terminalConfig.apiBase.startsWith('/')) || new URL(baseUrl).origin !== window.location.origin) {
+        if (
+          (terminalConfig.apiBase && !terminalConfig.apiBase.startsWith('/')) ||
+          new URL(baseUrl).origin !== window.location.origin
+        ) {
           throw new Error('Browser terminal requests must stay on this server')
         }
 
@@ -646,9 +696,8 @@ function installWebShim(): void {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(window as any).hermesDesktop = bridge
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   ;(window as any).__HERMES_WEB_CLIENT__ = true
 }
 
@@ -671,6 +720,7 @@ function installBrandSkin(): void {
     if (document.getElementById('hermesos-skin')) {
       return
     }
+
     const style = document.createElement('style')
     style.id = 'hermesos-skin'
     style.textContent = [
@@ -685,6 +735,7 @@ function installBrandSkin(): void {
     ].join('')
     document.head.appendChild(style)
   }
+
   if (document.head) {
     inject()
   } else {
@@ -707,6 +758,7 @@ function installBrandSkin(): void {
  * under the same key. KEEP IN SYNC with MODE_KEY in src/themes/context.tsx.
  */
 const HERMES_MODE_KEY = 'hermes-desktop-mode-v1'
+
 function seedDefaultColorMode(): void {
   try {
     if (!window.localStorage.getItem(HERMES_MODE_KEY)) {
