@@ -160,10 +160,11 @@ jobs:
           resolved_generated=false
           if ! git merge --no-ff --no-commit refs/upstream-sync/target >merge.log 2>&1; then
             git diff --name-only --diff-filter=U > conflicts.txt || true
-            # Generated docs (skill catalogs, sidebar, per-skill pages) are rebuilt right after
-            # the merge, so a conflict that is ONLY in those files is resolved by taking
-            # upstream's copy and regenerating. Anything else stops the sync.
-            remaining=$(grep -v -E '^(website/docs/reference/(optional-)?skills-catalog\.md|website/sidebars\.ts|website/docs/user-guide/skills/.*)$' conflicts.txt || true)
+            # Generated docs (skill catalogs, sidebar, per-skill pages) and upstream's own
+            # workflow files (the fork only rewrites their runner labels) are rebuilt right
+            # after the merge, so a conflict that is ONLY in those files is resolved by taking
+            # upstream's copy and re-running the generators. Anything else stops the sync.
+            remaining=$(grep -v -E '^(website/docs/reference/(optional-)?skills-catalog\.md|website/sidebars\.ts|website/docs/user-guide/skills/.*|\.github/workflows/[^/]+\.ya?ml)$' conflicts.txt || true)
             if [ -z "$remaining" ] && [ -s conflicts.txt ]; then
               ok=true
               while IFS= read -r f; do
@@ -181,15 +182,19 @@ jobs:
 
           Automated by upstream-release-sync.yml. Merge commit, not squash, so the
           next release merges against this tag."
-            # Generated files and contributor mappings the required checks insist on.
+            # Things the required checks insist on: standard runners (upstream's larger runners
+            # do not exist for this account, so those jobs would queue forever), generated
+            # skill docs, and contributor mappings for upstream authors.
+            python3 scripts/ci/fork_runner_labels.py
             python3 -m pip install -q pyyaml
             python3 website/scripts/generate-skill-docs.py >/dev/null
             GH_TOKEN="${{ github.token }}" python3 scripts/ci/map_upstream_contributors.py --base origin/main
             git add -A
             if ! git diff --cached --quiet; then
-              git commit -q -m "chore: regenerate skill docs and map upstream contributors
+              git commit -q -m "chore: standard runners, regenerate skill docs, map upstream contributors
 
-          Output of website/scripts/generate-skill-docs.py and scripts/ci/map_upstream_contributors.py."
+          Output of scripts/ci/fork_runner_labels.py, website/scripts/generate-skill-docs.py and
+          scripts/ci/map_upstream_contributors.py."
             fi
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"

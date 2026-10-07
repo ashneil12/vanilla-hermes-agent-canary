@@ -102,6 +102,7 @@ def test_stuck_paths_open_or_update_an_issue():
 def test_sync_regenerates_generated_files_and_maps_contributors():
     text = SYNC.read_text(encoding="utf-8")
     assert "scripts/ci/map_upstream_contributors.py" in text
+    assert "scripts/ci/fork_runner_labels.py" in text
     assert "website/scripts/generate-skill-docs.py" in text
     # Only generated docs may be auto-resolved; real conflicts must still stop the sync.
     assert "website/sidebars" in text and "skills-catalog" in text
