@@ -51,5 +51,12 @@ jobs:
             [ -e "$p" ] || { echo "::error::$p is listed in .hermesos/fork-gate-tests.txt but missing"; missing=1; }
           done
           [ "$missing" = 0 ]
-          # shellcheck disable=SC2086
-          .venv/bin/python -m pytest -o addopts="" -q -p no:cacheprovider $paths
+          # One pytest process per file: several fork tests mutate process-global state
+          # (plugin registry, gateway.status rebinding), and a combined run is order sensitive.
+          failed=0
+          for p in $paths; do
+            echo "::group::$p"
+            .venv/bin/python -m pytest -o addopts="" -q -p no:cacheprovider "$p" || { echo "::error::$p failed"; failed=1; }
+            echo "::endgroup::"
+          done
+          [ "$failed" = 0 ]
