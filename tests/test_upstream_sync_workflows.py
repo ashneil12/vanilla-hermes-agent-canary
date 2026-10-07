@@ -106,3 +106,4 @@ def test_sync_regenerates_generated_files_and_maps_contributors():
     assert "website/scripts/generate-skill-docs.py" in text
     # Only generated docs may be auto-resolved; real conflicts must still stop the sync.
     assert "website/sidebars" in text and "skills-catalog" in text
+    assert "contributors/emails/" in text
