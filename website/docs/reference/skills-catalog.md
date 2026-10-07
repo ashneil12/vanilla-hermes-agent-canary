@@ -25,6 +25,7 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 
 | Skill | Description | Path |
 |-------|-------------|------|
+| [`aeon`](../user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-aeon.md) | Run scheduled tasks via your Aeon GitHub Actions fork. | `autonomous-ai-agents/aeon` |
 | [`claude-code`](../user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-claude-code.md) | Delegate coding to Claude Code CLI (features, PRs). | `autonomous-ai-agents/claude-code` |
 | [`codex`](../user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-codex.md) | Delegate coding to OpenAI Codex CLI (features, PRs). | `autonomous-ai-agents/codex` |
 | [`computer-use`](../user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-computer-use.md) | Drive the desktop background-first; escalate on signal. | `autonomous-ai-agents/computer-use` |
@@ -51,6 +52,7 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 | Skill | Description | Path |
 |-------|-------------|------|
 | [`sdlc-review`](../user-guide/skills/bundled/devops/devops-sdlc-review.md) | Review Kanban handoffs and route verified outcomes. | `devops/sdlc-review` |
+| [`signal-setup`](../user-guide/skills/bundled/devops/devops-signal-setup.md) | Set up, link, or fix the Signal messenger integration on a Hermes box the DURABLE way — persisted JRE + signal-cli under ~/.hermes, never apt/sudo/container-layer installs. Use whenever the user asks to connect Signal, link their phone,... | `devops/signal-setup` |
 
 ## email
 
