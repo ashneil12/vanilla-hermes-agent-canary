@@ -54,6 +54,12 @@ def test_build_never_touches_floating_tags():
     assert all("IMAGE_TAG" in p or "SHA" in p for p in pushes), pushes
 
 
+def test_build_push_trigger_is_limited_to_proof_branches():
+    triggers = _load(BUILD)["on"]
+    assert triggers["push"]["branches"] == ["proof/v*"], triggers["push"]
+    assert "pull_request" not in triggers
+
+
 def test_build_labels_carry_revision_and_version():
     text = BUILD.read_text(encoding="utf-8")
     for label in (

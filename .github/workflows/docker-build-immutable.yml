@@ -17,6 +17,15 @@ name: Docker Build Immutable
 # After the push the digest is pulled back from the registry and re-checked.
 
 on:
+<<<<<<< HEAD
+=======
+  # Manual proof build of an exact commit: push it to a branch named proof/<upstream tag>,
+  # e.g. `git push canary <sha>:refs/heads/proof/v2026.9.24`. The build uses that commit and
+  # takes the upstream tag from the branch name. Needed because a new workflow file cannot be
+  # dispatched until it is on main.
+  push:
+    branches: ["proof/v*"]
+>>>>>>> ci-upstream-release-sync
   workflow_dispatch:
     inputs:
       ref:
@@ -55,7 +64,11 @@ permissions:
   contents: read
 
 concurrency:
+<<<<<<< HEAD
   group: docker-build-immutable-${{ inputs.ref }}
+=======
+  group: docker-build-immutable-${{ inputs.ref || github.sha }}
+>>>>>>> ci-upstream-release-sync
   cancel-in-progress: false
 
 env:
@@ -74,12 +87,23 @@ jobs:
       digest: ${{ steps.pushed.outputs.digest }}
       version: ${{ steps.meta.outputs.version }}
     env:
+<<<<<<< HEAD
       REF_INPUT: ${{ inputs.ref }}
       UPSTREAM_TAG: ${{ inputs.upstream_tag }}
       DO_PUSH: ${{ inputs.push }}
     steps:
       - name: Validate inputs
         run: |
+=======
+      REF_INPUT: ${{ inputs.ref || github.sha }}
+      UPSTREAM_TAG: ${{ inputs.upstream_tag || (startsWith(github.ref_name, 'proof/') && github.ref_name || '') }}
+      DO_PUSH: ${{ github.event_name == 'push' && 'true' || inputs.push }}
+    steps:
+      - name: Validate inputs
+        run: |
+          UPSTREAM_TAG="${UPSTREAM_TAG#proof/}"
+          echo "UPSTREAM_TAG=$UPSTREAM_TAG" >> "$GITHUB_ENV"
+>>>>>>> ci-upstream-release-sync
           case "$UPSTREAM_TAG" in
             v[0-9][0-9][0-9][0-9].*) ;;
             *) echo "::error::upstream_tag must look like v2026.9.24, got '$UPSTREAM_TAG'"; exit 1 ;;
@@ -89,7 +113,11 @@ jobs:
       - name: Checkout the ref
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+<<<<<<< HEAD
           ref: ${{ inputs.ref }}
+=======
+          ref: ${{ env.REF_INPUT }}
+>>>>>>> ci-upstream-release-sync
           fetch-depth: 0
           submodules: recursive
 
@@ -135,7 +163,11 @@ jobs:
             org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+<<<<<<< HEAD
             io.hermesos.upstream-tag=${{ inputs.upstream_tag }}
+=======
+            io.hermesos.upstream-tag=${{ env.UPSTREAM_TAG }}
+>>>>>>> ci-upstream-release-sync
           build-args: |
             HERMES_GIT_SHA=${{ steps.meta.outputs.sha }}
           cache-from: type=gha
