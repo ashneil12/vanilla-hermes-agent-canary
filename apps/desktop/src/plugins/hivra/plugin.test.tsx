@@ -12,7 +12,7 @@ import {
   DASHBOARD_SEND_MESSAGE_TYPE,
   readDashboardModeFromUrl
 } from './dashboard-bridge'
-import plugin, { closeNarrowOverlays, seedDefaultSkin } from './plugin'
+import plugin, { AdminPanelPage, closeNarrowOverlays, seedDefaultSkin } from './plugin'
 import { HIVRA_SKIN_NAME } from './themes'
 
 const setWebClient = (on: boolean) => {
@@ -151,6 +151,63 @@ describe('hivra plugin', () => {
   })
 })
 
+describe('Admin Panel page', () => {
+  const setActivation = (isActive: boolean | undefined) =>
+    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: isActive === undefined ? undefined : { isActive } })
+
+  const bridge = (open: () => boolean) => {
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getAdminPanelUrl: () => '/dash/#iframe_token=t',
+      openAdminPanel: open
+    }
+  }
+
+  afterEach(() => {
+    cleanup()
+    setActivation(undefined)
+    delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+  })
+
+  it('opens the panel in a new tab from the click that routed here, and keeps a link as the fallback', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.now() + 60_000) // outside the auto-open debounce window
+    setActivation(true)
+    const open = vi.fn(() => true)
+
+    bridge(open)
+    render(<AdminPanelPage />)
+
+    expect(open).toHaveBeenCalledOnce()
+    expect(screen.getByRole('link', { name: 'Open Admin Panel' }).getAttribute('href')).toBe('/dash/#iframe_token=t')
+    vi.useRealTimers()
+  })
+
+  it('says so when the browser blocked the tab', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.now() + 120_000)
+    setActivation(true)
+    bridge(() => false)
+    render(<AdminPanelPage />)
+
+    expect(screen.getByText(/blocked the new tab/i)).toBeTruthy()
+    vi.useRealTimers()
+  })
+
+  it('never auto-opens on a reload / restored route (no live user activation)', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.now() + 180_000)
+    setActivation(false)
+    const open = vi.fn(() => true)
+
+    bridge(open)
+    render(<AdminPanelPage />)
+
+    expect(open).not.toHaveBeenCalled()
+    expect(screen.getByRole('link', { name: 'Open Admin Panel' })).toBeTruthy()
+    vi.useRealTimers()
+  })
+})
+
 describe('dashboard bridge', () => {
   const parent = {} as Window
 
@@ -208,13 +265,16 @@ describe('dashboard bridge', () => {
   })
 
   it('does nothing at all when not framed', () => {
-    const top = { location: { search: '' } } as unknown as Window
+    const top = { location: { search: '' } } as { location: { search: string }; parent?: unknown }
 
     top.parent = top
     const submit = vi.fn(() => true)
-    const bridge = createDashboardBridge({ setTimeout: () => () => {}, submit, win: top })
+    const bridge = createDashboardBridge({ setTimeout: () => () => {}, submit, win: top as unknown as Window })
 
-    bridge.onMessage({ data: { source: 'hermes-dashboard', text: 'hi', type: DASHBOARD_SEND_MESSAGE_TYPE }, source: top } as MessageEvent)
+    bridge.onMessage({
+      data: { source: 'hermes-dashboard', text: 'hi', type: DASHBOARD_SEND_MESSAGE_TYPE },
+      source: top
+    } as unknown as MessageEvent)
     expect(submit).not.toHaveBeenCalled()
   })
 
@@ -255,11 +315,11 @@ describe('dashboard bridge', () => {
 
   it('reads the ?theme= hint only when framed', () => {
     const url = (search: string, framedWin = true) => {
-      const win = { location: { search } } as unknown as Window
+      const win = { location: { search } } as { location: { search: string }; parent?: unknown }
 
-      win.parent = framedWin ? ({} as Window) : win
+      win.parent = framedWin ? {} : win
 
-      return win
+      return win as unknown as Window
     }
 
     expect(readDashboardModeFromUrl(url('?theme=dark'))).toBe('dark')

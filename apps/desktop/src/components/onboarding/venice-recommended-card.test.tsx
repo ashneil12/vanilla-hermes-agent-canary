@@ -3,29 +3,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { VeniceRecommendedCard } from './venice-recommended-card'
 
-const getStatus = vi.hoisted(() => vi.fn())
+const hermesApi = vi.hoisted(() => vi.fn())
 const openExternalLink = vi.hoisted(() => vi.fn())
 
-vi.mock('@/hermes', () => ({ getStatus }))
+vi.mock('@/hermes', () => ({ hermesApi }))
 vi.mock('@/lib/external-link', () => ({ openExternalLink }))
 
 beforeEach(() => {
-  getStatus.mockReset()
+  hermesApi.mockReset()
   openExternalLink.mockReset()
 })
 
 afterEach(cleanup)
 
 describe('VeniceRecommendedCard', () => {
-  it('deep-links the managed-Venice enable flow on the control-plane dashboard from /api/status', async () => {
-    getStatus.mockResolvedValue({ dashboard_url: 'https://hivra.example/' })
+  it('deep-links the managed-Venice enable flow on the control-plane dashboard from /api/hivra/config', async () => {
+    hermesApi.mockResolvedValue({ dashboard_url: 'https://hivra.example/' })
     const onWantApiKey = vi.fn()
 
     render(<VeniceRecommendedCard onWantApiKey={onWantApiKey} />)
-    await waitFor(() => expect(getStatus).toHaveBeenCalled())
+    await waitFor(() => expect(hermesApi).toHaveBeenCalled())
     await new Promise(resolve => setTimeout(resolve, 0))
     fireEvent.click(screen.getByRole('button'))
 
+    expect(hermesApi).toHaveBeenCalledWith({ path: '/api/hivra/config' })
     expect(openExternalLink).toHaveBeenCalledWith(
       'https://hivra.example/dashboard/billing?managedVenice=deposit&wallet=hermesos'
     )
@@ -34,18 +35,18 @@ describe('VeniceRecommendedCard', () => {
 
   it.each([
     ['no dashboard_url (local dev)', { dashboard_url: null }],
-    ['a status failure', null]
+    ['a config failure', null]
   ])('falls back to the API-key path on %s, never a dead end', async (_label, status) => {
     if (status) {
-      getStatus.mockResolvedValue(status)
+      hermesApi.mockResolvedValue(status)
     } else {
-      getStatus.mockRejectedValue(new Error('offline'))
+      hermesApi.mockRejectedValue(new Error('offline'))
     }
 
     const onWantApiKey = vi.fn()
 
     render(<VeniceRecommendedCard onWantApiKey={onWantApiKey} />)
-    await waitFor(() => expect(getStatus).toHaveBeenCalled())
+    await waitFor(() => expect(hermesApi).toHaveBeenCalled())
     await new Promise(resolve => setTimeout(resolve, 0))
     fireEvent.click(screen.getByRole('button'))
 
@@ -54,7 +55,7 @@ describe('VeniceRecommendedCard', () => {
   })
 
   it('holds the Recommended slot and survives a synchronous bridge throw', () => {
-    getStatus.mockImplementation(() => {
+    hermesApi.mockImplementation(() => {
       throw new Error('no bridge')
     })
 

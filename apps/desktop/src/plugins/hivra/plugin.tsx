@@ -120,13 +120,17 @@ let lastAutoOpen = 0
  * open an external tab). Opening from an effect keeps the one-click feel where
  * the browser still honours the click's activation (Chrome); where it does not
  * (Safari), the link below is the one tap that works.
+ *
+ * Only while the click that brought the user here is still "active": a reload or
+ * a restored route must never pop a tab (or, in an embedded browser, navigate the
+ * page away) by itself, so without live activation the link is the only door.
  */
-function AdminPanelPage() {
+export function AdminPanelPage() {
   const [blocked, setBlocked] = useState(false)
   const opened = useRef(false)
 
   useEffect(() => {
-    if (opened.current || Date.now() - lastAutoOpen < 2_000) {
+    if (opened.current || Date.now() - lastAutoOpen < 2_000 || navigator.userActivation?.isActive === false) {
       return
     }
 

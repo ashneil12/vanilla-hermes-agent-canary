@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
-import { getStatus } from '@/hermes'
+import { hermesApi } from '@/hermes'
 import { openExternalLink } from '@/lib/external-link'
 import { ChevronRight } from '@/lib/icons'
 
@@ -9,9 +9,10 @@ import { ChevronRight } from '@/lib/icons'
 // provider: it's the managed service Hivra runs for you (server-side proxy key,
 // billed to your dashboard wallet). Enabling it is a dashboard flow (Clerk +
 // wallet), not an in-app browser sign-in, so this card deep-links there. The
-// dashboard origin comes from /api/status (`dashboard_url`, from
-// HERMES_DASHBOARD_URL). If it's missing (e.g. local dev) the card falls back to
-// the API-key path so it is never a dead end.
+// dashboard origin comes from the fork-only `GET /api/hivra/config`
+// (`dashboard_url`, from HERMES_DASHBOARD_URL; hermes_cli/web_routers/fork_hivra.py).
+// If it's missing (e.g. local dev, or a backend without that route) the card
+// falls back to the API-key path so it is never a dead end.
 const MANAGED_VENICE_PITCH = 'Managed by Hivra — private frontier models, no API key to copy'
 
 const managedVeniceEnableUrl = (dashboardUrl: string) =>
@@ -28,13 +29,13 @@ export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => vo
 
     void (async () => {
       try {
-        const status = (await getStatus()) as { dashboard_url?: null | string }
+        const config = await hermesApi<{ dashboard_url?: null | string }>({ path: '/api/hivra/config' })
 
         if (!cancelled) {
-          setDashboardUrl(status.dashboard_url ?? null)
+          setDashboardUrl(config?.dashboard_url ?? null)
         }
       } catch {
-        /* status unavailable: leave null, the click falls back to the API-key path */
+        /* config unavailable: leave null, the click falls back to the API-key path */
       }
     })()
 
