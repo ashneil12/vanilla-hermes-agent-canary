@@ -17,10 +17,16 @@ Registering this profile auto-wires the rest of the agent:
 """
 
 from hermes_cli import __version__ as _HERMES_VERSION
+from hermes_cli.fork_providers import SortedCatalogMixin
 from providers import register_provider
 from providers.base import ProviderProfile
 
-surplus = ProviderProfile(
+
+class SurplusProfile(SortedCatalogMixin, ProviderProfile):
+    """Marketplace-scale live catalog: family-sort it so the model picker stays navigable."""
+
+
+surplus = SurplusProfile(
     name="surplus",
     aliases=("surplus-intelligence", "surplusintelligence"),
     display_name="Surplus Intelligence",

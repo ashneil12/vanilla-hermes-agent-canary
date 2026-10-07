@@ -18,10 +18,13 @@ Venice media tools and the image_gen/video_gen/web plugins; this profile only
 covers chat-completions inference.
 """
 
+from hermes_cli.fork_providers import VeniceProfile
 from providers import register_provider
-from providers.base import ProviderProfile
 
-venice = ProviderProfile(
+# hermes-fork: VeniceProfile (hermes_cli/fork_providers.py) adds the cross-vendor model-slug remap,
+# the optional venice.character_slug injection and a family-sorted live catalog on top of the stock
+# profile, via upstream's public ProviderProfile hooks.
+venice = VeniceProfile(
     name="venice",
     aliases=("venice-ai", "veniceai"),
     display_name="Venice",
