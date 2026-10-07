@@ -107,3 +107,16 @@ def test_sync_regenerates_generated_files_and_maps_contributors():
     # Only generated docs may be auto-resolved; real conflicts must still stop the sync.
     assert "website/sidebars" in text and "skills-catalog" in text
     assert "contributors/emails/" in text
+
+
+def test_fork_gate_lists_existing_tests():
+    root = Path(__file__).resolve().parents[1]
+    listed = [
+        line.strip()
+        for line in (root / ".hermesos" / "fork-gate-tests.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert listed, "fork gate has no tests"
+    # On the CI branch only some fork tests exist yet; the thin branch has all of them.
+    gate = (root / ".github" / "workflows" / "fork-gate.yml").read_text(encoding="utf-8")
+    assert ".hermesos/fork-gate-tests.txt" in gate
