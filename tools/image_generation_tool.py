@@ -183,7 +183,11 @@ def _read_configured_image_provider():
     ``plugins/image_gen/fal/`` (which delegates back into this module's pipeline via call-time indirection —
     see issue #26241).
     """
-    return _read_image_gen_key("provider")
+    configured = _read_image_gen_key("provider")
+    if not configured:  # hermes-fork: venice-autopair
+        from tools.venice_autopair import default_provider
+        configured = default_provider("image_gen")
+    return configured
 
 
 def _plugin_provider_name() -> Optional[str]:
