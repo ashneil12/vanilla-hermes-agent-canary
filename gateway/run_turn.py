@@ -25,7 +25,6 @@ from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
 from gateway.response_filters import display_kind_for_event, is_machinery_display_kind
-from gateway.runtime_governor import governed_gateway_run, governed_gateway_turn  # hermes-fork: runtime-governor
 from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
@@ -162,6 +161,9 @@ def hygiene_no_commit_reason(agent) -> str:
     if getattr(agent, "_session_db", None) is None:
         return "no session_db on the hygiene agent"
     return "in-place commit did not complete"
+
+
+from gateway.runtime_governor import governed_gateway_run, governed_gateway_turn  # hermes-fork: runtime-governor
 
 
 class GatewayTurnMixin:

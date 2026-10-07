@@ -792,6 +792,10 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
     return (True, st.st_mtime_ns, st.st_size)
 
 
+from gateway.fork_status_guard import keep_held_lock_files  # hermes-fork: held-lock-keeps-identity-files
+
+
+@keep_held_lock_files  # hermes-fork: held-lock-keeps-identity-files
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check)."""
     if not cleanup_stale:
@@ -1936,10 +1940,7 @@ def get_running_pid(
             # unlinking its identity files would break that home's double-run protection
             # while the PID is alive. Unscoped keeps the #89315 poison-file cleanup.
             saw_live_pid = True
-        # hermes-fork: held-lock-keeps-identity-files — unscoped queries never cleanup-unlink while the lock
-        # is held: an unverifiable record does not prove staleness (the owner may live in another PID
-        # namespace) and unlinking a held lock lets a second gateway lock a fresh inode.
-        if expected_home is not None and not saw_live_pid:
+        if expected_home is None or not saw_live_pid:
             _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return get_runtime_status_running_pid() if pid_path is None else None
     # Lock inactive: the runtime-status fallback runs BEFORE cleanup here.

@@ -37,7 +37,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home, hermes_home_key
 from cron.env_settings import cron_env_setting
-from gateway.runtime_governor import governed_cron_run  # hermes-fork: runtime-governor
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import (
     load_config, load_config_readonly)
@@ -1890,6 +1889,9 @@ def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
         f"Cron job '{job_name}' idle for "
         f"{int(_secs_ago)}s (limit {int(limit_s)}s) "
         f"— last activity: {_last_desc}")
+
+
+from gateway.runtime_governor import governed_cron_run  # hermes-fork: runtime-governor
 
 
 @governed_cron_run  # hermes-fork: runtime-governor

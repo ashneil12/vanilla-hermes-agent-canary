@@ -130,7 +130,6 @@ from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 from agent.redact import redact_sensitive_text
 from agent.interrupt_compat import request_hard_interrupt
 from gateway.readiness import collect_runtime_readiness
-from gateway.runtime_governor import governed_api_run  # hermes-fork: runtime-governor
 from gateway.browser_control_artifacts import (
     ArtifactError, ArtifactRateLimiter, ArtifactStore, ArtifactTooLarge, DEFAULT_ALLOWED_MIME_TYPES,
     DEFAULT_MAX_ARTIFACT_BYTES, DEFAULT_ARTIFACT_TTL_SECONDS)
@@ -1149,6 +1148,9 @@ def _run_route_delegate(name: str):
         return await getattr(_api_runs, name)(self, request, _api_server=sys.modules[__name__])
     _handler.__name__ = name
     return _handler
+
+
+from gateway.runtime_governor import governed_api_run  # hermes-fork: runtime-governor
 
 
 class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):

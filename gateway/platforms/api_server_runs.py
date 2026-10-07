@@ -25,7 +25,6 @@ except ImportError:
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
-from gateway.runtime_governor import governed_run_sync  # hermes-fork: runtime-governor
 
 
 logger = logging.getLogger("gateway.platforms.api_server")
@@ -724,6 +723,9 @@ def _served_runtime(agent) -> Dict[str, str]:
         value = getattr(agent, key, "")
         pair[key] = value if isinstance(value, str) else ""
     return pair
+
+
+from gateway.runtime_governor import governed_run_sync  # hermes-fork: runtime-governor
 
 
 @governed_run_sync  # hermes-fork: runtime-governor
