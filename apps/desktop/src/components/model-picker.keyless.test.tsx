@@ -6,8 +6,6 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
-import { $localModelsEnabled } from '@/store/local-models-flag'
-import { $localRuntimeJobs } from '@/store/local-runtime-jobs'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 
 import { ModelPickerDialog } from './model-picker'
@@ -34,8 +32,6 @@ const OPTIONS: ModelOptionsResult = {
 
 beforeEach(() => {
   vi.mocked(requestModelOptions).mockResolvedValue(OPTIONS)
-  $localRuntimeJobs.set([])
-  $localModelsEnabled.set(true)
 })
 
 afterEach(() => {

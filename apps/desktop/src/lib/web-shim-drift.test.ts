@@ -73,34 +73,27 @@ const ACKNOWLEDGED_ABSENT = [
 ]
 
 /**
- * `key@file` pairs where the renderer calls an acknowledged-absent key without
- * its own `?.`. Reviewed: each sits behind a guard in the surrounding code (an
- * early `return`, `canOpen*()`, `state.envOverride`, an oauth-only branch).
+ * Acknowledged-absent keys that the renderer calls without its own `?.` somewhere. Reviewed: each
+ * call sits behind a guard in the surrounding code (an early `return`, `canOpen*()`,
+ * `state.envOverride`, an oauth-only / native-only branch). Keyed by NAME, not file: upstream moves
+ * code between files all the time (a `remote-setup/` refactor relocated five of these sites), and a
+ * guard that fails on every move gets deleted. A NEW unguarded-looking key still fails.
  */
-const REVIEWED_USE_SITES = [
-  'cloud@app/settings/cloud-team-change.ts',
-  'cloud@app/settings/gateway-settings.tsx',
-  'cloud@components/boot-failure-overlay.tsx',
-  'connections@app/settings/cloud-team-change.ts',
-  'continueBootstrapLocal@components/desktop-install-overlay.tsx',
-  'oauthLoginConnectionConfig@app/settings/connections-registry.tsx',
-  'oauthLoginConnectionConfig@app/settings/gateway-settings.tsx',
-  'oauthLoginConnectionConfig@components/boot-failure-overlay.tsx',
-  'oauthLoginConnectionConfig@components/first-run-remote-form.tsx',
-  'oauthLogoutConnectionConfig@app/settings/cloud-team-change.ts',
-  'oauthLogoutConnectionConfig@app/settings/gateway-settings.tsx',
-  'openBrowserWindow@store/windows.ts',
-  'openSessionInTerminal@store/windows.ts',
-  'openSessionWindow@store/windows.ts',
-  'openWindow@store/windows.ts',
-  'probeConnectionConfig@app/settings/connections-registry.tsx',
-  'probeConnectionConfig@app/settings/gateway-settings.tsx',
-  'probeConnectionConfig@components/boot-failure-overlay.tsx',
-  'probeConnectionConfig@components/first-run-remote-form.tsx',
-  'quickEntry@store/quick-entry.ts',
-  'setSecretStorageEncryption@app/settings/gateway-settings.tsx',
-  'sshConfigHosts@app/settings/gateway-settings.tsx',
-  'sshResolveHost@app/settings/gateway-settings.tsx'
+const REVIEWED_UNGUARDED_KEYS = [
+  'cloud',
+  'connections',
+  'continueBootstrapLocal',
+  'oauthLoginConnectionConfig',
+  'oauthLogoutConnectionConfig',
+  'openBrowserWindow',
+  'openSessionInTerminal',
+  'openSessionWindow',
+  'openWindow',
+  'probeConnectionConfig',
+  'quickEntry',
+  'setSecretStorageEncryption',
+  'sshConfigHosts',
+  'sshResolveHost'
 ]
 
 const parse = (file: string) =>
@@ -271,13 +264,18 @@ describe('hosted-web bridge drift guard', () => {
     expect([...ACKNOWLEDGED_ABSENT].sort()).toEqual(ACKNOWLEDGED_ABSENT)
   })
 
-  it('unguarded-looking call sites of acknowledged-absent keys have all been reviewed', () => {
-    const found = unguardedUseSites(new Set(ACKNOWLEDGED_ABSENT))
-    const fresh = found.filter(site => !REVIEWED_USE_SITES.includes(site))
+  it('every acknowledged-absent key that is called without `?.` has been reviewed as guarded', () => {
+    const sites = unguardedUseSites(new Set(ACKNOWLEDGED_ABSENT))
+    const fresh = [...new Set(sites.map(site => site.split('@')[0]))].filter(key => !REVIEWED_UNGUARDED_KEYS.includes(key))
 
-    // A new site means upstream started calling an absent key without `?.`.
-    // Read it: if a guard precedes it, add it to REVIEWED_USE_SITES; if not,
-    // implement the key in web-shim.ts.
-    expect(fresh, `unreviewed use sites: ${fresh.join(', ')}`).toEqual([])
+    // A new key here means upstream started calling an absent key without `?.`. Read the sites
+    // below: if a guard precedes them add the key to REVIEWED_UNGUARDED_KEYS; if not, implement the
+    // key in web-shim.ts.
+    expect(fresh, `unreviewed keys, sites: ${sites.filter(s => fresh.includes(s.split('@')[0])).join(', ')}`).toEqual([])
+  })
+
+  it('keeps the reviewed-key list honest (every entry is still an acknowledged-absent key)', () => {
+    expect(REVIEWED_UNGUARDED_KEYS.filter(key => !ACKNOWLEDGED_ABSENT.includes(key))).toEqual([])
+    expect([...REVIEWED_UNGUARDED_KEYS].sort()).toEqual(REVIEWED_UNGUARDED_KEYS)
   })
 })

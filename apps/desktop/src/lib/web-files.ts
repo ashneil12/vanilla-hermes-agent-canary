@@ -57,8 +57,14 @@ export function registerWebFile(blob: Blob, name?: string): string {
   }
 
   const rawName = name || (blob as File).name || 'upload'
+
   // The basename is what the composer chip shows; keep it readable but never a path.
-  const cleaned = rawName.replace(/[\\/\u0000-\u001f]+/g, '_').trim()
+  // Path separators and control characters can never be part of the basename.
+  const cleaned = [...rawName]
+    .map(char => (char === '/' || char === '\\' || char < ' ' ? '_' : char))
+    .join('')
+    .trim()
+
   const safeName = !cleaned || cleaned === '.' || cleaned === '..' ? 'upload' : cleaned
   const path = `${WEB_FILE_ROOT}/${Date.now().toString(36)}-${(sequence++).toString(36)}/${safeName}`
 
@@ -97,20 +103,29 @@ export function imageMimeForExtension(ext: string): string {
   switch (ext.replace(/^\./, '').toLowerCase()) {
     case 'bmp':
       return 'image/bmp'
+
     case 'gif':
       return 'image/gif'
+
     case 'jpg':
+
     case 'jpeg':
       return 'image/jpeg'
+
     case 'svg':
       return 'image/svg+xml'
+
     case 'tif':
+
     case 'tiff':
       return 'image/tiff'
+
     case 'webp':
       return 'image/webp'
+
     case 'ico':
       return 'image/x-icon'
+
     default:
       return 'image/png'
   }

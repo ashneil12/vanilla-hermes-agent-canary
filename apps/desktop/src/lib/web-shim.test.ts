@@ -118,6 +118,7 @@ describe('hosted web attachments (synthetic paths, no upload endpoint)', () => {
 
   it('never lets a hostile file name escape its slot', async () => {
     await import('./web-shim')
+
     for (const name of ['../../etc/passwd', '..', '.', '']) {
       const path = window.hermesDesktop.getPathForFile(new File(['x'], name))
       const segments = path.slice(WEB_FILE_ROOT.length + 1).split('/')
@@ -172,6 +173,7 @@ describe('hosted web attachments (synthetic paths, no upload endpoint)', () => {
   it('selectPaths turns the picked files into synthetic paths', async () => {
     await import('./web-shim')
     const picked = new File(['a'], 'a.txt')
+
     const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
       Object.defineProperty(this, 'files', { value: [picked] })
       this.dispatchEvent(new Event('change'))

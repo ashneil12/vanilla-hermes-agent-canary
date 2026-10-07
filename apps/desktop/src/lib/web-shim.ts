@@ -60,18 +60,22 @@ function resolveConfig(): WebRuntimeConfig {
   // shim consumes — see hermesdeploy webui-handoff.ts). A direct/manual link
   // may use the plainer `#token=<bearer>`. Accept either; iframe_token wins.
   let token = ''
+
   try {
     const hash = window.location.hash.replace(/^#/, '')
     const params = new URLSearchParams(hash)
     const fromHash = params.get('iframe_token') || params.get('token')
+
     if (fromHash) {
       token = fromHash
+
       // Persist for reloads, then scrub the token out of the visible URL.
       try {
         sessionStorage.setItem('hermes_web_token', fromHash)
       } catch {
         /* ignore */
       }
+
       params.delete('iframe_token')
       params.delete('token')
       const rest = params.toString()
@@ -81,13 +85,16 @@ function resolveConfig(): WebRuntimeConfig {
   } catch {
     /* ignore */
   }
+
   // Image-served: the backend injects __HERMES_SESSION_TOKEN__ into index.html.
   if (!token && typeof w.__HERMES_SESSION_TOKEN__ === 'string' && w.__HERMES_SESSION_TOKEN__) {
     token = w.__HERMES_SESSION_TOKEN__
   }
+
   if (!token && typeof w.__HERMES_WEB_TOKEN__ === 'string') {
     token = w.__HERMES_WEB_TOKEN__
   }
+
   if (!token) {
     try {
       token = sessionStorage.getItem('hermes_web_token') ?? ''
@@ -100,6 +107,7 @@ function resolveConfig(): WebRuntimeConfig {
   // image-served — may legitimately be "" for root, so test by type) →
   // __HERMES_WEB_API_BASE__ (hand-deploy override) → "/desktop" default.
   let apiBase: string
+
   if (typeof w.__HERMES_BASE_PATH__ === 'string') {
     apiBase = w.__HERMES_BASE_PATH__
   } else if (typeof w.__HERMES_WEB_API_BASE__ === 'string') {
@@ -107,6 +115,7 @@ function resolveConfig(): WebRuntimeConfig {
   } else {
     apiBase = '/desktop'
   }
+
   apiBase = apiBase.replace(/\/$/, '')
 
   return { apiBase, token }
@@ -119,6 +128,7 @@ function buildUrls(config: WebRuntimeConfig): { baseUrl: string; wsUrl: string }
   const wsBase = `${wsProto}//${window.location.host}${config.apiBase}`
   const qs = config.token ? `?token=${encodeURIComponent(config.token)}` : ''
   const wsUrl = `${wsBase}/api/ws${qs}`
+
   return { baseUrl, wsUrl }
 }
 
@@ -267,6 +277,7 @@ function installWebShim(): void {
     testConnectionConfig: async () => {
       try {
         const status = await fetchJson<{ version?: string }>({ path: '/api/status' })
+
         return { baseUrl: `${window.location.origin}${config.apiBase}`, ok: true, version: status?.version ?? null }
       } catch {
         return { baseUrl: `${window.location.origin}${config.apiBase}`, ok: false, version: null }
@@ -280,20 +291,26 @@ function installWebShim(): void {
         if (typeof Notification === 'undefined') {
           return false
         }
+
         if (Notification.permission === 'granted') {
           new Notification(payload.title ?? 'Hermes', { body: payload.body, silent: payload.silent })
+
           return true
         }
+
         if (Notification.permission !== 'denied') {
           const perm = await Notification.requestPermission()
+
           if (perm === 'granted') {
             new Notification(payload.title ?? 'Hermes', { body: payload.body, silent: payload.silent })
+
             return true
           }
         }
       } catch {
         /* ignore */
       }
+
       return false
     },
 
@@ -301,6 +318,7 @@ function installWebShim(): void {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
         stream.getTracks().forEach(t => t.stop())
+
         return true
       } catch {
         return false
@@ -323,6 +341,7 @@ function installWebShim(): void {
     writeClipboard: async (text: string) => {
       try {
         await navigator.clipboard.writeText(text)
+
         return true
       } catch {
         return false
@@ -344,6 +363,7 @@ function installWebShim(): void {
         const blob = await res.blob()
         const name = url.split('/').pop()?.split('?')[0] || 'image.png'
         triggerDownload(blob, name)
+
         return true
       } catch {
         return false
@@ -450,9 +470,9 @@ function installWebShim(): void {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(window as any).hermesDesktop = bridge
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(window as any).__HERMES_WEB_CLIENT__ = true
 }
 

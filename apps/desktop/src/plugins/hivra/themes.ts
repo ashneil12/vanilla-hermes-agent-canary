@@ -1,5 +1,10 @@
-import { DEFAULT_TYPOGRAPHY, monoTheme } from '@/themes/presets'
-import type { DesktopTheme } from '@/themes/types'
+import type { DesktopTheme } from '@hermes/plugin-sdk'
+
+// Fallback stacks after the Hivra fonts (the SDK does not export the app's own).
+const SANS_FALLBACK =
+  '"Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif, "Apple Color Emoji", "Noto Color Emoji"'
+
+const MONO_FALLBACK = 'Menlo, Monaco, "SF Mono", monospace'
 
 /** Name painted on a hosted-web first run (see `seedDefaultSkin` in plugin.tsx). */
 export const HIVRA_SKIN_NAME = 'hivra'
@@ -66,17 +71,9 @@ export const hivraTheme: DesktopTheme = {
     userBubbleBorder: 'rgba(253, 252, 249, 0.14)'
   },
   typography: {
-    fontSans: `"Space Grotesk", ${DEFAULT_TYPOGRAPHY.fontSans}`,
-    fontMono: `"Space Mono", ${DEFAULT_TYPOGRAPHY.fontMono}`,
+    fontSans: `"Space Grotesk", ${SANS_FALLBACK}`,
+    fontMono: `"Space Mono", ${MONO_FALLBACK}`,
     fontUrl:
       'https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap'
   }
-}
-
-/** Kept registered so a skin name persisted by an earlier build still resolves. */
-export const hermesOSDarkTheme: DesktopTheme = {
-  name: 'hermesos-dark',
-  label: 'HermesOS Dark',
-  description: 'The signature Hermes dark — clean grayscale',
-  colors: { ...monoTheme.colors }
 }

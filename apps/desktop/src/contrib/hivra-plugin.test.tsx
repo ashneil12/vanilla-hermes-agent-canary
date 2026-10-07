@@ -1,8 +1,8 @@
+import { host } from '@hermes/plugin-sdk'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createPluginContext } from '@/contrib/plugin'
-import { registry } from '@/contrib/registry'
+import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
 import { modePref, skinPref, ThemeProvider, useTheme } from '@/themes/context'
 import { listAllThemes, resolveTheme } from '@/themes/user-themes'
 
@@ -11,9 +11,19 @@ import {
   DASHBOARD_APPEARANCE_MESSAGE_TYPE,
   DASHBOARD_SEND_MESSAGE_TYPE,
   readDashboardModeFromUrl
-} from './dashboard-bridge'
-import plugin, { AdminPanelPage, closeNarrowOverlays, seedDefaultSkin } from './plugin'
-import { HIVRA_SKIN_NAME } from './themes'
+} from '../plugins/hivra/dashboard-bridge'
+import plugin, {
+  AdminPanelPage,
+  closeNarrowOverlays,
+  MODE_STORAGE_KEY,
+  PANE_REVEAL_EVENT,
+  seedDefaultSkin,
+  SKIN_STORAGE_KEY
+} from '../plugins/hivra/plugin'
+import { HIVRA_SKIN_NAME } from '../plugins/hivra/themes'
+
+import { createPluginContext } from './plugin'
+import { registry } from './registry'
 
 const setWebClient = (on: boolean) => {
   if (on) {
@@ -33,7 +43,7 @@ function load() {
 
 beforeEach(() => {
   window.localStorage.clear()
-  document.documentElement.removeAttribute('data-hermes-web-client')
+  window.document.documentElement.removeAttribute('data-hermes-web-client')
 })
 
 afterEach(() => {
@@ -48,7 +58,7 @@ describe('hivra plugin', () => {
     expect(registry.getArea('themes').some(c => c.source === 'plugin:hivra')).toBe(false)
     expect(registry.getArea('sidebar.nav').some(c => c.source === 'plugin:hivra')).toBe(false)
     expect(skinPref.stored('default')).toBeNull()
-    expect(document.documentElement.hasAttribute('data-hermes-web-client')).toBe(false)
+    expect(window.document.documentElement.hasAttribute('data-hermes-web-client')).toBe(false)
     unload()
   })
 
@@ -57,15 +67,15 @@ describe('hivra plugin', () => {
     const unload = load()
     const mine = (area: string) => registry.getArea(area).filter(c => c.source === 'plugin:hivra')
 
-    expect(mine('themes').map(c => (c.data as { name: string }).name)).toEqual(['hivra', 'hermesos-dark'])
+    expect(mine('themes').map(c => (c.data as { name: string }).name)).toEqual(['hivra'])
     expect(resolveTheme('hivra')?.darkColors?.primary).toBe('#ff3a3b')
-    expect(listAllThemes().map(t => t.name)).toEqual(expect.arrayContaining(['hivra', 'hermesos-dark', 'nous']))
+    expect(listAllThemes().map(t => t.name)).toEqual(expect.arrayContaining(['hivra', 'nous']))
     expect(mine('routes').map(c => c.data)).toEqual([{ path: '/admin-panel' }])
     expect(mine('sidebar.nav').map(c => c.data)).toEqual([
       { codicon: 'dashboard', label: 'Admin Panel', path: '/admin-panel' }
     ])
     expect(mine('statusBar.right')).toHaveLength(1)
-    expect(document.documentElement.hasAttribute('data-hermes-web-client')).toBe(true)
+    expect(window.document.documentElement.hasAttribute('data-hermes-web-client')).toBe(true)
 
     unload()
     expect(registry.getArea('themes').some(c => c.source === 'plugin:hivra')).toBe(false)
@@ -101,7 +111,7 @@ describe('hivra plugin', () => {
     // Plugins register at import time, so the contributed skin already resolves
     // when the provider reads its persisted pick: no flash of the default skin.
     expect(screen.getByTestId('probe').textContent).toMatch(/^hivra\|hivra-(light|dark)\|(light|dark)$/)
-    expect(document.documentElement.style.getPropertyValue('--theme-primary')).toMatch(/#ff(2c2d|3a3b)/i)
+    expect(window.document.documentElement.style.getPropertyValue('--theme-primary')).toMatch(/#ff(2c2d|3a3b)/i)
     unload()
     cleanup()
   })
@@ -122,11 +132,11 @@ describe('hivra plugin', () => {
   })
 
   it('adds viewport-fit=cover to the viewport meta exactly once', () => {
-    const meta = document.createElement('meta')
+    const meta = window.document.createElement('meta')
 
     meta.name = 'viewport'
     meta.content = 'width=device-width, initial-scale=1.0'
-    document.head.appendChild(meta)
+    window.document.head.appendChild(meta)
     setWebClient(true)
 
     const unload = load()
@@ -140,14 +150,34 @@ describe('hivra plugin', () => {
     meta.remove()
   })
 
-  it('closeNarrowOverlays is a no-op on wide viewports', () => {
-    const seen = vi.fn()
+  it('closeNarrowOverlays retires the pinned panes on a phone and does nothing on a wide viewport', () => {
+    const seen = vi.fn((event: Event) => (event as CustomEvent).detail)
+    const viewport = vi.spyOn(host.state.viewport, 'get')
 
-    window.addEventListener('hermes:pane-toggle-reveal', seen)
+    window.addEventListener(PANE_TOGGLE_REVEAL_EVENT, seen)
+    viewport.mockReturnValue({ height: 800, narrow: false, width: 1200 } as never)
     closeNarrowOverlays()
-    window.removeEventListener('hermes:pane-toggle-reveal', seen)
-
     expect(seen).not.toHaveBeenCalled()
+
+    viewport.mockReturnValue({ height: 800, narrow: true, width: 390 } as never)
+    closeNarrowOverlays()
+    window.removeEventListener(PANE_TOGGLE_REVEAL_EVENT, seen)
+
+    expect(seen.mock.results.map(result => result.value)).toEqual([
+      { id: 'sessions', mode: 'close' },
+      { id: 'files', mode: 'close' },
+      { id: 'review', mode: 'close' }
+    ])
+  })
+
+  it('mirrors the app constants the plugin cannot import (a rename upstream fails here, not silently)', () => {
+    expect(PANE_REVEAL_EVENT).toBe(PANE_TOGGLE_REVEAL_EVENT)
+
+    window.localStorage.setItem(SKIN_STORAGE_KEY, 'mono')
+    window.localStorage.setItem(MODE_STORAGE_KEY, 'dark')
+
+    expect(skinPref.stored('default')).toBe('mono')
+    expect(modePref.stored('default')).toBe('dark')
   })
 })
 
@@ -221,6 +251,7 @@ describe('dashboard bridge', () => {
 
   const make = (submit = vi.fn(() => true)) => {
     const timers: Array<() => void> = []
+
     const bridge = createDashboardBridge({
       setTimeout: fn => {
         timers.push(fn)

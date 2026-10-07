@@ -25,18 +25,37 @@ import {
   THEMES_AREA,
   useTheme
 } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router'
 
-import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
-import { $narrowViewport } from '@/components/pane-shell/tree/store'
-import { modePref, skinPref } from '@/themes/context'
-
 import { createDashboardBridge, type DashboardBridge, readDashboardModeFromUrl } from './dashboard-bridge'
-import { HIVRA_SKIN_NAME, hermesOSDarkTheme, hivraTheme } from './themes'
+import { HIVRA_SKIN_NAME, hivraTheme } from './themes'
 
 const ADMIN_PANEL_PATH = '/admin-panel'
 const PHONE_PANES = ['sessions', 'files', 'review'] as const
+
+// Plugins may import only the SDK, so these mirror the app's own constants. They are pinned
+// by src/contrib/hivra-plugin.test.tsx against the real exports (themes/context.tsx,
+// components/pane-shell): if upstream renames one, that test fails instead of a silent no-op.
+export const SKIN_STORAGE_KEY = 'hermes-desktop-theme-v2'
+export const MODE_STORAGE_KEY = 'hermes-desktop-mode-v1'
+export const PANE_REVEAL_EVENT = 'hermes:pane-toggle-reveal'
+
+const readStored = (key: string): null | string => {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+const writeStored = (key: string, value: string) => {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    /* private mode: the app default applies */
+  }
+}
 
 const isWebClient = () =>
   typeof window !== 'undefined' && Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
@@ -50,14 +69,14 @@ const adminBridge = (): AdminBridge => (typeof window === 'undefined' ? {} : (wi
 
 /**
  * First run paints the Hivra skin. `DEFAULT_SKIN_NAME` is upstream's constant,
- * so the default is seeded into the same per-profile storage the theme provider
- * reads at its first render (plugins register at import time, before it mounts;
- * the contributed theme resolves reactively). Only when UNSET: an explicit pick
+ * so the default is seeded into the storage the theme provider reads at its
+ * first render (plugins register at import time, before it mounts; the
+ * contributed theme resolves reactively). Only when UNSET: an explicit pick
  * from Settings / Cmd+K is never overridden. Mode already defaults to `system`.
  */
 export function seedDefaultSkin(): void {
-  if (skinPref.stored('default') === null) {
-    skinPref.assign('default', HIVRA_SKIN_NAME)
+  if (readStored(SKIN_STORAGE_KEY) === null) {
+    writeStored(SKIN_STORAGE_KEY, HIVRA_SKIN_NAME)
   }
 }
 
@@ -66,28 +85,28 @@ export function seedDashboardMode(): void {
   const hint = readDashboardModeFromUrl()
 
   if (hint) {
-    modePref.assign('default', hint)
+    writeStored(MODE_STORAGE_KEY, hint)
   }
 }
 
 /** Phone: any navigation retires the pinned sidebar / files / review overlays. */
 export function closeNarrowOverlays(): void {
-  if (typeof window === 'undefined' || !$narrowViewport.get()) {
+  if (typeof window === 'undefined' || !host.state.viewport.get().narrow) {
     return
   }
 
   for (const id of PHONE_PANES) {
-    window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id, mode: 'close' } }))
+    window.dispatchEvent(new CustomEvent(PANE_REVEAL_EVENT, { detail: { id, mode: 'close' } }))
   }
 }
 
 function enablePhoneViewport(): void {
-  document.documentElement.setAttribute('data-hermes-web-client', '')
+  window.document.documentElement.setAttribute('data-hermes-web-client', '')
 
   // viewport-fit=cover exposes env(safe-area-inset-*) on notched phones;
   // interactive-widget=resizes-content makes the layout viewport track the
   // on-screen keyboard. Pinch-zoom stays enabled on purpose.
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
+  const meta = window.document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
   const content = meta?.getAttribute('content') ?? ''
 
   if (meta && !content.includes('viewport-fit')) {
@@ -127,14 +146,13 @@ let lastAutoOpen = 0
  */
 export function AdminPanelPage() {
   const [blocked, setBlocked] = useState(false)
-  const opened = useRef(false)
 
   useEffect(() => {
-    if (opened.current || Date.now() - lastAutoOpen < 2_000 || navigator.userActivation?.isActive === false) {
+    // lastAutoOpen also absorbs React StrictMode's double-run in dev.
+    if (Date.now() - lastAutoOpen < 2_000 || navigator.userActivation?.isActive === false) {
       return
     }
 
-    opened.current = true
     lastAutoOpen = Date.now()
     setBlocked(adminBridge().openAdminPanel?.() === false)
   }, [])
@@ -188,7 +206,6 @@ const plugin: HermesPlugin = {
 
     ctx.registerMany([
       { id: 'theme-hivra', area: THEMES_AREA, data: hivraTheme },
-      { id: 'theme-hermesos-dark', area: THEMES_AREA, data: hermesOSDarkTheme },
       {
         id: 'admin-panel-page',
         area: ROUTES_AREA,
