@@ -1,0 +1,50 @@
+"""Hivra fork plugin: managed-hosting system-prompt guidance (fork-only, bundled, auto-loaded).
+
+Replaces the two fork edits that used to live in ``agent/prompt_builder.py`` /
+``agent/system_prompt.py`` / ``run_agent.py``. Upstream's plugin system-prompt-section API
+renders each callable once per new session and skips a section whose text is empty, so both
+sections are no-ops on a box without a provisioned Bankr wallet or hosted media tools.
+"""
+
+from __future__ import annotations
+
+# Steers media requests to the hosted cloud-generation tools instead of local synthesis
+# (torch / audiocraft / ffmpeg), which is slower, lower quality and usually fails on managed boxes.
+MEDIA_GENERATION_GUIDANCE = (
+    "# Media generation\n"
+    "To create images, video, music, audio, songs, jingles, ambient tracks, or "
+    "sound effects, you MUST use the dedicated cloud generation tools in your "
+    "toolset — image_generate, video_generate, and audio_generate. They are "
+    "hosted (no local setup) and return a ready media file. Do NOT write code, "
+    "run the terminal, install packages (torch, audiocraft, MusicGen, ffmpeg, "
+    "scipy, soundfile, …), or open the audiocraft / heartmula / songwriting "
+    "skills to synthesize media yourself — that path is slower, lower quality, "
+    "and usually fails here. Example: for \"generate some background music\" or "
+    "\"make a 10s track\", call audio_generate directly with the prompt."
+)
+
+_MEDIA_TOOLS = ("image_generate", "video_generate", "audio_generate")
+
+
+def _media_guidance(_session_info) -> str:
+    """The guidance only when at least one hosted media tool is registered AND available
+    (its check_fn passes, e.g. the Venice key is set); otherwise empty, which core skips."""
+    try:
+        from tools.registry import registry
+
+        if registry.get_definitions(set(_MEDIA_TOOLS), quiet=True):
+            return MEDIA_GENERATION_GUIDANCE
+    except Exception:
+        pass
+    return ""
+
+
+def _bankr_wallet_guidance(_session_info) -> str:
+    from hermes_cli.fork_bankr import build_bankr_wallet_prompt
+
+    return build_bankr_wallet_prompt()
+
+
+def register(ctx) -> None:
+    ctx.register_system_prompt_section("hivra-bankr-wallet", _bankr_wallet_guidance)
+    ctx.register_system_prompt_section("hivra-media-generation", _media_guidance)

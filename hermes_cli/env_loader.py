@@ -672,3 +672,9 @@ def _process_hermes_home() -> Path:
         return get_routing_process_hermes_home()
     except Exception:
         return Path.home() / ".hermes"
+
+
+# hermes-fork: install-dir-home-guard (hermes_fork_home.py)
+import hermes_fork_home as _hermes_fork_home  # noqa: E402
+
+load_hermes_dotenv = _hermes_fork_home.pin_infra_env(load_hermes_dotenv)
