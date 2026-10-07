@@ -186,19 +186,20 @@ class TestVeniceAudioWiring:
 
 
 class TestMediaGuidanceSeam:
-    """Steers code-biased models to the media tools instead of hand-rolling WAVs. Owned by the
-    prompt seam (agent/prompt_builder.py + agent/system_prompt.py), kept here because the docker
-    gate historically asserted it. Skips when that seam is not on this branch."""
+    """Steers code-biased models to the media tools instead of hand-rolling WAVs.
+    hermes-fork: the guidance lives in the bundled `hivra-core` plugin (plugins/hivra-core),
+    injected through upstream's register_system_prompt_section API, so no prompt_builder edit."""
 
     def test_media_generation_guidance_present_and_wired(self):
-        from agent import prompt_builder
+        import importlib.util
+        from pathlib import Path
 
-        if not hasattr(prompt_builder, "MEDIA_GENERATION_GUIDANCE"):
-            pytest.skip("MEDIA_GENERATION_GUIDANCE prompt seam not present on this branch")
-        assert "audio_generate" in prompt_builder.MEDIA_GENERATION_GUIDANCE
-        import agent.system_prompt as sp
-
-        assert "MEDIA_GENERATION_GUIDANCE" in inspect.getsource(sp)
+        path = Path(__file__).resolve().parents[2] / "plugins" / "hivra-core" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("hivra_core_for_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert "audio_generate" in mod.MEDIA_GENERATION_GUIDANCE
+        assert "register_system_prompt_section" in path.read_text(encoding="utf-8")
 
 
 class TestVideoModelResolution:
