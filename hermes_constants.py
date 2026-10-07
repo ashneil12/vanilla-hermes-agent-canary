@@ -1646,3 +1646,9 @@ def emit_partial_update_hint(exc: BaseException, *, file=None) -> bool:
     for line in (f"Error: {exc}", *lines):
         print(line, file=sys.stderr if file is None else file)
     return True
+
+
+# hermes-fork: install-dir-home-guard (hermes_fork_home.py)
+import hermes_fork_home as _hermes_fork_home  # noqa: E402
+
+_hermes_fork_home.install(globals())
