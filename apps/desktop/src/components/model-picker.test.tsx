@@ -93,6 +93,22 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+// hermes-fork: keyless-provider-guard (see model-catalog-menu.test.tsx).
+describe('ModelPickerDialog keyless providers', () => {
+  it('omits a provider the box has no credentials for, even when it surfaces models', async () => {
+    vi.mocked(requestModelOptions).mockResolvedValue({
+      providers: [
+        OPTIONS.providers![1],
+        { slug: 'anthropic', name: 'Anthropic', models: ['claude-sonnet-4'], authenticated: false }
+      ]
+    })
+    renderPicker()
+
+    expect(await screen.findByText('Hermes-4.5')).toBeTruthy()
+    expect(screen.queryByText('claude-sonnet-4')).toBeNull()
+  })
+})
+
 describe('ModelPickerDialog download rows', () => {
   it('shows an in-flight download as a disabled progress row in the Local group', async () => {
     $localRuntimeJobs.set([DOWNLOAD_JOB])

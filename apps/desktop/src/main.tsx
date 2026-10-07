@@ -1,3 +1,6 @@
+// hermes-fork: web-shim — install the hosted-web `window.hermesDesktop` bridge
+// before anything reads it. No-op under Electron (preload already defined it).
+import './lib/web-shim'
 import './styles.css'
 // Side-effect: reports in-flight turns to the main process for the quit guard.
 import './store/active-work'

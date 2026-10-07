@@ -106,7 +106,11 @@ export function ModelPickerDialog(props: Props) {
   const closedRef = useRef(false);
 
   const applyOptions = (r: ModelOptionsResult) => {
-    const next = r?.providers ?? [];
+    // hermes-fork: keyless-provider-guard — only providers with usable
+    // credentials are selectable. A provider the box has no key for would
+    // persist a dead provider into config.yaml and brick new sessions at agent
+    // init ("Provider 'X' is set in config.yaml but no API key was found").
+    const next = (r?.providers ?? []).filter((p) => p.authenticated !== false);
     setProviders(next);
     setCurrentModel(String(r?.model ?? ""));
     setCurrentProviderSlug(String(r?.provider ?? ""));

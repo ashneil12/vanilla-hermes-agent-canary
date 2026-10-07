@@ -27,10 +27,12 @@ export const sortProviders = (providers: OAuthProvider[]) =>
 
 export function FeaturedProviderRow({
   onSelect,
-  provider
+  provider,
+  hideRecommendedBadge = false // hermes-fork: venice-card — Venice holds the Recommended slot
 }: {
   onSelect: (provider: OAuthProvider) => void
   provider: OAuthProvider
+  hideRecommendedBadge?: boolean // hermes-fork: venice-card
 }) {
   const { t } = useI18n()
   const freeTier = provider.status?.free_tier === true
@@ -53,7 +55,7 @@ export function FeaturedProviderRow({
             <FreeTierTag />
           ) : loggedIn ? (
             <ConnectedTag />
-          ) : (
+          ) : hideRecommendedBadge ? null : (
             <span className="inline-flex items-center gap-1.5 bg-primary px-2 py-0.5 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-primary-foreground">
               <span aria-hidden="true" className="dither inline-block size-2 shrink-0" />
               {t.onboarding.recommended}

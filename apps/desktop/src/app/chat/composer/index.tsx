@@ -1114,6 +1114,11 @@ export function ChatBar({
       onPickFiles={onPickFiles}
       onPickFolders={onPickFolders}
       onPickImages={onPickImages}
+      onWebAttachFiles={
+        // hermes-fork: web-file-picker — path '' = the browser-drop shape, so
+        // attachDroppedItems resolves each File via the shim's getPathForFile.
+        onAttachDroppedItems ? files => void onAttachDroppedItems(files.map(file => ({ file, path: '' }))) : undefined
+      }
       state={state}
     />
   )

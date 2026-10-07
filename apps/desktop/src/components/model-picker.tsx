@@ -325,8 +325,14 @@ function ModelResults({
   // can't change mid-session.
   const localModelsShown = $localModelsEnabled.get()
 
+  // hermes-fork: keyless-provider-guard — also drop providers the box has no
+  // usable credentials for: selecting one persists a dead provider into
+  // config.yaml and bricks new sessions at agent init ("no API key was found").
   const configured = providers.filter(
-    p => (p.models ?? []).length > 0 && (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
+    p =>
+      (p.models ?? []).length > 0 &&
+      p.authenticated !== false &&
+      (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
   )
 
   // In-flight local downloads render as disabled progress rows: inside the

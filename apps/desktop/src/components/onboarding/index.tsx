@@ -51,6 +51,7 @@ import {
   ProviderRow,
   sortProviders
 } from './providers'
+import { VeniceRecommendedCard } from './venice-recommended-card' // hermes-fork: venice-card
 
 export {
   FeaturedProviderRow,
@@ -86,6 +87,17 @@ export interface ApiKeyOption {
 // Curated order mirrors CANONICAL_PROVIDERS: Fireworks sits #2 overall (after
 // Nous Portal OAuth), ahead of OpenRouter and the rest of the key catalog.
 const API_KEY_OPTIONS: ApiKeyOption[] = [
+  // hermes-fork: venice-card — Venice leads. Managed by Hivra when enabled,
+  // otherwise paste your own Venice key (OpenAI-compatible endpoint).
+  {
+    id: 'venice',
+    name: 'Venice',
+    short: 'recommended · private frontier models',
+    envKey: 'VENICE_API_KEY',
+    description:
+      'Private, uncensored frontier models. Managed by Hivra when enabled — otherwise paste your own Venice key.',
+    docsUrl: 'https://venice.ai/settings/api'
+  },
   {
     id: 'fireworks',
     name: 'Fireworks AI',
@@ -672,7 +684,9 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   return (
     <div className="grid gap-2">
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
-        {featured ? <FeaturedProviderRow onSelect={select} provider={featured} /> : null}
+        {/* hermes-fork: venice-card */}
+        <VeniceRecommendedCard onWantApiKey={() => openKeyForm('VENICE_API_KEY')} />
+        {featured ? <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} /> : null}
         {/* The no-account path: everything runs on this machine. Shipped
             behind the --local launch flag. (Fireworks moved into the
             expanded list on main.) */}

@@ -77,7 +77,11 @@ describe('onboarding Picker', () => {
     expect(screen.getByText('Anthropic API Key')).toBeTruthy()
     expect(screen.getByText('ChatGPT or Codex Subscription')).toBeTruthy()
     expect(screen.queryByText('Other sign-in options')).toBeNull()
-    expect(screen.queryByText('Recommended')).toBeNull()
+    // hermes-fork: venice-card — the Venice card holds the Recommended slot at
+    // the top of the picker unconditionally, so the badge is present even when
+    // Nous Portal is absent. Upstream asserts it absent (the featured row only).
+    expect(screen.getAllByText('Recommended')).toHaveLength(1)
+    expect(screen.getByText('Venice')).toBeTruthy()
   })
 
   it('offers "choose later" on first run and persists the skip', () => {

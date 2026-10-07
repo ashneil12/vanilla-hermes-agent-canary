@@ -1,0 +1,29 @@
+/* Hosted-web (phone / tablet browser) polish. Everything is scoped to the
+   attribute the plugin sets on <html> only for the hosted web client, so the
+   native Desktop app is never touched. Replaces the retired per-component
+   `touch:` variant patches: upstream now trusts :hover itself (styles.css
+   `@custom-variant hover`), and a tap sticks :hover, so hover-revealed
+   controls stay reachable. */
+
+/* iOS Safari zooms the page when a focused control's font is under 16px. */
+@media (hover: none) {
+  html[data-hermes-web-client] input,
+  html[data-hermes-web-client] select,
+  html[data-hermes-web-client] textarea,
+  html[data-hermes-web-client] [contenteditable='true'] {
+    font-size: max(1em, 16px);
+  }
+
+  /* Clear the iOS home indicator under the statusbar (env() is 0 elsewhere). */
+  html[data-hermes-web-client] [data-slot='statusbar'] {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Mobile Safari's 100vh is the LARGE viewport, which pushes the statusbar and
+   composer under the browser toolbar. Desktop browsers resolve dvh == vh. */
+@supports (height: 100dvh) {
+  html[data-hermes-web-client] .h-screen {
+    height: 100dvh;
+  }
+}

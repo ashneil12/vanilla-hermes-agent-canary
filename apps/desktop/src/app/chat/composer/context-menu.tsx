@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils'
 import { useComposerAttachmentProviders } from './contrib'
 import { GHOST_ICON_BTN } from './controls'
 import type { ChatBarState } from './types'
+import { useWebFilePicker } from './web-file-picker' // hermes-fork: web-file-picker
 
 const SNIPPET_KEYS = ['codeReview', 'implementationPlan', 'explainThis']
 
@@ -31,7 +32,8 @@ export function ContextMenu({
   onPasteClipboardImage,
   onPickFiles,
   onPickFolders,
-  onPickImages
+  onPickImages,
+  onWebAttachFiles
 }: ContextMenuProps) {
   const { t } = useI18n()
   const c = t.composer
@@ -43,6 +45,9 @@ export function ContextMenu({
   // `composer.attachments` contributions — plugin/core-registered rows that
   // extend this menu through the same registry as every other surface.
   const attachmentProviders = useComposerAttachmentProviders()
+  // hermes-fork: web-file-picker — hosted web opens the chooser from a real DOM
+  // click (see ./web-file-picker.tsx); native keeps the IPC picker below.
+  const web = useWebFilePicker(onWebAttachFiles)
 
   return (
     <>
@@ -68,13 +73,23 @@ export function ContextMenu({
           <DropdownMenuLabel className="px-2 pb-0.5 pt-0.5 text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)">
             {c.attachLabel}
           </DropdownMenuLabel>
-          <ContextMenuItem disabled={!onPickFiles} icon={FileText} onSelect={onPickFiles}>
+          <ContextMenuItem
+            disabled={web.enabled ? false : !onPickFiles}
+            icon={FileText}
+            onClick={web.enabled ? web.pickFiles : undefined} // hermes-fork: web-file-picker
+            onSelect={web.enabled ? undefined : onPickFiles}
+          >
             {c.files}
           </ContextMenuItem>
           <ContextMenuItem disabled={!onPickFolders} icon={FolderOpen} onSelect={onPickFolders}>
             {c.folder}
           </ContextMenuItem>
-          <ContextMenuItem disabled={!onPickImages} icon={ImageIcon} onSelect={onPickImages}>
+          <ContextMenuItem
+            disabled={web.enabled ? false : !onPickImages}
+            icon={ImageIcon}
+            onClick={web.enabled ? web.pickImages : undefined} // hermes-fork: web-file-picker
+            onSelect={web.enabled ? undefined : onPickImages}
+          >
             {c.images}
           </ContextMenuItem>
           <ContextMenuItem
@@ -115,6 +130,8 @@ export function ContextMenu({
           </div>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {web.inputs /* hermes-fork: web-file-picker — outlives the menu closing */}
 
       <PromptSnippetsDialog onInsertText={onInsertText} onOpenChange={setSnippetsOpen} open={snippetsOpen} />
     </>
@@ -163,12 +180,13 @@ function PromptSnippetsDialog({ onInsertText, onOpenChange, open }: PromptSnippe
   )
 }
 
-export function ContextMenuItem({ children, disabled, icon: Icon, onSelect }: ContextMenuItemProps) {
+export function ContextMenuItem({ children, disabled, icon: Icon, onClick, onSelect }: ContextMenuItemProps) {
   return (
     // Override font size + highlight to match the / · @ completion rows exactly.
     <DropdownMenuItem
       className="text-[length:var(--conversation-tool-font-size)] focus:bg-(--ui-bg-tertiary)"
       disabled={disabled}
+      onClick={onClick} // hermes-fork: web-file-picker
       onSelect={onSelect}
     >
       <Icon />
@@ -181,6 +199,7 @@ interface ContextMenuItemProps {
   children: string
   disabled?: boolean
   icon: IconComponent
+  onClick?: () => void // hermes-fork: web-file-picker
   onSelect?: () => void
 }
 
@@ -191,6 +210,7 @@ interface ContextMenuProps {
   onPickFiles?: () => void
   onPickFolders?: () => void
   onPickImages?: () => void
+  onWebAttachFiles?: (files: File[]) => void // hermes-fork: web-file-picker
   state: ChatBarState
 }
 

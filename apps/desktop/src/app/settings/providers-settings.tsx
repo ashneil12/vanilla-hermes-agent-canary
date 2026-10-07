@@ -13,6 +13,7 @@ import {
   providerTitle,
   sortProviders
 } from '@/components/onboarding'
+import { VeniceRecommendedCard } from '@/components/onboarding/venice-recommended-card' // hermes-fork: venice-card
 import { Button } from '@/components/ui/button'
 import { RowButton } from '@/components/ui/row-button'
 import { SearchField } from '@/components/ui/search-field'
@@ -188,7 +189,9 @@ function OAuthPicker({
       <p className="-mt-2 mb-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
         {p.intro}
       </p>
-      {featured && <FeaturedProviderRow onSelect={select} provider={featured} />}
+      {/* hermes-fork: venice-card */}
+      <VeniceRecommendedCard onWantApiKey={onWantApiKey} />
+      {featured && <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} />}
       {/* Slot #2 — the no-account path, matching onboarding. Behind the
           --local launch flag like every local-models surface. */}
       {$localModelsEnabled.get() && <LocalModelsProviderRow onClick={onWantLocalModels} />}
