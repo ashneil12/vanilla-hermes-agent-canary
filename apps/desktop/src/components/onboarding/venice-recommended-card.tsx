@@ -13,7 +13,9 @@ import { ChevronRight } from '@/lib/icons'
 // (`dashboard_url`, from HERMES_DASHBOARD_URL; hermes_cli/web_routers/fork_hivra.py).
 // If it's missing (e.g. local dev, or a backend without that route) the card
 // falls back to the API-key path so it is never a dead end.
-const MANAGED_VENICE_PITCH = 'Managed by Hivra — private frontier models, no API key to copy'
+// hermes-fork: venice-card. Do not put the words "API key" in this button's text: upstream's
+// onboarding e2e (e2e/core/onboarding-first-chat.spec.ts) expects exactly ONE button matching /api key/i.
+const MANAGED_VENICE_PITCH = 'Managed by Hivra — private frontier models, nothing to copy or paste'
 
 const managedVeniceEnableUrl = (dashboardUrl: string) =>
   `${dashboardUrl.replace(/\/+$/, '')}/dashboard/billing?managedVenice=deposit&wallet=hermesos`

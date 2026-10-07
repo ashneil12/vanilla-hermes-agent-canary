@@ -63,4 +63,11 @@ describe('VeniceRecommendedCard', () => {
 
     expect(screen.getByText('Recommended')).toBeTruthy()
   })
+
+  it("keeps the words 'API key' out of the button text (upstream's onboarding e2e wants exactly one /api key/i button)", () => {
+    hermesApi.mockResolvedValue({ dashboard_url: null })
+    render(<VeniceRecommendedCard onWantApiKey={vi.fn()} />)
+
+    expect(screen.getByRole('button').textContent ?? '').not.toMatch(/api key/i)
+  })
 })
