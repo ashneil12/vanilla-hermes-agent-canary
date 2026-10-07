@@ -1,20 +1,28 @@
+import type { ModelOptionProvider } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
-import { getGlobalModelOptions, getStatus } from '@/hermes'
+import { getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
-// hermes-fork: openExternalLink + Sparkles power the managed-Venice enable CTA
-import { openExternalLink } from '@/lib/external-link'
-import { Check, ChevronDown, ChevronLeft, ChevronRight, KeyRound, Loader2, Sparkles } from '@/lib/icons'
+import { Check, ChevronDown, ChevronLeft, KeyRound, Loader2 } from '@/lib/icons'
+import { isSubmitEnter } from '@/lib/ime'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { cn } from '@/lib/utils'
 import { $desktopBoot, type DesktopBootState } from '@/store/boot'
+import { $freeTierStatus, FREE_TIER_MODEL, freeTierSetupFailure } from '@/store/free-tier'
+import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
+import { $introReveal, shouldPlayFirstRunIntro } from '@/store/intro-reveal'
+import { $setupReadyTick } from '@/store/live-sync'
+import { $localModelsEnabled } from '@/store/local-models-flag'
 import {
   $desktopOnboarding,
+  ackFreeTierIntro,
+  clearFreeTierIntro,
   clearPendingProviderOAuth,
   closeManualOnboarding,
   confirmOnboardingModel,
@@ -26,14 +34,19 @@ import {
   refreshOnboarding,
   saveOnboardingApiKey,
   setOnboardingMode,
+  startManualOnboarding,
   startProviderOAuth
 } from '@/store/onboarding'
-import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
+import { $onboardingSurfaces, onboardingSurfaceActive } from '@/store/onboarding-presence'
+import type { OAuthProvider } from '@/types/hermes'
 
 import { DocsLink, FlowPanel, Status } from './flow'
+import { FreeTierSetupNotice } from './free-tier-setup-notice'
+import { DecodedLabel } from './glyph'
 import {
   FeaturedProviderRow,
   FireworksProviderRow,
+  LocalModelsProviderRow,
   OpenRouterProviderRow,
   ProviderRow,
   sortProviders
@@ -43,11 +56,15 @@ export {
   FeaturedProviderRow,
   FireworksProviderRow,
   KeyProviderRow,
+  LocalModelsProviderRow,
   OpenRouterProviderRow,
   ProviderRow,
   providerTitle,
   sortProviders
 } from './providers'
+
+import { $gateway, activeGatewayConnectionId } from '@/store/gateway'
+import { captureOnboardingScope, requestOnboardingGateway } from '@/store/onboarding-scope'
 
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
@@ -69,17 +86,6 @@ export interface ApiKeyOption {
 // Curated order mirrors CANONICAL_PROVIDERS: Fireworks sits #2 overall (after
 // Nous Portal OAuth), ahead of OpenRouter and the rest of the key catalog.
 const API_KEY_OPTIONS: ApiKeyOption[] = [
-  // HermesOS: Venice leads the picker — the recommended provider. With managed
-  // Venice, the key is injected for you (no paste needed); self-serve users can
-  // bring their own Venice key. Reached as an OpenAI-compatible endpoint.
-  {
-    id: 'venice',
-    name: 'Venice',
-    short: 'recommended · private frontier models',
-    envKey: 'VENICE_API_KEY',
-    description: 'Private, uncensored frontier models. Managed by HermesOS when enabled — otherwise paste your own Venice key.',
-    docsUrl: 'https://venice.ai/settings/api'
-  },
   {
     id: 'fireworks',
     name: 'Fireworks AI',
@@ -126,7 +132,7 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
 // other api_key provider is appended with a generic "paste {KEY}" affordance.
 // OAuth / external providers are intentionally excluded here — they go through
 // the OAuth picker / sign-in flow, not a pasted key.
-function useApiKeyCatalog(): ApiKeyOption[] {
+function useApiKeyCatalog(scope: OnboardingContext['scope']): ApiKeyOption[] {
   const [rows, setRows] = useState<ModelOptionProvider[]>([])
 
   useEffect(() => {
@@ -136,7 +142,7 @@ function useApiKeyCatalog(): ApiKeyOption[] {
     // Promise.resolve().then so a synchronous throw (e.g. no desktop bridge in
     // tests) is funneled into the same .catch instead of escaping.
     void Promise.resolve()
-      .then(() => getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false }))
+      .then(() => getGlobalModelOptions({ includeUnconfigured: true, explicitOnly: false }, scope))
       .then(res => {
         if (!cancelled) {
           setRows(res.providers ?? [])
@@ -149,7 +155,7 @@ function useApiKeyCatalog(): ApiKeyOption[] {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [scope])
 
   return useMemo(() => {
     const curatedByEnv = new Map(API_KEY_OPTIONS.map(o => [o.envKey, o]))
@@ -201,18 +207,30 @@ export function DesktopOnboardingOverlay({
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
-  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted, profile })
-  ctxRef.current = { requestGateway, onCompleted, profile }
+  const introReveal = useStore($introReveal)
+  useStore($onboardingSurfaces)
+  const onCompletedRef = useRef(onCompleted)
+  onCompletedRef.current = onCompleted
+  useStore($gateway)
+  const connectionId = activeGatewayConnectionId()
 
+  const scope = useMemo(
+    () => onboarding.targetScope ?? captureOnboardingScope({ connectionId, profile }),
+    [onboarding.targetScope, profile, connectionId]
+  )
+
+  // Async flows retain the initiating route even after the overlay closes.
   const ctx = useMemo<OnboardingContext>(
     () => ({
-      requestGateway: (...args) => ctxRef.current.requestGateway(...args),
-      onCompleted: () => ctxRef.current.onCompleted?.(),
-      get profile() {
-        return ctxRef.current.profile
-      }
+      scope,
+      profile: scope.profile ?? undefined,
+      requestGateway:
+        scope.connectionId || (scope.profile && onboarding.targetScope)
+          ? (method, params) => requestOnboardingGateway(scope, method, params)
+          : requestGateway,
+      onCompleted: () => onCompletedRef.current?.()
     }),
-    []
+    [onboarding.targetScope, scope, requestGateway]
   )
 
   // Cinematic exit on "Begin": dissolve the panel + overlay (revealing the chat
@@ -237,11 +255,74 @@ export function DesktopOnboardingOverlay({
     window.setTimeout(() => confirmOnboardingModel(ctx), ONBOARDING_EXIT_MS)
   }
 
+  // The free-tier intro's three doors share one exit: consume the notice, play
+  // the same dissolve, then run whatever the door opens onto. `after` runs at
+  // the END so a sign-in dialog or provider picker never appears behind a
+  // still-fading overlay.
+  const dismissFreeTierIntro = async (after?: () => void) => {
+    if (leaving) {
+      return
+    }
+
+    // The screen is keyed on the backend's notice flag: only a recorded ack takes it down.
+    // A failed ack leaves it in place for another try rather than hiding the only notice.
+    if (!(await ackFreeTierIntro(ctx))) {
+      return
+    }
+
+    const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+
+    if (reduce) {
+      clearFreeTierIntro()
+      after?.()
+
+      return
+    }
+
+    setLeaving(true)
+    window.setTimeout(() => {
+      setLeaving(false)
+      clearFreeTierIntro()
+      after?.()
+    }, ONBOARDING_EXIT_MS)
+  }
+
   useEffect(() => {
     if (enabled || onboarding.requested) {
       void refreshOnboarding(ctx)
     }
   }, [ctx, enabled, onboarding.requested])
+
+  // The boot bootstrap re-announces `setup.ready` when a background retry of
+  // the free-tier set-up succeeds after a failed first attempt. A picker that
+  // is up only because that set-up failed re-checks readiness and gives way
+  // on its own. An untouched picker only: a manual open, a provider flow in
+  // progress, or the API-key form (which leaves the flow idle while the user
+  // types) is left alone, and the check is repeated after the readiness
+  // round so a key form opened in the meantime survives too.
+  useEffect(
+    () =>
+      $setupReadyTick.listen(() => {
+        const untouched = () => {
+          const current = $desktopOnboarding.get()
+
+          return (
+            !current.manual &&
+            current.configured === false &&
+            current.flow.status === 'idle' &&
+            current.mode === 'oauth' &&
+            !current.localEndpoint
+          )
+        }
+
+        if (untouched()) {
+          void refreshOnboarding(ctx, untouched)
+        }
+      }),
+    [ctx]
+  )
+  const freeTierStatus = useStore($freeTierStatus)
+  const setupFailure = !onboarding.manual ? freeTierSetupFailure(freeTierStatus) : null
 
   // When the Providers settings page asked to connect a specific provider, the
   // store stashed its id. Once the provider list has loaded and we're back at
@@ -273,19 +354,26 @@ export function DesktopOnboardingOverlay({
     }
   }, [ctx, onboarding.flow.status, onboarding.manual, onboarding.providers])
 
+  if (
+    !onboarding.manual &&
+    (introReveal.phase !== 'hidden' || onboardingSurfaceActive() || shouldPlayFirstRunIntro(onboarding.firstRunSkipped))
+  ) {
+    return null
+  }
+
   // Mount from frame 1 so we replace the boot overlay seamlessly. The
   // configured field stays null until the runtime check resolves; only then
   // do we know whether to dismiss (true) or surface the picker (false).
   // EXCEPTION: manual mode (user opened the selector from a working app to
   // add/switch a provider) shows the overlay regardless of configured state.
-  if (onboarding.configured === true && !onboarding.manual) {
+  if (onboarding.configured === true && !onboarding.manual && !onboarding.freeTierReady) {
     return null
   }
 
   // The user chose "I'll choose a provider later" on first run. Stay out of the
   // way on every subsequent launch — they re-enter via Settings → Providers
   // (manual mode), which sets manual=true and bypasses this gate.
-  if (onboarding.firstRunSkipped && !onboarding.manual) {
+  if (onboarding.firstRunSkipped && !onboarding.manual && !onboarding.freeTierReady) {
     return null
   }
 
@@ -295,8 +383,12 @@ export function DesktopOnboardingOverlay({
   // (those are surfaced by FlowPanel, not as a banner).
   const rawReason = onboarding.reason?.trim() || null
 
+  // When the free tier itself failed to set up, its own notice explains the
+  // picker; the runtime check's technical reason ("No usable credentials
+  // found for nous.") would only restate it in the wrong words.
   const reason =
     rawReason &&
+    !setupFailure &&
     !isProviderSetupErrorMessage(rawReason) &&
     rawReason !== DEFAULT_ONBOARDING_REASON &&
     rawReason !== DEFAULT_MANUAL_ONBOARDING_REASON
@@ -306,11 +398,15 @@ export function DesktopOnboardingOverlay({
   // In manual mode the app is already configured, so the flow is "ready"
   // immediately — no runtime gate needed. Otherwise wait for the readiness
   // check (configured === false) before showing the picker.
-  const ready = onboarding.manual || (enabled && onboarding.configured === false)
-  const showPicker = flow.status === 'idle' || flow.status === 'success'
+  // The free-tier intro owns the overlay while it is up: the app is already
+  // configured, so there is no picker to show and no runtime gate to wait on.
+  // A manual open (the user asked for the picker) outranks it.
+  const freeTierIntro = onboarding.freeTierReady && !onboarding.manual && flow.status === 'idle'
+  const ready = freeTierIntro || onboarding.manual || (enabled && onboarding.configured === false)
+  const showPicker = !freeTierIntro && (flow.status === 'idle' || flow.status === 'success')
   // The final "you're in" screen drops the card chrome and floats centered on
   // the surface — same bare, cinematic treatment as the connecting overlay.
-  const bare = ready && !showPicker && flow.status === 'confirming_model'
+  const bare = ready && (freeTierIntro || (!showPicker && flow.status === 'confirming_model'))
 
   return (
     <div
@@ -353,8 +449,11 @@ export function DesktopOnboardingOverlay({
         ) : null}
         <div className="grid gap-3 p-5">
           {reason ? <ReasonNotice reason={reason} /> : null}
+          {ready && showPicker && !freeTierIntro && !onboarding.manual ? <FreeTierSetupNotice ctx={ctx} /> : null}
           {ready ? (
-            showPicker ? (
+            freeTierIntro ? (
+              <FreeTierReadyPanel leaving={leaving} onDismiss={dismissFreeTierIntro} />
+            ) : showPicker ? (
               <Picker ctx={ctx} />
             ) : (
               <FlowPanel ctx={ctx} flow={flow} leaving={leaving} onBegin={finalizeOnboarding} />
@@ -363,6 +462,70 @@ export function DesktopOnboardingOverlay({
             <Preparing boot={boot} />
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The one-time free-tier welcome, shown when the free tier is what serves this
+ * user. Bare and centered like the model-confirm screen it stands in for: this
+ * IS their "you're in" moment, so it names the route, its model and its price,
+ * and offers the two ways out of it (a real account, or a provider of their
+ * own) without making either the default.
+ */
+function FreeTierReadyPanel({
+  leaving,
+  onDismiss
+}: {
+  leaving: boolean
+  onDismiss: (after?: () => void) => Promise<void>
+}) {
+  const { t } = useI18n()
+  const copy = t.freeTier
+
+  return (
+    <div className="grid place-items-center gap-7 py-6 text-center">
+      <DecodedLabel leaving={leaving} text={copy.readyTitle} />
+
+      <div
+        className={cn(
+          'grid justify-items-center gap-1.5 transition duration-[360ms] ease-out',
+          leaving ? 'opacity-0 saturate-0' : 'opacity-100 saturate-100'
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-muted-foreground">
+            {t.onboarding.defaultModel}
+          </span>
+          <Badge size="xs" variant="success">
+            {t.onboarding.freeTier}
+          </Badge>
+        </div>
+        <p className="font-mono text-base">{FREE_TIER_MODEL}</p>
+        <p className="font-mono text-xs text-muted-foreground">{copy.readyCaption}</p>
+      </div>
+
+      <div
+        className={cn(
+          'grid justify-items-center gap-2 transition duration-[360ms] ease-out',
+          leaving ? 'opacity-0 saturate-0' : 'opacity-100 saturate-100'
+        )}
+      >
+        <Button onClick={() => void onDismiss()} type="button">
+          {copy.begin}
+        </Button>
+        <Button onClick={() => void onDismiss(() => openFreeTierSignIn())} size="xs" type="button" variant="text">
+          {copy.signInInstead}
+        </Button>
+        <Button
+          onClick={() => void onDismiss(() => startManualOnboarding(null))}
+          size="xs"
+          type="button"
+          variant="text"
+        >
+          {copy.otherProviders}
+        </Button>
       </div>
     </div>
   )
@@ -452,7 +615,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
 
   const ordered = useMemo(() => (providers ? sortProviders(providers) : []), [providers])
   const hasOauth = ordered.length > 0
-  const apiKeyOptions = useApiKeyCatalog()
+  const apiKeyOptions = useApiKeyCatalog(ctx.scope)
 
   // localEndpoint forces the key form regardless of `mode` (which a manual
   // provider refresh may flip back to 'oauth'); it preselects the local option
@@ -491,15 +654,33 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   const collapsible = Boolean(featured)
   const showRest = !collapsible || showAll
 
+  // "Run models locally" leaves the picker for Settings -> Providers ->
+  // Local Models, where install/download live. First-run: persist the skip
+  // (same contract as ChooseLaterLink) so the blocking overlay never
+  // re-nags; manual mode just closes. window.location keeps this picker
+  // router-independent (it renders outside the route tree on first run).
+  const openLocalModels = () => {
+    if (manual) {
+      closeManualOnboarding()
+    } else {
+      dismissFirstRunOnboarding()
+    }
+
+    window.location.hash = '#/settings?tab=providers&pview=local'
+  }
+
   return (
     <div className="grid gap-2">
       <div className="grid max-h-[60dvh] gap-2 overflow-y-auto p-1">
-        <VeniceRecommendedCard onWantApiKey={() => setOnboardingMode('apikey')} />
-        {featured ? <FeaturedProviderRow hideRecommendedBadge onSelect={select} provider={featured} /> : null}
+        {featured ? <FeaturedProviderRow onSelect={select} provider={featured} /> : null}
+        {/* The no-account path: everything runs on this machine. Shipped
+            behind the --local launch flag. (Fireworks moved into the
+            expanded list on main.) */}
+        {$localModelsEnabled.get() ? <LocalModelsProviderRow onClick={openLocalModels} /> : null}
         {showRest ? (
           <>
-            {/* Fireworks leads the expanded alternatives, matching
-                CANONICAL_PROVIDERS (Nous → Fireworks). */}
+            {/* Fireworks leads the expanded list, matching CANONICAL_PROVIDERS
+                (Nous → Fireworks), but stays hidden until the user opens it. */}
             <FireworksProviderRow onClick={() => openKeyForm('FIREWORKS_API_KEY')} />
             {rest.map(p => (
               <ProviderRow key={p.id} onSelect={select} provider={p} />
@@ -545,69 +726,6 @@ function ChooseLaterLink() {
     </Button>
   )
 }
-
-// HermesOS: the recommended way to run a managed agent. Venice isn't an OAuth
-// provider — it's the managed service HermesOS runs for you (server-side proxy
-// key, billed to your dashboard wallet). Enabling it is a dashboard flow (Clerk
-// + wallet), not an in-app browser sign-in, so this card deep-links there. The
-// dashboard origin comes from /api/status (HERMES_DASHBOARD_URL). If it's
-// missing (e.g. local dev), the card falls back to the API-key path so it's
-// never a dead end.
-const MANAGED_VENICE_PITCH = 'Managed by HermesOS — private frontier models, no API key to copy'
-
-const managedVeniceEnableUrl = (dashboardUrl: string) =>
-  `${dashboardUrl.replace(/\/+$/, '')}/dashboard/billing?managedVenice=deposit&wallet=hermesos`
-
-export function VeniceRecommendedCard({ onWantApiKey }: { onWantApiKey: () => void }) {
-  // Fetch the control-plane dashboard origin directly (no react-query) so this
-  // card renders in any context — including the onboarding Picker unit tests,
-  // which mount without a QueryClientProvider. The try/catch also absorbs a
-  // synchronous throw when the desktop bridge isn't installed (web preview).
-  const [dashboardUrl, setDashboardUrl] = useState<null | string>(null)
-
-  useEffect(() => {
-    let cancelled = false
-
-    void (async () => {
-      try {
-        const s = await getStatus()
-
-        if (!cancelled) {setDashboardUrl(s.dashboard_url ?? null)}
-      } catch {
-        /* status unavailable — leave null; click falls back to the API-key path */
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  return (
-    <button
-      className="group relative flex w-full items-center justify-between gap-4 rounded-[8px] bg-primary/[0.06] px-3 py-2.5 text-left transition-colors hover:bg-primary/10"
-      onClick={() => (dashboardUrl ? openExternalLink(managedVeniceEnableUrl(dashboardUrl)) : onWantApiKey())}
-      type="button"
-    >
-      <span aria-hidden className="arc-border arc-reverse arc-nous" />
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="grid size-5 shrink-0 place-items-center rounded bg-primary/15 text-primary">
-            <Sparkles className="size-3.5" />
-          </span>
-          <span className="text-[length:var(--conversation-text-font-size)] font-semibold">Venice</span>
-          <span className="inline-flex items-center gap-1.5 bg-primary px-2 py-0.5 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-primary-foreground">
-            <span aria-hidden="true" className="dither inline-block size-2 shrink-0" />
-            Recommended
-          </span>
-        </div>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">{MANAGED_VENICE_PITCH}</p>
-      </div>
-      <ChevronRight className="size-4 shrink-0 text-primary transition group-hover:translate-x-0.5" />
-    </button>
-  )
-}
-
 
 // Presentational two-column key picker. Onboarding feeds it its curated
 // options + a ctx-bound save; the Providers settings page feeds it the full
@@ -743,7 +861,7 @@ export function ApiKeyForm({
           autoFocus
           className="font-mono"
           onChange={e => setValue(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && void submit()}
+          onKeyDown={e => isSubmitEnter(e) && void submit()}
           placeholder={
             currentRedacted ??
             (alreadySet ? t.onboarding.replaceCurrent : option.placeholder || t.onboarding.pasteApiKey)
@@ -756,7 +874,7 @@ export function ApiKeyForm({
             autoComplete="off"
             className="font-mono"
             onChange={e => setLocalKey(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && void submit()}
+            onKeyDown={e => isSubmitEnter(e) && void submit()}
             placeholder={t.onboarding.localApiKeyPlaceholder}
             type="password"
             value={localKey}

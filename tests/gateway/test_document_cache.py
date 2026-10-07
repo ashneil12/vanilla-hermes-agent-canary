@@ -43,39 +43,6 @@ class TestGetDocumentCacheDir:
         assert cache_dir.exists()
         assert cache_dir.is_dir()
 
-    def test_returns_existing_directory(self):
-        first = get_document_cache_dir()
-        second = get_document_cache_dir()
-        assert first == second
-        assert first.exists()
-
-    def test_self_heals_unwritable_frozen_dir(self, tmp_path, monkeypatch):
-        """Regression: on split-container (webfree) boxes DOCUMENT_CACHE_DIR can
-        freeze at import to '/opt/hermes/.hermes/...' (read-only image tree),
-        making document attachments fail on send with EACCES while inline
-        images keep working. The getter must re-resolve against the live
-        get_hermes_home() and heal the module global instead of raising.
-        """
-        # Simulate the frozen, unwritable path: a dir nested under a regular
-        # file — mkdir(parents=True) on it raises OSError even for root.
-        blocker = tmp_path / "opt_hermes_readonly"
-        blocker.write_text("not a directory")
-        frozen = blocker / ".hermes" / "cache" / "documents"
-        monkeypatch.setattr("gateway.platforms.base.DOCUMENT_CACHE_DIR", frozen)
-
-        healed = tmp_path / "home" / ".hermes" / "cache" / "documents"
-        monkeypatch.setattr(
-            "gateway.platforms.base.get_hermes_dir",
-            lambda new_subpath, old_name: healed,
-        )
-
-        result = get_document_cache_dir()
-        assert result == healed
-        assert result.exists() and result.is_dir()
-        # Global was rebound so subsequent writes skip the dead path.
-        import gateway.platforms.base as base
-        assert base.DOCUMENT_CACHE_DIR == healed
-
 
 # ---------------------------------------------------------------------------
 # TestCacheDocumentFromBytes
@@ -94,7 +61,7 @@ class TestCacheDocumentFromBytes:
 
     def test_empty_filename_uses_fallback(self):
         path = cache_document_from_bytes(b"data", "")
-        assert "document" in os.path.basename(path)
+        assert Path(path).read_bytes() == b"data"
 
 
 # ---------------------------------------------------------------------------

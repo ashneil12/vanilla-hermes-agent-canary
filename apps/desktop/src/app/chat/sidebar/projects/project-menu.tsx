@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { useI18n } from '@/i18n'
+import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
 import { cn } from '@/lib/utils'
 import { $panesFlipped, dismissAutoProject } from '@/store/layout'
 import {
@@ -95,14 +96,20 @@ function useProjectActions({
         }
       ]
 
+  // The OS file manager needs the local filesystem; a remote backend's
+  // project is not on this computer (the file trees hide reveal the same way).
   const pathItems: ActionItemSpec[] = [
-    {
-      disabled: !project.path,
-      icon: 'folder-opened',
-      key: 'reveal',
-      label: p.reveal,
-      onSelect: () => void revealPath(project.path)
-    },
+    ...(isDesktopFsRemoteMode()
+      ? []
+      : [
+          {
+            disabled: !project.path,
+            icon: 'folder-opened',
+            key: 'reveal',
+            label: p.reveal,
+            onSelect: () => void revealPath(project.path)
+          } satisfies ActionItemSpec
+        ]),
     {
       disabled: !project.path,
       icon: 'copy',
@@ -199,7 +206,7 @@ export function ProjectMenu({
       <button
         aria-label={p.menu}
         className={cn(
-          'grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground data-[state=open]:opacity-100 touch:opacity-100',
+          'grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground data-[state=open]:opacity-100',
           // In the project header reveal on the whole header hover; in overview
           // rows reveal on the row hover.
           scoped ? 'group-hover/section:opacity-100' : 'group-hover/workspace:opacity-100'

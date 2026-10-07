@@ -254,6 +254,8 @@ LEGACY_AUTHOR_MAP = {
     "dale@dalenguyen.me": "dalenguyen",  # PR #53678 salvage (strip VIRTUAL_ENV/CONDA_PREFIX from terminal subprocess env; #23473)
     "prashantjain25@gmail.com": "prashantjain25",  # PR #80740 salvage (custom-endpoint /v1/models disk cache; #72762)
     "liruixinch@outlook.com": "HexLab98",  # PR #53863 salvage (env-only proxy policy for auxiliary OpenAI clients on macOS; #53702)
+    "fangliquan@qq.com": "fangliquanflq",  # PR #99265 (linear lowercase env-assignment redaction; #99255) - merged directly by maintainer
+    "devops@sycamore.group": "sycamoregroupltd",  # PR #97779 salvage (estop fleet-root sentinel for profile gateways)
     "blaryx@gmail.com": "Blaryxoff",  # PR #32602 salvage (deep-merge PUT /api/config to preserve unrelated sections; #13396)
     "diamondeyesfox@gmail.com": "DiamondEyesFox",  # PR #53351 salvage (rebaseline in-place compression flushes to prevent duplicate compacted rows; #9096)
     "piyrw9754@gmail.com": "rlaope",  # PR #35075 salvage (align cron invisible-unicode set with install-time scanner; #35075)
@@ -261,8 +263,6 @@ LEGACY_AUTHOR_MAP = {
     "rebel@rebels-Mac-Studio-2.local": "rebel0789",  # PR #47308 salvage (redact browser_type typed text across display surfaces; #47197)
     "267614622+agt-user@users.noreply.github.com": "agt-user",  # PR #48496 salvage (telegram CLOSE-WAIT polling heartbeat, #48495)
     "80915+DavidMetcalfe@users.noreply.github.com": "DavidMetcalfe",  # PR #52272 salvage (route reasoning-model thinking-timeouts to timeout not context_overflow + reasoning-specific guidance; #52271)
-    # hermes-fork: 2026-06-27 upstream sync — David's bare-email commit variant
-    "DavidMetcalfe@users.noreply.github.com": "DavidMetcalfe",
     "66773372+Tranquil-Flow@users.noreply.github.com": "Tranquil-Flow",  # PR #52623 salvage (auxiliary Anthropic base_url host validation; #52608)
     "nikshepsvn@gmail.com": "nikshepsvn",  # PR #27426 salvage (two-layer guard against hallucinated acp_command crashing the gateway on hosts with no ACP CLI)
     "65363919+coygeek@users.noreply.github.com": "coygeek",  # PR #37735 salvage (redact provider error text at api-server HTTP boundary; #37733)
@@ -344,6 +344,8 @@ LEGACY_AUTHOR_MAP = {
     "joelbrilliant1@gmail.com": "joelbrilliant",  # PR #58486 salvage (session-expiry cleanup must not end row as agent_close)
     "bassisho@Mac-mini-bassis.local": "hydracoco7",  # PR #61382 salvage (id-less cron job freeze)
     "AlexFucuson9@users.noreply.github.com": "AlexFucuson9",  # PR #61209 salvage (hygiene compression data loss)
+    "shauneccles@gmail.com": "shauneccles",  # PR #95433 salvage (compression stall-fallback retry on fallback_chain; #78981)
+    "shtorm@fedosis.ru": "fedosis",  # PR #94996 salvage (compression rotation dedupe current-turn rows)
     "email@adambig.gs": "adambiggs",  # PR #43819 salvage (holographic shared SQLite connection)
     "koho.jung@outlook.com": "kohoj",  # PR #61667 salvage (nonce-CSP HTML session export)
     "t.chen@aftership.com": "cypctlinux",  # PR #52403 salvage (Slack bot/workflow auth before no-user-id guard)
@@ -1404,9 +1406,6 @@ LEGACY_AUTHOR_MAP = {
     "zaynjarvis@gmail.com": "ZaynJarvis",
     "zhiheng.liu@bytedance.com": "ZaynJarvis",
     "izhaolongfei@gmail.com": "loongfay",
-    # hermes-fork: 2026-06-12 upstream sync
-    "loongfay@foxmail.com": "loongfay",
-    "aeon@hermesos.cloud": "ashneil12",
     "296659110@qq.com": "lrt4836",
     "fe.daniel91@gmail.com": "beforeload",
     "libo1106@foxmail.com": "libo1106",
@@ -2015,14 +2014,8 @@ LEGACY_AUTHOR_MAP = {
     "desg38@gmail.com": "dschnurbusch",  # PR #42373 salvage (archive compressed conversation lineages)
     "bsmith@bramarstrategicservices.com": "bcsmith528",  # PR #20589 salvage (register_slack_action_handler plugin API)
     "sunsky.lau@gmail.com": "liuhao1024",  # PR #45494 salvage (claim session slot before auto-resume task; #45456)
-    # hermes-fork: 2026-06-14 upstream sync
-    "129232709+aimable100@users.noreply.github.com": "aimable100",
-    "804759+jmsunseri@users.noreply.github.com": "jmsunseri",
     "andrewdmwalker@gmail.com": "capt-marbles",  # PR #38440 salvage (resolve xAI OAuth credentials across profiles; #43589)
-    "adalsteinni@gmail.com": "AIalliAI",  # PR #44159 (desktop: inset hover-reveal trigger past scrollbar)
     "infinitycrew39@gmail.com": "infinitycrew39",  # PR #47945 salvage (scope langfuse trace state by turn/request ids; #48292)
-    # hermes-fork: 2026-06-19 upstream sync
-    "92538686+colinwren-stripe@users.noreply.github.com": "colinwren-stripe",
     "eurekaxun@163.com": "huangxun375-stack",  # PR #37251 / #48894 structured OpenViking sync
     "koshaji@gmail.com": "koshaji",  # PR #49832 salvage (OpenViking runtime autostart shutdown drain)
     "thor753@foxmail.com": "wgd753",  # PR #59454 salvage (OpenViking trusted-mode retry matching)
@@ -2030,6 +2023,7 @@ LEGACY_AUTHOR_MAP = {
     "mango001@126.com": "max-chen",  # PR #51194 salvage (single-pass list_profiles alias map + skill-count cache; #54751)
     # v0.17.0 additions
     "2081789787@qq.com": "pengyuyanITYU",  # PR #43618 (harden local file tree paths)
+    "adalsteinni@gmail.com": "AIalliAI",  # PR #44159 (desktop hover-reveal inset)
     "ameobius@local.host": "ameobius",  # PR #44383 co-author (discord gateway task recovery)
     "andyfieb@gmail.com": "mollusk",  # PR #44493 (desktop assistant-ui recovery)
     "drmani215@gmail.com": "bionicbutterfly13",  # direct email match
@@ -2050,20 +2044,12 @@ LEGACY_AUTHOR_MAP = {
     "qs2816661685@gmail.com": "qingshan89",  # PR #46895 co-author (desktop remote artifact download)
     "yspdev@gmail.com": "AJ",  # PR #44510 co-author (desktop named-profile boot loop)
     "steveonjava@gmail.com": "steveonjava",  # PR #29669 (redact secrets in kanban tool payloads)
-    # hermes-fork: 2026-06-20 upstream sync
-    "daniel.laforce@argobox.com": "KeyArgo",
-    "5494586+jasnoorgill@users.noreply.github.com": "jasnoorgill",
-    # hermes-fork: 2026-06-27 upstream sync
-    "DavidMetcalfe@users.noreply.github.com": "DavidMetcalfe",
     "afnlegion01@gmail.com": "Afnath-max",  # PR #49129 salvage (opencode-zen catalog refresh + uncapped/live-first picker)
     "sharma.priyanshu96@gmail.com": "ipriyaaanshu",  # PR #51488 salvage (clear stale base_url on gateway model switches; #25107)
-    # hermes-fork: 2026-06-30 upstream sync
-    "christianpersico98@gmail.com": "chrispersico",  # docs: fix incorrect web search instructions
-    "joeykerp@gmail.com": "spjoes",  # PR #55099 (allow any http:// host in self-hosted OIDC redirect_uri)
-    # hermes-fork: 2026-07-01 upstream sync
     "290881485+mrparker0980@users.noreply.github.com": "mrparker0980",  # @file context-ref expansion anchored to canonical read deny-list
     # v0.18.0 additions
     "3483421977@qq.com": "AetherAgents",  # direct email match
+    "SJWATTS89@OUTLOOK.COM": "lEWFkRAD",  # PR #45610 (Windows scheduled task reboot survival)
     "andhika.prakasiwi@gmail.com": "p-andhika",  # PR #53312 co-author (setup guide button)
     "annguyen@nousresearch.com": "annguyenNous",  # PR #52844 co-author
     "carlitosdiazplaza@gmail.com": "talmax1124",  # direct email match
@@ -2073,6 +2059,7 @@ LEGACY_AUTHOR_MAP = {
     "keyargo@argobox.com": "KeyArgo",  # PR #45638 author
     "lucas.nicolas@proton.me": "Lucas Nicolas",  # PR #54210 co-author (display name)
     "max.petrusenko.agent@gmail.com": "maxpetrusenko",  # PR #54128 co-author
+    "poli.koltsova@gmail.com": "wnuuee1",  # commit 9fd2b2cb PR author
     "yosapol@jitrak.dev": "Eji4h",  # direct email match
     "kiljadn@gmail.com": "designnotdrum",  # PR #56480 salvage (toolset static-inference fix)
     "lavya@loom.local": "LavyaTandel",  # PR #57893 salvage local git identity (envelope-layout cache markers on tool/empty-assistant messages; #57845)
@@ -2219,6 +2206,11 @@ def update_version_files(semver: str, calver_date: str):
         r'^version\s*=\s*"[^"]+"',
         f'version = "{semver}"',
         pyproject,
+        # Turn-end file-mutation verifier footer appended by run_agent.py
+        # (``_format_file_mutation_failure_footer``). It's a UI affordance — reading "warning file mutation
+        # verifier, 2 files were NOT modified..." aloud is noise (#40772). The footer is a ``⚠️
+        # File-mutation verifier:`` header line followed by indented ``•`` bullet lines; strip the whole
+        # block.
         flags=re.MULTILINE,
     )
     PYPROJECT_FILE.write_text(pyproject, encoding="utf-8")
@@ -2237,6 +2229,60 @@ def update_version_files(semver: str, calver_date: str):
             count=1,
         )
         desktop_pkg.write_text(pkg_text, encoding="utf-8")
+
+    # Keep the bootstrap installer (Hermes-Setup.dmg CFBundleShortVersionString)
+    # in lockstep with the Python package version. Tauri reads `version` from
+    # package.json + tauri.conf.json; a hardcoded 0.0.1 ships in the DMG.
+    installer_pkg = REPO_ROOT / "apps" / "bootstrap-installer" / "package.json"
+    if installer_pkg.exists():
+        pkg_text = installer_pkg.read_text(encoding="utf-8")
+        pkg_text = re.sub(
+            r'("version"\s*:\s*)"[^"]+"',
+            rf'\g<1>"{semver}"',
+            pkg_text,
+            count=1,
+        )
+        installer_pkg.write_text(pkg_text, encoding="utf-8")
+
+    installer_tauri = (
+        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "tauri.conf.json"
+    )
+    if installer_tauri.exists():
+        pkg_text = installer_tauri.read_text(encoding="utf-8")
+        pkg_text = re.sub(
+            r'("version"\s*:\s*)"[^"]+"',
+            rf'\g<1>"{semver}"',
+            pkg_text,
+            count=1,
+        )
+        installer_tauri.write_text(pkg_text, encoding="utf-8")
+
+    installer_cargo = (
+        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "Cargo.toml"
+    )
+    if installer_cargo.exists():
+        cargo_text = installer_cargo.read_text(encoding="utf-8")
+        cargo_text = re.sub(
+            r'^version\s*=\s*"[^"]+"',
+            f'version = "{semver}"',
+            cargo_text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        installer_cargo.write_text(cargo_text, encoding="utf-8")
+
+
+def version_files_to_stage() -> list[str]:
+    """Return version-bearing files that exist and should be `git add`ed after a bump."""
+    candidates = [
+        VERSION_FILE,
+        PYPROJECT_FILE,
+        REPO_ROOT / "apps" / "desktop" / "package.json",
+        REPO_ROOT / "apps" / "bootstrap-installer" / "package.json",
+        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "tauri.conf.json",
+        REPO_ROOT / "apps" / "bootstrap-installer" / "src-tauri" / "Cargo.toml",
+    ]
+    return [str(path) for path in candidates if path.exists()]
 
 
 def resolve_author(name: str, email: str) -> str:
@@ -2576,7 +2622,7 @@ def main():
             print(f"  ✓ Updated version files to v{new_version} ({calver_date})")
 
             # Commit version bump
-            add_files = [str(VERSION_FILE), str(PYPROJECT_FILE)]
+            add_files = version_files_to_stage()
             add_result = git_result("add", *add_files)
             if add_result.returncode != 0:
                 print(f"  ✗ Failed to stage version files: {add_result.stderr.strip()}")

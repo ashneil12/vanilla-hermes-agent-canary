@@ -1,5 +1,0 @@
-name: venice-provider
-kind: model-provider
-version: 1.0.0
-description: Venice (privacy-first, uncensored OpenAI-compatible inference)
-author: HermesOS

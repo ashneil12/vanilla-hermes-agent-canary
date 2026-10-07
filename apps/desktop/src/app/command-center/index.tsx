@@ -1,17 +1,18 @@
+import { compactNumber } from '@hermes/shared'
 import { type MouseEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { LogTail } from '@/components/chat/log-tail'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { SearchField } from '@/components/ui/search-field'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { ResponsiveTabs } from '@/components/ui/tab-dropdown'
 import { Tip } from '@/components/ui/tooltip'
 import { getActionStatus, getLogs, getStatus, getUsageAnalytics, restartGateway, updateHermes } from '@/hermes'
-import type { ActionStatusResponse, AnalyticsResponse, StatusResponse } from '@/hermes'
+import type { ActionStatusResponse, AnalyticsResponse, SessionInfo, StatusResponse } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { sessionTitle } from '@/lib/chat-runtime'
-import { compactNumber } from '@/lib/format'
 import {
   Activity,
   AlertCircle,
@@ -29,7 +30,9 @@ import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { notify } from '@/store/notifications'
 import { $sessions, sessionPinId } from '@/store/session'
+import { confirmSharedGatewayRestart } from '@/store/system-actions'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -143,6 +146,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
   const pinnedSessionIds = useStoreSelector($pinnedSessionIds, s => (section === 'sessions' ? s : EMPTY_PINNED))
 
   const [query, setQuery] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<SessionInfo | null>(null)
   const [status, setStatus] = useState<StatusResponse | null>(null)
   const [logs, setLogs] = useState<string[]>([])
   const [logFile, setLogFile] = useState<(typeof LOG_FILES)[number]>('agent')
@@ -265,6 +269,13 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
     async (kind: 'restart' | 'update') => {
       setSystemError('')
 
+      // A profile served by the shared multiplexer restarts every bot on this device: ask first.
+      const shared = kind === 'restart' ? await confirmSharedGatewayRestart() : null
+
+      if (shared === false) {
+        return
+      }
+
       try {
         const started = kind === 'restart' ? await restartGateway() : await updateHermes()
         let nextStatus: ActionStatusResponse | null = null
@@ -279,6 +290,10 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
           if (!polled.running) {
             break
           }
+        }
+
+        if (shared && nextStatus && !nextStatus.running && (nextStatus.exit_code ?? 0) === 0) {
+          notify({ kind: 'success', message: cc.sharedGatewayRestarted(shared.length) })
         }
 
         if (!nextStatus) {
@@ -340,7 +355,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
             <div className="flex shrink-0 items-center gap-2">
               {section === 'sessions' && (
                 <SearchField
-                  containerClassName="max-w-[70vw] sm:max-w-[40vw]"
+                  containerClassName="max-w-[40vw]"
                   onChange={next => setQuery(next)}
                   placeholder={cc.searchPlaceholder}
                   value={query}
@@ -380,7 +395,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                             {formatTimestamp(session.last_active || session.started_at)}
                           </div>
                         </button>
-                        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 touch:opacity-100">
+                        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                           <RowIconButton
                             onClick={() => (pinned ? unpinSession(pinId) : pinSession(pinId))}
                             title={pinned ? cc.unpinSession : cc.pinSession}
@@ -395,7 +410,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                           </RowIconButton>
                           <RowIconButton
                             className="hover:text-destructive"
-                            onClick={() => void onDeleteSession(session.id)}
+                            onClick={() => setPendingDelete(session)}
                             title={cc.deleteSession}
                           >
                             <Trash2 className="size-3.5" />
@@ -509,6 +524,19 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
           )}
         </OverlayMain>
       </OverlaySplitLayout>
+      {pendingDelete && (
+        <ConfirmDialog
+          busyLabel={t.sidebar.row.deleting}
+          confirmLabel={t.common.delete}
+          description={t.sidebar.row.deleteDesc(sessionTitle(pendingDelete))}
+          destructive
+          doneLabel={t.sidebar.row.deleted}
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => void onDeleteSession(pendingDelete.id)}
+          open
+          title={t.sidebar.row.deleteTitle}
+        />
+      )}
     </OverlayView>
   )
 }
