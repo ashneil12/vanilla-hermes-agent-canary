@@ -161,10 +161,11 @@ jobs:
           if ! git merge --no-ff --no-commit refs/upstream-sync/target >merge.log 2>&1; then
             git diff --name-only --diff-filter=U > conflicts.txt || true
             # Generated docs (skill catalogs, sidebar, per-skill pages) and upstream's own
-            # workflow files (the fork only rewrites their runner labels) are rebuilt right
+            # workflow files (the fork only rewrites their runner labels) and contributor mapping
+            # files (upstream's mapping wins over our auto-mapped placeholder) are rebuilt right
             # after the merge, so a conflict that is ONLY in those files is resolved by taking
             # upstream's copy and re-running the generators. Anything else stops the sync.
-            remaining=$(grep -v -E '^(website/docs/reference/(optional-)?skills-catalog\.md|website/sidebars\.ts|website/docs/user-guide/skills/.*|\.github/workflows/[^/]+\.ya?ml)$' conflicts.txt || true)
+            remaining=$(grep -v -E '^(website/docs/reference/(optional-)?skills-catalog\.md|website/sidebars\.ts|website/docs/user-guide/skills/.*|\.github/workflows/[^/]+\.ya?ml|contributors/emails/.*)$' conflicts.txt || true)
             if [ -z "$remaining" ] && [ -s conflicts.txt ]; then
               ok=true
               while IFS= read -r f; do
