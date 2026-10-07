@@ -535,6 +535,14 @@ def _handle_run_named_flow(args: Dict[str, Any], **_) -> str:
 # Registration
 # ===========================================================================
 #
+# Toolset: the sidecar primitives register under upstream's own ``browser`` toolset rather than a
+# private ``browser_sidecar`` one. Upstream only default-enables toolsets it knows statically
+# (``CONFIGURABLE_TOOLSETS``) or that a plugin registered, so a registry-only toolset would never
+# appear on a default box and the fork would need edits to toolsets.py / tools_config.py. Under
+# ``browser`` they follow the browser toolset's enablement, and each tool's check_fn still hides
+# them unless the provisioned sidecar's /health answers (inert on boxes without the sidecar).
+SIDECAR_TOOLSET = "browser"
+
 # Each registry.register(...) below is a top-level ast.Expr statement (NOT
 # inside a for-loop or function call). This matters because the agent's
 # tools/registry.py:_module_registers_tools() uses AST analysis to detect
@@ -546,7 +554,7 @@ def _handle_run_named_flow(args: Dict[str, Any], **_) -> str:
 
 registry.register(
     name="browser_session_start",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=SESSION_START_SCHEMA,
     handler=_handle_session_start,
     check_fn=_is_sidecar_available,
@@ -555,7 +563,7 @@ registry.register(
 
 registry.register(
     name="browser_session_end",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=SESSION_END_SCHEMA,
     handler=_handle_session_end,
     check_fn=_is_sidecar_available,
@@ -564,7 +572,7 @@ registry.register(
 
 registry.register(
     name="browser_goto",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=GOTO_SCHEMA,
     handler=_handle_goto,
     check_fn=_is_sidecar_available,
@@ -573,7 +581,7 @@ registry.register(
 
 registry.register(
     name="browser_click_text",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=CLICK_TEXT_SCHEMA,
     handler=_handle_click_text,
     check_fn=_is_sidecar_available,
@@ -582,7 +590,7 @@ registry.register(
 
 registry.register(
     name="browser_click_selector",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=CLICK_SELECTOR_SCHEMA,
     handler=_handle_click_selector,
     check_fn=_is_sidecar_available,
@@ -591,7 +599,7 @@ registry.register(
 
 registry.register(
     name="browser_fill",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=FILL_SCHEMA,
     handler=_handle_fill,
     check_fn=_is_sidecar_available,
@@ -600,7 +608,7 @@ registry.register(
 
 registry.register(
     name="browser_wait_for",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=WAIT_FOR_SCHEMA,
     handler=_handle_wait_for,
     check_fn=_is_sidecar_available,
@@ -609,7 +617,7 @@ registry.register(
 
 registry.register(
     name="browser_assert_visible",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=ASSERT_VISIBLE_SCHEMA,
     handler=_handle_assert_visible,
     check_fn=_is_sidecar_available,
@@ -618,7 +626,7 @@ registry.register(
 
 registry.register(
     name="browser_get_text",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=GET_TEXT_SCHEMA,
     handler=_handle_get_text,
     check_fn=_is_sidecar_available,
@@ -627,7 +635,7 @@ registry.register(
 
 registry.register(
     name="browser_screenshot",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=SCREENSHOT_SCHEMA,
     handler=_handle_screenshot,
     check_fn=_is_sidecar_available,
@@ -636,7 +644,7 @@ registry.register(
 
 registry.register(
     name="browser_run_named_flow",
-    toolset="browser_sidecar",
+    toolset=SIDECAR_TOOLSET,
     schema=RUN_NAMED_FLOW_SCHEMA,
     handler=_handle_run_named_flow,
     check_fn=_is_sidecar_available,

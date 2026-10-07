@@ -1891,6 +1891,10 @@ def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
         f"— last activity: {_last_desc}")
 
 
+from gateway.runtime_governor import governed_cron_run  # hermes-fork: runtime-governor
+
+
+@governed_cron_run  # hermes-fork: runtime-governor
 def _run_agent_with_watchdog(
     agent, prompt: str, job: dict, job_id: str, job_name: str, task_id: str, cancel_event,
     worker_state: Optional[dict] = None,

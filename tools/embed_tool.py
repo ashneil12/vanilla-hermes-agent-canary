@@ -196,7 +196,7 @@ registry.register(
     name="text_embed",
     toolset="memory",
     schema=TEXT_EMBED_SCHEMA,
-    handler=lambda **kw: text_embed_tool(**kw),
+    handler=lambda args, **kw: text_embed_tool(**(args or {})),
     check_fn=check_text_embed_requirements,
     requires_env=["VENICE_API_KEY"],
     is_async=False,

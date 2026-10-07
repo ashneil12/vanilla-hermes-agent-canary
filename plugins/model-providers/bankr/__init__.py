@@ -20,10 +20,16 @@ The wallet capability itself (balances, transfers, swaps) lives in the
 wallet-funded gateway as an inference provider.
 """
 
+from hermes_cli.fork_providers import SortedCatalogMixin
 from providers import register_provider
 from providers.base import ProviderProfile
 
-bankr = ProviderProfile(
+
+class BankrProfile(SortedCatalogMixin, ProviderProfile):
+    """Gateway catalog is large and unordered: family-sort it for the model picker."""
+
+
+bankr = BankrProfile(
     name="bankr",
     aliases=("bankr-gateway",),
     display_name="Bankr",

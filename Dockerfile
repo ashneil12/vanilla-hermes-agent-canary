@@ -360,6 +360,18 @@ RUN install -d -m 0755 /etc/apt/keyrings && \
 COPY --chown=hermes:hermes --from=hivra_web_build /out/ /opt/hermes/hermes_cli/
 # hermes-fork: end hivra-web-build (copy half)
 
+# hermes-fork: editable-install-revision-key
+# Key the editable install by the source revision and drop stale editable metadata first.
+# Without this BuildKit restored a cached layer whose metadata described an older project
+# version, so a "0.20.5" image ran 0.20.0 code (2026-08-21). The CI "installed version ==
+# pyproject version" step in docker-build-immutable.yml guards it.
+ARG HERMES_GIT_SHA=
+RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" && \
+    rm -rf \
+        .venv/lib/python*/site-packages/hermes_agent-*.dist-info \
+        .venv/lib/python*/site-packages/__editable__.hermes_agent-*.pth \
+        hermes_agent*.egg-info
+
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
 # --link decouples this layer from parents for cache purposes; --chmod bakes
@@ -374,17 +386,6 @@ COPY --link --chmod=a+rX,go-w . .
 # Link hermes-agent itself (editable). Deps are already installed in the
 # cached layer above; `--no-deps` makes this a fast egg-link creation with no
 # resolution or downloads.
-# hermes-fork: editable-install-revision-key
-# Key the editable install by the source revision and drop stale editable metadata first.
-# Without this BuildKit restored a cached layer whose metadata described an older project
-# version, so a "0.20.5" image ran 0.20.0 code (2026-08-21). The CI "installed version ==
-# pyproject version" step in docker-build-immutable.yml guards it.
-ARG HERMES_GIT_SHA=
-RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" && \
-    rm -rf \
-        .venv/lib/python*/site-packages/hermes_agent-*.dist-info \
-        .venv/lib/python*/site-packages/__editable__.hermes_agent-*.pth \
-        hermes_agent*.egg-info
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are

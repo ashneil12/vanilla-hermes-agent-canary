@@ -438,7 +438,7 @@ registry.register(
 
 registry.register(
     name="crypto_rpc",
-    toolset="crypto",
+    toolset="web",  # no private "crypto" toolset: only upstream-known toolsets are default-enabled (see tools/browser_sidecar.py)
     schema={
         "name": "crypto_rpc",
         "description": (

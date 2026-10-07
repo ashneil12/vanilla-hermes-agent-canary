@@ -38,6 +38,7 @@ from hermes_cli.colors import Colors, color
 from hermes_cli import managed_scope
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
+from hermes_cli.fork_bankr import bridge_config as _bankr_bridge  # hermes-fork: bankr-env-bridge
 # Managed-mode, container and HERMES_UID/GID policy live in hermes_constants (import-safe);
 # re-exported here so existing callers/patch targets keep working.
 from hermes_constants import (  # noqa: F401
@@ -2029,14 +2030,14 @@ def load_config() -> Dict[str, Any]:
     """Load the merged configuration (DEFAULT_CONFIG + config.yaml + managed scope, env-expanded).
     Cached on the file signature; returns a deepcopy since most call sites mutate the result.
     Read-only hot paths should use ``load_config_readonly()`` to skip the deepcopy."""
-    return _load_config_impl(want_deepcopy=True)
+    return _bankr_bridge(_load_config_impl(want_deepcopy=True))  # hermes-fork: bankr-env-bridge
 
 
 def load_config_readonly() -> Dict[str, Any]:
     """``load_config()`` without the defensive deepcopy (~half of the 265us cache-hit cost).
     **Mutating the returned dict (or any nested structure) corrupts the in-process cache for
     every subsequent caller** — only for code paths that never write to the result."""
-    return _load_config_impl(want_deepcopy=False)
+    return _bankr_bridge(_load_config_impl(want_deepcopy=False))  # hermes-fork: bankr-env-bridge
 
 
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:

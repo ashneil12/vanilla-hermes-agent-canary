@@ -725,6 +725,10 @@ def _served_runtime(agent) -> Dict[str, str]:
     return pair
 
 
+from gateway.runtime_governor import governed_run_sync  # hermes-fork: runtime-governor
+
+
+@governed_run_sync  # hermes-fork: runtime-governor
 def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server):
     """Executor-thread body of one run; returns ``(result, usage, served_runtime)``."""
     from gateway.session_context import clear_session_vars

@@ -1031,6 +1031,11 @@ def write_pid_file() -> None:
     _clear_running_pid_cache()
 
 
+# hermes-fork: held-lock-keeps-identity-files (gateway/fork_status_guard.py)
+from gateway.fork_status_guard import keep_held_lock_files  # noqa: E402
+_cleanup_invalid_pid_path = keep_held_lock_files(_cleanup_invalid_pid_path)
+
+
 def _write_json_excl(path: Path, record: dict[str, Any]) -> None:
     """Create ``path`` with O_CREAT|O_EXCL and dump ``record``; unlinks on a failed write."""
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

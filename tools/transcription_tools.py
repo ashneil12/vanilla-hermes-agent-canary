@@ -262,7 +262,8 @@ def _get_provider(stt_config: dict) -> str:
         if available():
             logger.info(message)
             return name
-    return "none"
+    from tools.venice_autopair import default_provider  # hermes-fork: venice-autopair
+    return default_provider("stt") or "none"
 
 
 # ---- Provider: local (faster-whisper) -----------------------------------
