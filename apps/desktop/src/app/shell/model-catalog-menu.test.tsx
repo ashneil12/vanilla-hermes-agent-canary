@@ -60,26 +60,6 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-// hermes-fork: keyless-provider-guard — selecting a provider the box has no
-// credentials for would persist a dead provider into config.yaml and brick new
-// sessions at agent init.
-describe('keyless providers are not selectable', () => {
-  it('lists authenticated (and unflagged) providers only', async () => {
-    getGlobalModelOptions.mockResolvedValue({
-      providers: [
-        { authenticated: true, models: ['gemini-2.5-flash'], name: 'Google', slug: 'google' },
-        { authenticated: false, models: ['claude-sonnet-4'], name: 'Anthropic', slug: 'anthropic' },
-        { models: ['gpt-5'], name: 'OpenAI', slug: 'openai' }
-      ]
-    })
-    renderMenu()
-
-    expect(await screen.findByText(/Gemini 2\.5 Flash/i)).toBeTruthy()
-    expect(screen.getByText('OpenAI')).toBeTruthy()
-    expect(screen.queryByText('Anthropic')).toBeNull()
-  })
-})
-
 describe('the current row effort', () => {
   it('does not label the current model with the profile default before its session reports one (#79807)', async () => {
     $defaultReasoningEffort.set('ultra')

@@ -994,10 +994,6 @@ app.include_router(_analytics_routes.router)
 app.include_router(_chat_ws_routes.router)
 app.include_router(_chat_workspaces_routes.router)
 app.include_router(_dashboard_ui_routes.router)
-# hermes-fork: hivra-web — fork-only routes (hermes_cli/web_routers/fork_hivra.py).
-from hermes_cli.web_routers.fork_hivra import router as _fork_hivra_router  # noqa: E402
-
-app.include_router(_fork_hivra_router)
 
 # Plugin API routes and the dashboard auth routes (/login, /auth/*, /api/auth/*)
 # mount before the SPA catch-all so /{full_path:path} doesn't swallow them. Auth
@@ -1006,6 +1002,10 @@ _mount_plugin_api_routes()
 from hermes_cli.dashboard_auth.routes import router as _dashboard_auth_router  # noqa: E402
 
 app.include_router(_dashboard_auth_router)
+# hermes-fork: hivra-web — fork-only routes (hermes_cli/web_routers/fork_hivra.py).
+from hermes_cli.web_routers.fork_hivra import router as _fork_hivra_router  # noqa: E402
+
+app.include_router(_fork_hivra_router)
 mount_spa(app)
 
 

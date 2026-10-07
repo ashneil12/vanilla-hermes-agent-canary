@@ -1,3 +1,28 @@
+# hermes-fork: hivra-web-build
+# ── Hivra web bundles (self-contained throwaway stage; lives FIRST in the file so an
+# upstream restructure of the later stages cannot conflict with it) ─────────────────────
+# Builds, from the build context, the two static bundles the box's Caddy serves:
+#   /out/webchat_dist   apps/desktop (the Desktop renderer + browser bridge,
+#                       apps/desktop/src/lib/web-shim.ts) built with --base=/webchat/. The base
+#                       is required: Caddy serves it at /webchat and at `/`, and relative asset
+#                       URLs would resolve to /assets/* (the dashboard's bundle) at `/`.
+#   /out/web_dist_dash  the dashboard SPA built a SECOND time with --base=/dash/ (the default
+#                       base=/ build is the backend's hermes_cli/web_dist). Base-/ assets are
+#                       absolute (/assets/*) and 404 under /dash, and a relative base breaks SPA
+#                       deep routes. inject-dash-bootstrap.cjs splices a <head> script that
+#                       supplies __HERMES_BASE_PATH__ and the session token from #iframe_token.
+# The full bookworm image carries the toolchain node-pty needs. Only the static output is copied
+# into the runtime (see the COPY in the runtime stage), none of the ~1GB of node_modules.
+FROM node:26-bookworm@sha256:e6cfc3514df35d1cb534e83f9279a242ad6e578692ab7b56d73dadcc7c4354a0 AS hivra_web_build
+WORKDIR /build
+COPY . .
+RUN npm install --no-audit --no-fund
+RUN cd apps/desktop && npx vite build --base=/webchat/ --outDir /out/webchat_dist --emptyOutDir
+RUN cd web && \
+    npx vite build --base=/dash/ --outDir /out/web_dist_dash --emptyOutDir && \
+    node inject-dash-bootstrap.cjs /out/web_dist_dash/index.html
+# hermes-fork: end hivra-web-build
+
 # Debian 13 still ships SQLite 3.46.1, which contains the upstream WAL-reset
 # corruption bug. Build a pinned shared library for the runtime image instead
 # of relying on a distro backport that trixie does not currently provide.
@@ -49,23 +74,6 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # 2.41) runtime.  Bumping to a new Node major is a one-line ARG change; see
 # #4977.
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
-
-# hermes-fork: webchat-build
-# ── Hivra rich-chat bundle (throwaway builder stage) ─────────────────────────
-# Builds apps/desktop into the static /webchat bundle (the Desktop renderer with
-# the browser bridge in apps/desktop/src/lib/web-shim.ts). The full bookworm image
-# carries the build-essential + python toolchain node-pty needs; only the ~21MB
-# static dist is copied into the runtime below, none of the ~1GB of node_modules,
-# so in-place fleet rolls stay light. `--base=/webchat/` is required: the box's
-# Caddy serves the bundle at /webchat and at `/`, and relative asset URLs would
-# resolve to /assets/* (the dashboard's bundle) at `/`.
-FROM node:26-bookworm@sha256:e6cfc3514df35d1cb534e83f9279a242ad6e578692ab7b56d73dadcc7c4354a0 AS webchat_build
-WORKDIR /build
-COPY . .
-RUN npm install --no-audit --no-fund \
- && cd apps/desktop \
- && npx vite build --base=/webchat/ --outDir /webchat_dist --emptyOutDir
-# hermes-fork: end webchat-build
 
 FROM debian:13.4
 
@@ -326,18 +334,6 @@ COPY apps/shared/ apps/shared/
 RUN cd web && npm run build && \
     cd ../ui-tui && npm run build
 
-# hermes-fork: dash-bundle
-# The default base=/ dashboard build above (-> hermes_cli/web_dist) is served by the
-# backend. The Hivra "Admin Panel" nav item needs a SECOND build with base=/dash/
-# (-> hermes_cli/web_dist_dash), served as static files by the box's Caddy under
-# /dash: base-/ assets are absolute (/assets/*) and 404 there, and a relative base
-# breaks SPA deep routes. inject-dash-bootstrap.cjs splices a <head> script that
-# supplies __HERMES_BASE_PATH__ and the session token from the #iframe_token hash.
-RUN cd web && \
-    npx vite build --base=/dash/ --outDir ../hermes_cli/web_dist_dash --emptyOutDir && \
-    node inject-dash-bootstrap.cjs ../hermes_cli/web_dist_dash/index.html
-# hermes-fork: end dash-bundle
-
 # ---------- Bot Screen X socket directory ----------
 # Xvnc would create this itself (/tmp is 1777); pre-creating it keeps ownership
 # deterministic when HERMES_UID is remapped between boots.
@@ -358,6 +354,12 @@ RUN install -d -m 0755 /etc/apt/keyrings && \
     apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
+# hermes-fork: hivra-web-build (copy half)
+# The static bundles from the stage at the top of this file -> hermes_cli/webchat_dist and
+# hermes_cli/web_dist_dash. The box's Caddy extracts and serves them; the dashboard does not.
+COPY --chown=hermes:hermes --from=hivra_web_build /out/ /opt/hermes/hermes_cli/
+# hermes-fork: end hivra-web-build (copy half)
+
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
 # --link decouples this layer from parents for cache purposes; --chmod bakes
@@ -367,13 +369,6 @@ RUN install -d -m 0755 /etc/apt/keyrings && \
 # gives the non-root hermes user read + traverse but no write; root retains
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w . .
-
-# hermes-fork: webchat-build (copy half)
-# The prebuilt rich-chat bundle from the throwaway stage above: static files only.
-# The box's Caddy serves it at /webchat (extracted from the image; the dashboard
-# does not serve it).
-COPY --chown=hermes:hermes --from=webchat_build /webchat_dist /opt/hermes/hermes_cli/webchat_dist
-# hermes-fork: end webchat-build (copy half)
 
 # ---------- Permissions ----------
 # Link hermes-agent itself (editable). Deps are already installed in the
