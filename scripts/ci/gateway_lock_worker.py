@@ -15,7 +15,11 @@ import time
 
 PROTOCOL = "hermes-lock-regression-v1"
 ROOT = Path("/opt/data")
-CASES = ("default", "explicit-profile")
+# hermes-fork: Hivra boxes run exactly one default-profile gateway per HERMES_HOME (the sidecar refuses
+# non-default profiles), so only the default-home query is held to "never unlink a held lock's identity
+# files". Explicit-profile scoped queries keep upstream's semantics: upstream's own
+# tests/gateway/test_status.py::test_scoped_query_still_cleans_dead_pid_record asserts cleanup there.
+CASES = ("default",)
 WORKER_SECONDS = 90
 ROLE = sys.argv[1]
 RUN_ID = sys.argv[2]
