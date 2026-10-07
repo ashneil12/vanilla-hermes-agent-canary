@@ -14,8 +14,10 @@ future upstream sync cannot conflict with it.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from providers.base import ProviderProfile
 
@@ -130,3 +132,72 @@ class VeniceProfile(SortedCatalogMixin, ProviderProfile):
         if slug:
             extra_body["venice_parameters"] = {"character_slug": slug}
         return extra_body, top_level
+
+
+# ---------------------------------------------------------------------------
+# Venice by base URL (managed Venice runs as a ``custom`` provider)
+# ---------------------------------------------------------------------------
+# Hivra provisions managed Venice as provider ``custom`` with model.base_url pointing at the
+# dashboard's managed proxy (``https://<dashboard-host>/api/managed-venice/v1``; the host varies
+# across rebrands, so match the path) or straight at ``api.venice.ai``. The provider slug is not
+# ``venice`` there, so VeniceProfile never fires; this overlay applies the same two request-time
+# behaviours to ANY chat-completions request whose base URL is a Venice endpoint.
+
+_MANAGED_VENICE_PATH = "/api/managed-venice/"
+
+
+def is_venice_base_url(base_url: Any) -> bool:
+    """True for ``*.venice.ai`` hosts and the Hivra managed-Venice proxy path."""
+    raw = str(base_url or "").strip().lower()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = (parsed.hostname or "").rstrip(".")
+    if host == "venice.ai" or host.endswith(".venice.ai"):
+        return True
+    return _MANAGED_VENICE_PATH in (parsed.path.rstrip("/") + "/")
+
+
+def apply_venice_overlay(api_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Remap a foreign model slug and inject ``venice.character_slug`` into built request kwargs.
+
+    Idempotent (a remapped id and an existing slug are left alone), so it composes with
+    VeniceProfile on the ``venice`` provider.
+    """
+    mapped, original = normalize_venice_model_id(api_kwargs.get("model"))
+    if original is not None:
+        api_kwargs["model"] = mapped
+        if (original, mapped) not in _REMAPS_LOGGED:
+            _REMAPS_LOGGED.add((original, mapped))
+            logger.info("Venice: remapped foreign model id %r -> %r (Venice equivalent)", original, mapped)
+    slug = configured_venice_character_slug()
+    if slug:
+        extra = api_kwargs.setdefault("extra_body", {})
+        if isinstance(extra, dict):
+            params = extra.setdefault("venice_parameters", {})
+            if isinstance(params, dict):
+                params.setdefault("character_slug", slug)
+    return api_kwargs
+
+
+def install_venice_base_url_overlay(transport_cls: type) -> None:
+    """Wrap ``transport_cls.build_kwargs`` so Venice-URL requests get the overlay (idempotent).
+
+    Called from the bundled ``hivra-core`` plugin; no upstream file carries this wiring.
+    """
+    original = transport_cls.build_kwargs
+    if getattr(original, "__hermes_fork_venice__", False):
+        return
+
+    @functools.wraps(original)
+    def build_kwargs(self, model, messages, tools=None, **params):
+        api_kwargs = original(self, model, messages, tools, **params)
+        try:
+            if is_venice_base_url(params.get("base_url")) and isinstance(api_kwargs, dict):
+                apply_venice_overlay(api_kwargs)
+        except Exception as exc:  # never break the chat request over a nicety
+            logger.debug("venice base-url overlay skipped: %s", exc)
+        return api_kwargs
+
+    build_kwargs.__hermes_fork_venice__ = True  # type: ignore[attr-defined]
+    transport_cls.build_kwargs = build_kwargs

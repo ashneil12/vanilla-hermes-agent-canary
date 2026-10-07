@@ -149,3 +149,101 @@ def test_failed_catalog_fetch_stays_none(monkeypatch):
 
     monkeypatch.setattr(ProviderProfile, "fetch_models", lambda self, **kw: None)
     assert get_provider_profile("surplus").fetch_models(api_key="k") is None
+
+
+# --- Venice by base URL: managed Venice runs as provider "custom" ---------------------------
+
+_MANAGED_URLS = [
+    "https://hivra.cloud/api/managed-venice/v1",
+    "https://canary.hermesos.cloud/api/managed-venice/v1/",  # canary host, trailing slash
+    "https://hermesos.cloud/api/managed-venice/v1",          # stale pre-rebrand host still pinned on old boxes
+    "https://api.venice.ai/api/v1",
+]
+
+
+@pytest.mark.parametrize("url", _MANAGED_URLS)
+def test_is_venice_base_url_matches_managed_proxy_and_direct(url):
+    from hermes_cli.fork_providers import is_venice_base_url
+
+    assert is_venice_base_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "", None, "https://api.openai.com/v1", "https://openrouter.ai/api/v1", "http://localhost:11434/v1",
+    "https://notvenice.ai.example.com/v1", "https://example.com/venice.ai/v1",
+])
+def test_is_venice_base_url_rejects_other_hosts(url):
+    from hermes_cli.fork_providers import is_venice_base_url
+
+    assert not is_venice_base_url(url)
+
+
+@pytest.fixture
+def hivra_core_loaded():
+    """Load bundled plugins so hivra-core wraps the chat-completions transport (wiring under test)."""
+    from hermes_cli import plugins
+
+    plugins.PluginManager().discover_and_load()
+
+
+def _custom_request(transport, base_url, model="anthropic/claude-sonnet-4"):
+    from providers import get_provider_profile
+
+    return transport.build_kwargs(
+        model=model, messages=[{"role": "user", "content": "hi"}], tools=[],
+        provider_profile=get_provider_profile("custom"), provider_name="custom", base_url=base_url,
+    )
+
+
+def test_transport_is_wrapped_by_hivra_core(hivra_core_loaded):
+    from agent.transports.chat_completions import ChatCompletionsTransport
+
+    assert getattr(ChatCompletionsTransport.build_kwargs, "__hermes_fork_venice__", False)
+
+
+@pytest.mark.parametrize("url", _MANAGED_URLS)
+def test_custom_provider_with_venice_base_url_gets_remap_and_character(transport, hivra_core_loaded, monkeypatch, url):
+    import hermes_cli.fork_providers as fp
+
+    monkeypatch.setattr(fp, "configured_venice_character_slug", lambda: "mentor")
+    kwargs = _custom_request(transport, url)
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert kwargs["extra_body"]["venice_parameters"] == {"character_slug": "mentor"}
+
+
+def test_custom_provider_with_venice_base_url_no_slug_configured(transport, hivra_core_loaded, monkeypatch):
+    import hermes_cli.fork_providers as fp
+
+    monkeypatch.setattr(fp, "configured_venice_character_slug", lambda: "")
+    kwargs = _custom_request(transport, _MANAGED_URLS[0])
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert "venice_parameters" not in (kwargs.get("extra_body") or {})
+
+
+def test_custom_provider_on_other_endpoints_is_untouched(transport, hivra_core_loaded, monkeypatch):
+    import hermes_cli.fork_providers as fp
+
+    monkeypatch.setattr(fp, "configured_venice_character_slug", lambda: "mentor")
+    kwargs = _custom_request(transport, "https://api.openai.com/v1")
+    assert kwargs["model"] == "anthropic/claude-sonnet-4"
+    assert "venice_parameters" not in (kwargs.get("extra_body") or {})
+
+
+def test_venice_provider_and_url_overlay_compose(transport, hivra_core_loaded, monkeypatch):
+    """provider=venice hits both VeniceProfile and the URL overlay; the result is the same as either."""
+    import hermes_cli.fork_providers as fp
+
+    monkeypatch.setattr(fp, "configured_venice_character_slug", lambda: "mentor")
+    kwargs = _build(transport, "venice", "anthropic/claude-sonnet-4")
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert kwargs["extra_body"]["venice_parameters"] == {"character_slug": "mentor"}
+
+
+def test_install_overlay_is_idempotent():
+    from agent.transports.chat_completions import ChatCompletionsTransport
+    from hermes_cli.fork_providers import install_venice_base_url_overlay
+
+    install_venice_base_url_overlay(ChatCompletionsTransport)
+    first = ChatCompletionsTransport.build_kwargs
+    install_venice_base_url_overlay(ChatCompletionsTransport)
+    assert ChatCompletionsTransport.build_kwargs is first
