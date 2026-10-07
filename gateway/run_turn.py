@@ -163,6 +163,9 @@ def hygiene_no_commit_reason(agent) -> str:
     return "in-place commit did not complete"
 
 
+from gateway.runtime_governor import governed_gateway_run, governed_gateway_turn  # hermes-fork: runtime-governor
+
+
 class GatewayTurnMixin:
     """Agent-turn execution for GatewayRunner (see module docstring)."""
 
@@ -2143,6 +2146,7 @@ class GatewayTurnMixin:
             persist_user_display_kind, session_entry.session_id, owner,
         ), _session_env_tokens
 
+    @governed_gateway_turn  # hermes-fork: runtime-governor
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -2923,6 +2927,7 @@ class GatewayTurnMixin:
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }
 
+    @governed_gateway_run  # hermes-fork: runtime-governor
     async def _run_agent(
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],
         source: SessionSource, session_id: str, **turn_kwargs,

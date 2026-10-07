@@ -1150,6 +1150,9 @@ def _run_route_delegate(name: str):
     return _handler
 
 
+from gateway.runtime_governor import governed_api_run  # hermes-fork: runtime-governor
+
+
 class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     """aiohttp server routing OpenAI-format requests through hermes-agent's AIAgent."""
 
@@ -3969,6 +3972,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             usage["runtime"] = runtime
         return result, usage
 
+    @governed_api_run  # hermes-fork: runtime-governor
     async def _run_agent(
         self, user_message: str, conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,
