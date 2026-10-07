@@ -1,0 +1,271 @@
+name: Upstream release sync
+
+# Keeps this fork on NousResearch/hermes-agent's RELEASE tags (not upstream main).
+#
+#   schedule/dispatch -> newest upstream release tag not yet merged -> merge it
+#   (merge commit, never rebase/squash) on branch `upstream-sync/<tag>` -> open a PR
+#   into main.  CI runs on that PR (the PAT-created PR is what triggers it).
+#   upstream-sync-followup.yml then builds the immutable image once CI is green.
+#
+# What this workflow NEVER does:
+#   * merge the PR (a human merges a green PR)
+#   * move :stable or :latest (see docker-build-immutable.yml; guarded by
+#     tests/test_upstream_sync_workflows.py)
+#   * force-push, rebase, or resolve conflicts by guessing
+#
+# When it is stuck it says so: an open issue labelled `upstream-sync-stuck`
+# (conflicts, missing token, red CI, failed image build) that is updated on every
+# run instead of piling up duplicates.
+#
+# Required secret: AEON_GITHUB_PAT (name kept from the previous sync bot) — a PAT or
+# fine-grained token with Contents:write + Pull-requests:write + Workflows:write.
+# A PR opened with the default GITHUB_TOKEN does not trigger CI, so without this
+# token the workflow opens a "needs token" issue and stops.
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Upstream ref to merge (release tag like v2026.9.24). Empty = newest release tag not yet merged."
+        required: false
+        type: string
+      dry_run:
+        description: "Merge locally and report, but push nothing and open nothing."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: NousResearch/hermes-agent
+  UPSTREAM_URL: https://github.com/NousResearch/hermes-agent.git
+
+jobs:
+  sync:
+    if: github.repository == 'ashneil12/vanilla-hermes-agent-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    env:
+      SYNC_TOKEN: ${{ secrets.AEON_GITHUB_PAT }}
+      GH_REPO: ${{ github.repository }}
+      INPUT_TARGET: ${{ inputs.target }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Checkout main (full history)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # With no token the checkout still works (read-only); the push guard below
+          # turns that into a visible issue instead of a silent no-op.
+          token: ${{ secrets.AEON_GITHUB_PAT || github.token }}
+
+      - name: Labels (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create upstream-sync --color 1f883d --description "Automated upstream release sync" --force || true
+          gh label create upstream-sync-stuck --color d73a4a --description "Upstream sync needs a human" --force || true
+
+      - name: Pick the target release tag
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TARGET:-}" ]; then
+            target="$INPUT_TARGET"
+          else
+            # Newest published, non-draft, non-prerelease release whose tag looks like vYYYY.M.D.
+            target=$(gh api "repos/${UPSTREAM_REPO}/releases?per_page=30" \
+              --jq '[.[] | select(.draft==false and .prerelease==false and (.tag_name | test("^v[0-9]{4}\\.[0-9]+\\.[0-9]+$")))] | sort_by(.published_at) | reverse | .[0].tag_name // ""')
+          fi
+          if [ -z "$target" ]; then
+            echo "No upstream release found." >&2
+            echo "stuck=no-release" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Branch/ref names flow into later shell steps: allow only a conservative charset.
+          case "$target" in
+            *[!A-Za-z0-9._/-]*|-*|*..*) echo "Refusing odd target '$target'" >&2; exit 1 ;;
+          esac
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "Target upstream ref: $target"
+
+      - name: Fetch the upstream ref and decide whether there is work
+        id: delta
+        if: steps.pick.outputs.target != ''
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          if git ls-remote --exit-code --tags upstream "refs/tags/${TARGET}" >/dev/null 2>&1; then
+            git fetch --no-tags upstream "+refs/tags/${TARGET}:refs/upstream-sync/target"
+          else
+            git fetch --no-tags upstream "+${TARGET}:refs/upstream-sync/target"
+          fi
+          sha=$(git rev-parse "refs/upstream-sync/target^{commit}")
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$sha" HEAD; then
+            echo "main already contains ${TARGET} (${sha:0:10}); nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            behind=$(git rev-list --count "HEAD..${sha}")
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "behind=$behind" >> "$GITHUB_OUTPUT"
+            echo "main is $behind commits behind ${TARGET} (${sha:0:10})"
+          fi
+
+      - name: Skip if a sync PR is already open (do not stack)
+        id: guard
+        if: steps.delta.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          open=$(gh pr list --state open --label upstream-sync --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("upstream-sync/"))] | map("#\(.number) \(.headRefName)") | join(", ")')
+          if [ -n "$open" ]; then
+            echo "An upstream sync PR is already open ($open); skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the target (merge commit, no conflict guessing)
+        id: merge
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="upstream-sync/${TARGET}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git checkout -b "$branch"
+          if git merge --no-ff --no-commit refs/upstream-sync/target >merge.log 2>&1; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            version=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            git commit -q -m "merge: upstream ${TARGET} (hermes-agent ${version})
+
+          Automated by upstream-release-sync.yml. Merge commit, not squash, so the
+          next release merges against this tag."
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > conflicts.txt || true
+            echo "Conflicts: $(wc -l < conflicts.txt)"
+            cat conflicts.txt
+            git merge --abort || true
+          fi
+
+      - name: Stuck on conflicts -> open or update the issue
+        if: steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          n=$(wc -l < conflicts.txt | tr -d ' ')
+          {
+            echo "The scheduled sync could not merge \`${TARGET}\` into \`main\` automatically."
+            echo
+            echo "**${n} conflicting file(s):**"
+            echo '```'
+            head -80 conflicts.txt
+            echo '```'
+            echo
+            echo "Nothing was pushed and nothing was force-resolved. To resolve locally:"
+            echo '```'
+            echo "git fetch origin main && git fetch https://github.com/NousResearch/hermes-agent.git tag ${TARGET} --no-tags"
+            echo "git switch -c upstream-sync/${TARGET} origin/main && git merge ${TARGET}"
+            echo "# resolve (fork seams carry 'hermes-fork:' markers), commit, push, open a PR with the label upstream-sync"
+            echo '```'
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Last checked: $(date -u +%Y-%m-%dT%H:%MZ). This issue is updated in place on every run."
+          } > issue.md
+          title="Upstream sync stuck: ${TARGET} (${n} conflicts)"
+          existing=$(gh issue list --state open --label upstream-sync-stuck --search "in:title \"Upstream sync stuck: ${TARGET}\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file issue.md
+            gh issue comment "$existing" --body "Still stuck as of $(date -u +%Y-%m-%dT%H:%MZ): ${n} conflicting file(s)."
+          else
+            gh issue create --title "$title" --label upstream-sync-stuck --body-file issue.md
+          fi
+          echo "::error::Upstream sync of ${TARGET} is stuck on ${n} conflicts"
+          exit 1
+
+      - name: Push guard (a token that triggers CI is mandatory)
+        id: pushguard
+        if: steps.merge.outputs.clean == 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SYNC_TOKEN:-}" ] || ! GH_TOKEN="$SYNC_TOKEN" gh api user --jq .login >/dev/null 2>&1; then
+            body="The sync of \`${TARGET}\` merges cleanly, but the secret \`AEON_GITHUB_PAT\` is missing or rejected, so no PR was opened (a PR opened with the default GITHUB_TOKEN does not trigger CI). Add a token with Contents:write, Pull-requests:write and Workflows:write as the repo secret AEON_GITHUB_PAT, then re-run this workflow. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            title="Upstream sync stuck: ${TARGET} (needs AEON_GITHUB_PAT)"
+            existing=$(gh issue list --state open --label upstream-sync-stuck --search "in:title \"Upstream sync stuck: ${TARGET}\"" --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "$body"
+            else
+              gh issue create --title "$title" --label upstream-sync-stuck --body "$body"
+            fi
+            echo "::error::AEON_GITHUB_PAT missing or rejected"
+            exit 1
+          fi
+
+      - name: Dry run report
+        if: steps.merge.outputs.clean == 'true' && env.DRY_RUN == 'true'
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          {
+            echo "### Dry run: ${TARGET}"
+            echo "Merges cleanly into main. Nothing pushed."
+            echo "Hermes version after merge: ${{ steps.merge.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push branch and open the PR
+        if: steps.pushguard.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.AEON_GITHUB_PAT }}
+          TARGET: ${{ steps.pick.outputs.target }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          VERSION: ${{ steps.merge.outputs.version }}
+          BEHIND: ${{ steps.delta.outputs.behind }}
+          SHA: ${{ steps.delta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # actions/checkout already configured AEON_GITHUB_PAT as the push credential.
+          git push origin "$BRANCH"
+          cat > pr-body.md <<EOF
+          Automated merge of upstream release \`${TARGET}\` (hermes-agent ${VERSION}, commit \`${SHA:0:10}\`), ${BEHIND} commits.
+
+          - Merged with a merge commit (not squash) so the next release merges against this tag.
+          - It merged without conflicts. CI decides if the fork seams still work.
+          - When CI is green, \`upstream-sync-followup.yml\` builds the immutable image \`ghcr.io/${GITHUB_REPOSITORY}:${TARGET}-<head-sha7>\` and comments here with its digest and proof.
+          - **This never moves \`:stable\` or \`:latest\`.** Moving them stays a manual, owner-approved step.
+          - Merge this PR only after the image proof comment is green.
+
+          If anything blocks, an issue labelled \`upstream-sync-stuck\` is opened or updated.
+          EOF
+          gh pr create --base main --head "$BRANCH" \
+            --title "merge: upstream ${TARGET} (hermes-agent ${VERSION})" \
+            --label upstream-sync --body-file pr-body.md
