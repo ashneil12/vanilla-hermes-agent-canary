@@ -157,14 +157,40 @@ jobs:
           branch="upstream-sync/${TARGET}"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           git checkout -b "$branch"
-          if git merge --no-ff --no-commit refs/upstream-sync/target >merge.log 2>&1; then
+          resolved_generated=false
+          if ! git merge --no-ff --no-commit refs/upstream-sync/target >merge.log 2>&1; then
+            git diff --name-only --diff-filter=U > conflicts.txt || true
+            # Generated docs (skill catalogs, sidebar, per-skill pages) are rebuilt right after
+            # the merge, so a conflict that is ONLY in those files is resolved by taking
+            # upstream's copy and regenerating. Anything else stops the sync.
+            remaining=$(grep -v -E '^(website/docs/reference/(optional-)?skills-catalog\.md|website/sidebars\.ts|website/docs/user-guide/skills/.*)$' conflicts.txt || true)
+            if [ -z "$remaining" ] && [ -s conflicts.txt ]; then
+              ok=true
+              while IFS= read -r f; do
+                git checkout --theirs -- "$f" 2>/dev/null && git add -- "$f" || ok=false
+              done < conflicts.txt
+              if [ "$ok" = true ]; then resolved_generated=true; fi
+            fi
+          fi
+          if [ -z "$(git diff --name-only --diff-filter=U)" ] && git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "generated_conflicts_resolved=$resolved_generated" >> "$GITHUB_OUTPUT"
             version=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
             echo "version=$version" >> "$GITHUB_OUTPUT"
             git commit -q -m "merge: upstream ${TARGET} (hermes-agent ${version})
 
           Automated by upstream-release-sync.yml. Merge commit, not squash, so the
           next release merges against this tag."
+            # Generated files and contributor mappings the required checks insist on.
+            python3 -m pip install -q pyyaml
+            python3 website/scripts/generate-skill-docs.py >/dev/null
+            GH_TOKEN="${{ github.token }}" python3 scripts/ci/map_upstream_contributors.py --base origin/main
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -q -m "chore: regenerate skill docs and map upstream contributors
+
+          Output of website/scripts/generate-skill-docs.py and scripts/ci/map_upstream_contributors.py."
+            fi
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"
             git diff --name-only --diff-filter=U > conflicts.txt || true
