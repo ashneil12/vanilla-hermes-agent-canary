@@ -8,8 +8,9 @@ inode (double-run).
 
 For the process's own home (an unscoped query) the lock, not local PID visibility, is the liveness
 proof: never cleanup-unlink while it is held. Scoped queries of another profile home and the
-lock-inactive path keep upstream's behaviour. Add-only module; ``gateway/status.py`` carries one
-decorator line.
+lock-inactive path keep upstream's behaviour, and so does upstream's own partial cleanup
+(``unlink_lock=False``, newer than the v2026.9.24 tag), which already leaves the held lock alone.
+Add-only module; ``gateway/status.py`` carries one rebinding line.
 """
 
 from __future__ import annotations
@@ -27,8 +28,11 @@ def keep_held_lock_files(fn: Callable) -> Callable:
         from gateway import status
 
         try:
-            if Path(pid_path) == Path(status._get_pid_path()) and status.is_gateway_runtime_lock_active(
-                status._get_gateway_lock_path(Path(pid_path))
+            lock_path = status._get_gateway_lock_path(Path(pid_path))
+            if (
+                kwargs.get("unlink_lock", True)
+                and Path(pid_path) == Path(status._get_pid_path())
+                and status.is_gateway_runtime_lock_active(lock_path)
             ):
                 return None
         except Exception:
