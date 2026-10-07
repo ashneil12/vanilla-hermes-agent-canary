@@ -289,6 +289,37 @@ def test_heartbeat_error_is_a_cutoff(monkeypatch):
     assert turn.cutoff_message == DEFAULT_UNAVAILABLE_MESSAGE
 
 
+def test_closed_turn_never_interrupts_the_agent(monkeypatch):
+    _install(monkeypatch, _Governor(heartbeat=RuntimeGovernorHeartbeat(should_stop=True)))
+    agent = _Agent()
+
+    turn = GovernedTurn(get_agent=lambda: agent)
+    turn.close()
+    turn._record_cutoff("late")  # a heartbeat that lands after close()
+
+    assert agent.interrupts == []
+    assert turn.cutoff is False
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_run_agent_error_fails_the_lease(monkeypatch):
+    from gateway.run import GatewayRunner
+
+    governor = _install(monkeypatch, _Governor())
+    inner = AsyncMock(side_effect=[{"final_response": "first"}, RuntimeError("boom")])
+    runner = _gateway_runner(_Agent(), inner)
+
+    async def resolve(event, source):
+        await GatewayRunner._run_agent(runner, "hi", "", [], source, "session-1")
+        with pytest.raises(RuntimeError):  # e.g. the pending-message recursion failing
+            await GatewayRunner._run_agent(runner, "again", "", [], source, "session-1")
+        return None
+
+    await _run_gateway_turn(runner, _event(), resolve)
+
+    assert governor.calls[-1] == ("fail", "lease-1", "agent_error")
+
+
 def test_cutoff_before_the_agent_exists_interrupts_it_once_it_does(monkeypatch):
     _install(monkeypatch, _Governor(heartbeat=RuntimeGovernorHeartbeat(should_stop=True)))
     holder = [None]

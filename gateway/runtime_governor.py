@@ -3,6 +3,9 @@
 The dashboard sidecar owns the local enforcement API. This module keeps the
 agent runtime independent from dashboard internals: it signs local requests,
 fails closed when required, and returns small typed decisions to gateway/cron.
+
+hermes-fork: ``GovernedTurn`` and the ``governed_*`` decorators at the bottom of this module are the
+only runtime-governor wiring; upstream files carry one marked decorator per agent-run choke point.
 """
 
 from __future__ import annotations
@@ -473,14 +476,15 @@ class GovernedTurn:
                 self._record_cutoff(heartbeat.user_message)
 
     def _record_cutoff(self, user_message: str) -> None:
-        if self.cutoff:
+        if self.cutoff or self.closed:
             return
         self.cutoff = True
         self.cutoff_message = user_message or DEFAULT_LIMIT_MESSAGE
         self._interrupt()
 
     def _interrupt(self) -> None:
-        if self._interrupted or self._get_agent is None:
+        # A closed turn must never touch the agent: the gateway reuses cached agents across turns.
+        if self._interrupted or self._get_agent is None or self.closed:
             return
         try:
             self._interrupted = _interrupt_agent(self._get_agent())
@@ -508,6 +512,10 @@ class GovernedTurn:
             elif mode == "fill" and not (result.get("final_response") or "").strip():
                 result["final_response"] = message
         return result
+
+    def mark_error(self) -> None:
+        """The run raised: close the lease as ``agent_error`` (a cutoff keeps its own outcome)."""
+        self.outcome = "runtime_cutoff" if self.cutoff else "agent_error"
 
     def denial_result(self) -> dict:
         return {"final_response": self.user_message, "error": self.user_message,
@@ -601,7 +609,11 @@ def governed_gateway_run(fn: Callable) -> Callable:
         turn = _CURRENT_TURN.get()
         if turn is None or not turn.active:
             return await fn(self, *args, **kwargs)
-        result = await fn(self, *args, **kwargs)
+        try:
+            result = await fn(self, *args, **kwargs)
+        except BaseException:
+            turn.mark_error()
+            raise
         return turn.observe(result, mode="replace")
 
     return _mark(wrapper, "gateway_run")
