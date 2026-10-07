@@ -76,6 +76,10 @@ runtime/
 apps/
 !apps/shared/
 !apps/shared/**
+# hermes-fork: webchat-build — the `webchat_build` Dockerfile stage compiles apps/desktop
+# (which imports apps/shared) into the /webchat bundle, so it must stay in the context.
+!apps/desktop/
+!apps/desktop/**
 
 # Test suite — not shipped in production images
 tests/
