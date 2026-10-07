@@ -18,11 +18,11 @@ Find them all: `git grep -n "hermes-fork:" -- apps web hermes_cli Dockerfile .do
 ## Fork-only files (never edited upstream)
 
 - `apps/desktop/src/lib/web-shim.ts`, `web-files.ts`, `web-terminal.ts` (+ tests): the browser bridge, attachments (synthetic paths), browser terminal over the Hivra sidecar.
-- `apps/desktop/src/plugins/hivra/` (bundled plugin, auto-registered by upstream's vite glob, inert unless `window.__HERMES_WEB_CLIENT__`): Hivra theme (+ first-run default), Admin Panel sidebar row and route page, dashboard appearance / starter-prompt `postMessage` bridge, phone polish (dvh, 16px inputs, safe-area, viewport-fit, close overlays on navigation).
+- `apps/desktop/src/plugins/hivra/` (bundled plugin, auto-registered by upstream's vite glob, inert unless `window.__HERMES_WEB_CLIENT__`): Hivra theme (+ first-run default; the old `hermesos-dark` alias is gone), Admin Panel sidebar row and route page, dashboard appearance / starter-prompt `postMessage` bridge, phone polish (dvh, 16px inputs, safe-area, viewport-fit, close overlays on navigation).
 - `apps/desktop/src/lib/web-shim-drift.test.ts`: CI drift guard (see Re-sync).
 - `hermes_cli/web_routers/fork_hivra.py`: `GET /api/hivra/config` -> `{dashboard_url}`.
 - `web/inject-dash-bootstrap.cjs`.
-- Tests: `tests/hermes_cli/test_web_server_fork_hivra.py`, `*.keyless.test.tsx`, `web-shim*.test.ts`, `plugins/hivra/plugin.test.tsx`, `venice-recommended-card.test.tsx`, `web-file-picker.test.tsx`. One upstream test narrowed: `components/onboarding/index.test.tsx` (the Venice card holds the Recommended slot).
+- Tests: `tests/hermes_cli/test_web_server_fork_hivra.py`, `*.keyless.test.tsx`, `web-shim*.test.ts`, `src/contrib/hivra-plugin.test.tsx` (bundled-plugin tests live in `src/contrib/`; the plugin lint rule allows only the SDK inside `plugins/`), `venice-recommended-card.test.tsx`, `web-file-picker.test.tsx`. One upstream test narrowed: `components/onboarding/index.test.tsx` (the Venice card holds the Recommended slot).
 
 ## Dropped (upstream does it, or no longer needed)
 
@@ -39,4 +39,4 @@ Find them all: `git grep -n "hermes-fork:" -- apps web hermes_cli Dockerfile .do
 1. `cd apps/desktop && npx vitest run src/lib/web-shim-drift.test.ts`. A new REQUIRED preload key: implement it in `web-shim.ts` or add it to `ACKNOWLEDGED_ABSENT`. Never add a catch-all no-op Proxy: the renderer feature-detects Electron-only UI (`?.cloud`, `typeof openWindow === 'function'`), a no-op would switch it on.
 2. `npx vite build --base=/webchat/ --outDir /tmp/x` and `cd web && npx vite build --base=/dash/ --outDir /tmp/y && node inject-dash-bootstrap.cjs /tmp/y/index.html`.
 3. Upstream restructures the Dockerfile often (stages `runtime_base`, `frontend_build` already on `upstream/main`, web built by `scripts/build/web.mjs` with generated icons): the `/dash` build here is a plain `vite build`; re-check favicon/icons there.
-4. `plugins/hivra/plugin.test.tsx` fails if the theme provider's storage key or default-skin resolution changes.
+4. `src/contrib/hivra-plugin.test.tsx` fails if the theme provider's storage key or default-skin resolution changes.
