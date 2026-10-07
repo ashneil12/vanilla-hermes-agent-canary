@@ -65,8 +65,8 @@ gate = (
     "          INSTANCE_ID: ${{ vars.HERMES_INSTANCE_ID }}\n"
     "        run: |\n"
     '          if [ -z "$GATE_URL" ] || [ -z "$INSTANCE_ID" ]; then echo "active=true" >> "$GITHUB_OUTPUT"; exit 0; fi\n'
-    '          code=$(curl -s -m 15 -o /tmp/gate.json -w "%{http_code}" "$GATE_URL/api/instances/$INSTANCE_ID/aeon-gate" || echo 000)\n'
-    "          active=$(jq -r 'if .active == true then \"true\" else \"false\" end' /tmp/gate.json 2>/dev/null || echo \"false\")\n"
+    '          code=$(curl -s -m 15 -o ${TMPDIR:-/tmp}/gate.json -w "%{http_code}" "$GATE_URL/api/instances/$INSTANCE_ID/aeon-gate" || echo 000)\n'
+    "          active=$(jq -r 'if .active == true then \"true\" else \"false\" end' ${TMPDIR:-/tmp}/gate.json 2>/dev/null || echo \"false\")\n"
     '          if [ "$code" = "200" ] && [ "$active" = "true" ]; then echo "active=true" >> "$GITHUB_OUTPUT"; else echo "active=false" >> "$GITHUB_OUTPUT"; fi\n'
     "\n"
     "  tick:\n"

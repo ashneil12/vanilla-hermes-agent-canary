@@ -36,10 +36,10 @@ else
 fi
 
 # Create registration file
-"$SCRIPT_DIR/create-registration.sh" /tmp/agent-reg-$$.json >/dev/null
+"$SCRIPT_DIR/create-registration.sh" ${TMPDIR:-/tmp}/agent-reg-$$.json >/dev/null
 
 # Read and base64 encode
-JSON_CONTENT=$(cat /tmp/agent-reg-$$.json)
+JSON_CONTENT=$(cat ${TMPDIR:-/tmp}/agent-reg-$$.json)
 BASE64_CONTENT=$(echo -n "$JSON_CONTENT" | base64 -w 0)
 DATA_URI="data:application/json;base64,$BASE64_CONTENT"
 
@@ -80,4 +80,4 @@ else
 fi
 
 # Cleanup
-rm -f /tmp/agent-reg-$$.json
+rm -f ${TMPDIR:-/tmp}/agent-reg-$$.json

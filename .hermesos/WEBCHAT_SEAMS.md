@@ -37,6 +37,6 @@ Find them all: `git grep -n "hermes-fork:" -- apps web hermes_cli Dockerfile .do
 ## Re-sync checklist
 
 1. `cd apps/desktop && npx vitest run src/lib/web-shim-drift.test.ts`. A new REQUIRED preload key: implement it in `web-shim.ts` or add it to `ACKNOWLEDGED_ABSENT`. Never add a catch-all no-op Proxy: the renderer feature-detects Electron-only UI (`?.cloud`, `typeof openWindow === 'function'`), a no-op would switch it on.
-2. `npx vite build --base=/webchat/ --outDir /tmp/x` and `cd web && npx vite build --base=/dash/ --outDir /tmp/y && node inject-dash-bootstrap.cjs /tmp/y/index.html`.
+2. `npx vite build --base=/webchat/ --outDir ${TMPDIR:-/tmp}/x` and `cd web && npx vite build --base=/dash/ --outDir ${TMPDIR:-/tmp}/y && node inject-dash-bootstrap.cjs ${TMPDIR:-/tmp}/y/index.html`.
 3. Upstream restructures the Dockerfile often (stages `runtime_base`, `frontend_build` already on `upstream/main`, web built by `scripts/build/web.mjs` with generated icons): the `/dash` build here is a plain `vite build`; re-check favicon/icons there.
 4. `src/contrib/hivra-plugin.test.tsx` fails if the theme provider's storage key or default-skin resolution changes.

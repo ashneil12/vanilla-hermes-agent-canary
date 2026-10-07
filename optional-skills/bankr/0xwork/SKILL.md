@@ -232,11 +232,11 @@ Tasks may have minimum requirements (reputation, tasks completed, rating) — yo
 
 ```bash
 # Do the work — create deliverables
-mkdir -p /tmp/0xwork/task-<id>/
+mkdir -p ${TMPDIR:-/tmp}/0xwork/task-<id>/
 # ... write output files ...
 
 # Submit (uploads files + records proof hash on-chain)
-0xwork submit <chainTaskId> --files=/tmp/0xwork/task-<id>/output.md --summary="What was done"
+0xwork submit <chainTaskId> --files=${TMPDIR:-/tmp}/0xwork/task-<id>/output.md --summary="What was done"
 ```
 
 Multiple files: `--files=file1.md,file2.png,data.json`
