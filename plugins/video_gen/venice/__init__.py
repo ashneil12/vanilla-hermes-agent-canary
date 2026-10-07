@@ -258,6 +258,43 @@ def _venice_headers(api_key: str) -> Dict[str, str]:
     }
 
 
+def _coerce_image_to_data_url(ref: str, *, budget: int = 3_000_000) -> str:
+    """Make an image reference safe to send as a Venice video ``image_url``.
+
+    HTTP(S) and ``data:`` URLs pass through. A LOCAL file path (or raw base64) -- e.g. an
+    image the agent just generated -- is read, downscaled to fit the managed-proxy request
+    cap and returned as a ``data:image/...;base64,`` URL, so "turn this image into a video"
+    works without the agent hand-building a data URL in the terminal. Best-effort: anything
+    unresolvable (or not a recognised image) is returned unchanged so Venice reports it.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return ref
+    low = ref.lower()
+    if low.startswith(("http://", "https://", "data:")):
+        return ref
+    try:
+        import base64 as _b64
+
+        from tools.image_edit_tool import _open_image_for_upload, _shrink_image_bytes
+
+        data, _name = _open_image_for_upload(ref)
+        data = _shrink_image_bytes(data, budget)
+        if data[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            # Not an image (e.g. a bare provider file-id that happens to be valid base64):
+            # never fabricate a data: URL, let the provider validate the original value.
+            return ref
+        return f"data:{mime};base64," + _b64.b64encode(data).decode("ascii")
+    except Exception:
+        return ref
+
+
 def _normalize_reference_images(refs: Optional[List[str]]) -> Optional[List[str]]:
     if not refs:
         return None
@@ -409,6 +446,10 @@ class VeniceVideoGenProvider(VideoGenProvider):
         seed: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        if image_url:
+            image_url = _coerce_image_to_data_url(image_url)
+        if reference_image_urls:
+            reference_image_urls = [_coerce_image_to_data_url(r) for r in reference_image_urls]
         try:
             loop = asyncio.new_event_loop()
             try:

@@ -198,4 +198,7 @@ def configured_provider_name(section: str, logger: logging.Logger) -> Optional[s
                 configured = "fal"
         except Exception:  # pragma: no cover — helpers are in-repo
             pass
+    if not configured:  # hermes-fork: venice-autopair
+        from tools.venice_autopair import default_provider
+        configured = default_provider(section)
     return configured

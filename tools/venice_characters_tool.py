@@ -151,7 +151,7 @@ registry.register(
     name="venice_characters",
     toolset="memory",
     schema=VENICE_CHARACTERS_SCHEMA,
-    handler=lambda **kw: venice_characters_tool(**kw),
+    handler=lambda args, **kw: venice_characters_tool(**(args or {})),
     check_fn=check_venice_characters_requirements,
     requires_env=["VENICE_API_KEY"],
     is_async=False,

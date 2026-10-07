@@ -318,11 +318,13 @@ MULTIMODAL_SET_MODEL_SCHEMA = {
 }
 
 
+# Toolset note: registered under the upstream ``image_gen`` toolset (default-enabled), not a private
+# ``config`` toolset which upstream's resolver would never enable by default (see tools/browser_sidecar.py).
 registry.register(
     name="multimodal_get_settings",
-    toolset="config",
+    toolset="image_gen",
     schema=MULTIMODAL_GET_SETTINGS_SCHEMA,
-    handler=lambda **kw: multimodal_get_settings_tool(),
+    handler=lambda args, **kw: multimodal_get_settings_tool(),
     check_fn=lambda: True,
     requires_env=[],
     is_async=False,
@@ -332,9 +334,9 @@ registry.register(
 
 registry.register(
     name="multimodal_set_model",
-    toolset="config",
+    toolset="image_gen",
     schema=MULTIMODAL_SET_MODEL_SCHEMA,
-    handler=lambda **kw: multimodal_set_model_tool(**kw),
+    handler=lambda args, **kw: multimodal_set_model_tool(**(args or {})),
     check_fn=lambda: True,
     requires_env=[],
     is_async=False,

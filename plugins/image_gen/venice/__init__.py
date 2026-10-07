@@ -189,6 +189,95 @@ def _resolve_resolution() -> str:
     return DEFAULT_RESOLUTION
 
 
+def _configured_style_preset() -> Optional[str]:
+    """``image_gen.style_preset`` (the Media settings "Style" dropdown), or None."""
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        value = section.get("style_preset") if isinstance(section, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception as exc:
+        logger.debug("Could not read image_gen.style_preset: %s", exc)
+    return None
+
+
+# ``image_generate`` exposes landscape|square|portrait; Venice's edit endpoints
+# take concrete ratio strings and reject the friendly names.
+_EDIT_ASPECT_RATIOS = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
+
+# Steers the model to chain a freshly generated local image into video/edit calls with the
+# path as-is. Upstream's video_generate schema only advertises public HTTPS URLs; the Venice
+# video plugin encodes local paths itself, so without this the model hand-builds data URLs
+# in the terminal. Rides on the tool result (no schema/prompt edit needed).
+_LOCAL_RESULT_HINT = (
+    "To animate this image, call video_generate with image_url set to this exact `image` path "
+    "(local paths are accepted and encoded for you). To change it, call image_generate with "
+    "image_url set to this path. Do not build data URLs or call Venice from the terminal."
+)
+
+
+def _result_extra(image_ref: str) -> Dict[str, Any]:
+    """``extra`` for success_response: the chaining hint when the result is a local file."""
+    if image_ref and not image_ref.lower().startswith(("http://", "https://", "data:")):
+        return {"hint": _LOCAL_RESULT_HINT}
+    return {}
+
+
+# Venice /image/multi-edit takes 1 base + up to 2 layers.
+MAX_EDIT_IMAGES = 3
+
+
+def _edit_sources(image_url: Any, reference_image_urls: Any) -> List[str]:
+    """Source images for an edit/compose call: ``image_url`` first, then references."""
+    out: List[str] = []
+    if isinstance(image_url, str) and image_url.strip():
+        out.append(image_url.strip())
+    if isinstance(reference_image_urls, (list, tuple)):
+        out.extend(r.strip() for r in reference_image_urls if isinstance(r, str) and r.strip())
+    return out[:MAX_EDIT_IMAGES]
+
+
+def _generate_via_edit(prompt: str, aspect_ratio: str, sources: List[str]) -> Dict[str, Any]:
+    """Reference-conditioned generation: route source image(s) to Venice edit / multi-edit.
+
+    Keeps the original identity (a text-only generation would produce an unrelated image).
+    One source -> ``/image/edit``; 2-3 -> ``/image/multi-edit`` (``tools.image_edit_tool``).
+    """
+    import json
+
+    from tools.image_edit_tool import image_compose_tool, image_edit_tool
+
+    aspect = _EDIT_ASPECT_RATIOS.get((aspect_ratio or "").strip().lower(), (aspect_ratio or "auto").strip() or "auto")
+    if len(sources) == 1:
+        raw = image_edit_tool(image=sources[0], prompt=prompt, aspect_ratio=aspect)
+    else:
+        raw = image_compose_tool(images=sources, prompt=prompt, aspect_ratio=aspect)
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        data = {}
+    if isinstance(data, dict) and data.get("success") and data.get("image"):
+        return success_response(
+            image=str(data["image"]),
+            model=str(data.get("model") or ""),
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            provider="venice",
+            modality="image",
+            extra=_result_extra(str(data["image"])),
+        )
+    return error_response(
+        error=str((data or {}).get("error") or "Venice image edit failed"),
+        error_type=str((data or {}).get("error_type") or "provider_error"),
+        provider="venice",
+        prompt=prompt,
+        aspect_ratio=aspect_ratio,
+    )
+
+
 def _build_payload(
     *,
     prompt: str,
@@ -264,6 +353,12 @@ class VeniceImageGenProvider(ImageGenProvider):
     def default_model(self) -> Optional[str]:
         return DEFAULT_MODEL
 
+    def capabilities(self) -> Dict[str, Any]:
+        # Advertises ``image_url`` / ``reference_image_urls`` on ``image_generate`` (upstream's
+        # dynamic schema), served by Venice edit / multi-edit. ``image_url`` is the base image,
+        # so references max out at MAX_EDIT_IMAGES - 1.
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_EDIT_IMAGES - 1}
+
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
             "name": "Venice",
@@ -292,6 +387,15 @@ class VeniceImageGenProvider(ImageGenProvider):
                 provider="venice",
                 aspect_ratio=aspect_ratio,
             )
+
+        sources = _edit_sources(kwargs.get("image_url"), kwargs.get("reference_image_urls"))
+        if sources:
+            return _generate_via_edit(prompt, aspect_ratio, sources)
+
+        if "style_preset" not in kwargs:
+            style = _configured_style_preset()
+            if style:
+                kwargs["style_preset"] = style
 
         model_id, meta = _resolve_model(kwargs.get("model"))
         family = str(meta.get("family", _FAMILY_ASPECT))
@@ -419,7 +523,7 @@ class VeniceImageGenProvider(ImageGenProvider):
         else:
             image_ref = first_url or ""
 
-        extra: Dict[str, Any] = {}
+        extra: Dict[str, Any] = _result_extra(image_ref)
         if family == _FAMILY_RESOLUTION:
             extra["resolution"] = payload.get("resolution")
         if isinstance(result.get("id"), str):
