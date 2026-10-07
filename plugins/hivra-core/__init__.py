@@ -45,6 +45,22 @@ def _bankr_wallet_guidance(_session_info) -> str:
     return build_bankr_wallet_prompt()
 
 
+def _install_venice_overlay() -> None:
+    """Managed Venice runs as provider ``custom`` + a Venice base URL, so the slug-keyed VeniceProfile
+    never fires there; wrap the chat-completions transport to apply the same remap / character slug
+    by base URL."""
+    try:
+        from agent.transports.chat_completions import ChatCompletionsTransport
+        from hermes_cli.fork_providers import install_venice_base_url_overlay
+
+        install_venice_base_url_overlay(ChatCompletionsTransport)
+    except Exception:  # an overlay failure must never stop the plugin loading
+        import logging
+
+        logging.getLogger(__name__).warning("hivra-core: venice base-url overlay not installed", exc_info=True)
+
+
 def register(ctx) -> None:
+    _install_venice_overlay()
     ctx.register_system_prompt_section("hivra-bankr-wallet", _bankr_wallet_guidance)
     ctx.register_system_prompt_section("hivra-media-generation", _media_guidance)
