@@ -792,10 +792,6 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
     return (True, st.st_mtime_ns, st.st_size)
 
 
-from gateway.fork_status_guard import keep_held_lock_files  # hermes-fork: held-lock-keeps-identity-files
-
-
-@keep_held_lock_files  # hermes-fork: held-lock-keeps-identity-files
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check)."""
     if not cleanup_stale:
@@ -1033,6 +1029,11 @@ def write_pid_file() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _write_json_excl(path, _build_pid_record())
     _clear_running_pid_cache()
+
+
+# hermes-fork: held-lock-keeps-identity-files (gateway/fork_status_guard.py)
+from gateway.fork_status_guard import keep_held_lock_files  # noqa: E402
+_cleanup_invalid_pid_path = keep_held_lock_files(_cleanup_invalid_pid_path)
 
 
 def _write_json_excl(path: Path, record: dict[str, Any]) -> None:
