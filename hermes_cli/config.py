@@ -38,6 +38,7 @@ from hermes_cli.colors import Colors, color
 from hermes_cli import managed_scope
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
+from hermes_cli.fork_bankr import bridge_config as _bankr_bridge  # hermes-fork: bankr-env-bridge
 # Managed-mode, container and HERMES_UID/GID policy live in hermes_constants (import-safe);
 # re-exported here so existing callers/patch targets keep working.
 from hermes_constants import (  # noqa: F401
@@ -2023,9 +2024,6 @@ def atomic_config_write(config_path: Path, data: Dict[str, Any], *, extra_conten
 
     _refuse_failed_read(config_path, data)
     atomic_roundtrip_yaml_save(config_path, data, extra_content_on_create=extra_content_on_create)
-
-
-from hermes_cli.fork_bankr import bridge_config as _bankr_bridge  # hermes-fork: bankr-env-bridge  # noqa: E402
 
 
 def load_config() -> Dict[str, Any]:

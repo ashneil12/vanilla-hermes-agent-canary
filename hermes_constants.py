@@ -234,6 +234,12 @@ def get_default_hermes_root() -> Path:
     return result
 
 
+# hermes-fork: install-dir-home-guard (hermes_fork_home.py)
+import hermes_fork_home as _hermes_fork_home  # noqa: E402
+
+_hermes_fork_home.install(globals())
+
+
 # Tombstone lives beside the profile dir (not inside) so a stale mkdir or rmtree cannot erase it.
 _DELETED_PROFILES_DIR = ".deleted"
 # Files marking a real Hermes home; arbitrary dirs with a ``profiles`` segment lack them.
@@ -1646,9 +1652,3 @@ def emit_partial_update_hint(exc: BaseException, *, file=None) -> bool:
     for line in (f"Error: {exc}", *lines):
         print(line, file=sys.stderr if file is None else file)
     return True
-
-
-# hermes-fork: install-dir-home-guard (hermes_fork_home.py)
-import hermes_fork_home as _hermes_fork_home  # noqa: E402
-
-_hermes_fork_home.install(globals())
