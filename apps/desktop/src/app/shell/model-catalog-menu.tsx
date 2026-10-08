@@ -289,8 +289,7 @@ export function ModelCatalogMenu({
   )
 
   const groups = useMemo(
-    // hermes-fork: keyless-provider-guard — providers without usable credentials are not offered (see components/model-picker.tsx)
-    () => groupModels(pickerProviders.filter(p => p.authenticated !== false), search, { model: current.model, provider: current.provider }, shownKeys),
+    () => groupModels(pickerProviders, search, { model: current.model, provider: current.provider }, shownKeys),
     [pickerProviders, search, current.model, current.provider, shownKeys]
   )
 
