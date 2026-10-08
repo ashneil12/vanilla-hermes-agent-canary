@@ -67,9 +67,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          # With no token the checkout still works (read-only); the push guard below
-          # turns that into a visible issue instead of a silent no-op.
-          token: ${{ secrets.AEON_GITHUB_PAT || github.token }}
+          # Read access only. The PAT (which may be missing or expired) is used solely by the
+          # push step, after the push guard has verified it, so a bad token cannot fail the
+          # checkout before the workflow can say so.
+          token: ${{ github.token }}
 
       - name: Labels (idempotent)
         env:
@@ -285,7 +286,8 @@ jobs:
           SHA: ${{ steps.delta.outputs.sha }}
         run: |
           set -euo pipefail
-          # actions/checkout already configured AEON_GITHUB_PAT as the push credential.
+          # The default token cannot trigger CI on the PR, so push with the verified PAT.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "$BRANCH"
           cat > pr-body.md <<EOF
           Automated merge of upstream release \`${TARGET}\` (hermes-agent ${VERSION}, commit \`${SHA:0:10}\`), ${BEHIND} commits.
