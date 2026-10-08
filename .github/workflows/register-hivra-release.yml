@@ -34,6 +34,9 @@ on:
       digest:
         required: false
         type: string
+    secrets:
+      HERMES_RELEASE_CI_TOKEN:
+        required: false
     outputs:
       created:
         description: "true when Hivra created the release, false when it already existed"

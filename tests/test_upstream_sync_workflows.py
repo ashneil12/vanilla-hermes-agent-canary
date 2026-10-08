@@ -142,3 +142,6 @@ def test_followup_registers_only_after_a_successful_build():
     text = FOLLOWUP.read_text(encoding="utf-8")
     assert "register-hivra-release.yml" in text
     assert "needs.build.result == 'success'" in text
+    # Only the one token crosses into the called workflow, never the push PAT or other secrets.
+    assert "secrets: inherit" not in text
+    assert "HERMES_RELEASE_CI_TOKEN: ${{ secrets.HERMES_RELEASE_CI_TOKEN }}" in text

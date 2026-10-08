@@ -105,7 +105,8 @@ jobs:
     with:
       image_tag: ${{ needs.build.outputs.image_tag }}
       digest: ${{ needs.build.outputs.digest }}
-    secrets: inherit
+    secrets:
+      HERMES_RELEASE_CI_TOKEN: ${{ secrets.HERMES_RELEASE_CI_TOKEN }}
 
   report:
     needs: [gate, build, register]
