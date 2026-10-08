@@ -58,14 +58,16 @@ const writeStored = (key: string, value: string) => {
 }
 
 const isWebClient = () =>
-  typeof window !== 'undefined' && Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
+  typeof window !== 'undefined' &&
+  Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
 
 interface AdminBridge {
   getAdminPanelUrl?: () => string
   openAdminPanel?: () => boolean
 }
 
-const adminBridge = (): AdminBridge => (typeof window === 'undefined' ? {} : (window.hermesDesktop as AdminBridge) ?? {})
+const adminBridge = (): AdminBridge =>
+  typeof window === 'undefined' ? {} : ((window.hermesDesktop as AdminBridge) ?? {})
 
 /**
  * First run paints the Hivra skin. `DEFAULT_SKIN_NAME` is upstream's constant,

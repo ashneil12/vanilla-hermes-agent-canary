@@ -132,7 +132,10 @@ function buildUrls(config: WebRuntimeConfig): { baseUrl: string; wsUrl: string }
   return { baseUrl, wsUrl }
 }
 
-async function fetchJson<T>(request: { path: string; method?: string; body?: unknown; timeoutMs?: number; keepalive?: boolean }, config = resolveConfig()): Promise<T> {
+async function fetchJson<T>(
+  request: { path: string; method?: string; body?: unknown; timeoutMs?: number; keepalive?: boolean },
+  config = resolveConfig()
+): Promise<T> {
   const { baseUrl } = buildUrls(config)
   const controller = new AbortController()
   const timeout = request.timeoutMs && request.timeoutMs > 0 ? request.timeoutMs : 30_000
@@ -177,7 +180,9 @@ async function fetchJson<T>(request: { path: string; method?: string; body?: unk
           throw new Error('This server does not support browser terminals')
         }
 
-        throw new Error(`Terminal service returned a non-JSON response (HTTP ${res.status}); browser terminals may not be supported on this server`)
+        throw new Error(
+          `Terminal service returned a non-JSON response (HTTP ${res.status}); browser terminals may not be supported on this server`
+        )
       }
 
       throw error
@@ -421,7 +426,10 @@ function installWebShim(): void {
         const terminalConfig = resolveConfig()
         const { baseUrl } = buildUrls(terminalConfig)
 
-        if ((terminalConfig.apiBase && !terminalConfig.apiBase.startsWith('/')) || new URL(baseUrl).origin !== window.location.origin) {
+        if (
+          (terminalConfig.apiBase && !terminalConfig.apiBase.startsWith('/')) ||
+          new URL(baseUrl).origin !== window.location.origin
+        ) {
           throw new Error('Browser terminal requests must stay on this server')
         }
 
@@ -470,9 +478,8 @@ function installWebShim(): void {
     }
   }
 
-   
   ;(window as any).hermesDesktop = bridge
-   
+
   ;(window as any).__HERMES_WEB_CLIENT__ = true
 }
 

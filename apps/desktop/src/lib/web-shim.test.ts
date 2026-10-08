@@ -85,7 +85,10 @@ describe('hosted web connection routing', () => {
 
   it('openAdminPanel reports whether the browser allowed the new tab', async () => {
     await import('./web-shim')
-    const open = vi.spyOn(window, 'open').mockReturnValueOnce({} as Window).mockReturnValueOnce(null)
+    const open = vi
+      .spyOn(window, 'open')
+      .mockReturnValueOnce({} as Window)
+      .mockReturnValueOnce(null)
 
     expect(bridge().openAdminPanel()).toBe(true)
     expect(bridge().openAdminPanel()).toBe(false)

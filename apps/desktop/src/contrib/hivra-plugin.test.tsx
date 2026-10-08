@@ -123,7 +123,7 @@ describe('hivra plugin', () => {
     expect(skinPref.stored('default')).toBe('mono')
   })
 
-  it('leaves the color mode on upstream\'s system default', () => {
+  it("leaves the color mode on upstream's system default", () => {
     setWebClient(true)
     const unload = load()
 
@@ -183,7 +183,10 @@ describe('hivra plugin', () => {
 
 describe('Admin Panel page', () => {
   const setActivation = (isActive: boolean | undefined) =>
-    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: isActive === undefined ? undefined : { isActive } })
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: isActive === undefined ? undefined : { isActive }
+    })
 
   const bridge = (open: () => boolean) => {
     ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
@@ -244,7 +247,10 @@ describe('dashboard bridge', () => {
   const framed = (): Window => ({ parent, location: { search: '' } }) as unknown as Window
 
   const appearance = (colorScheme: unknown, source: unknown = parent, from = 'hermes-dashboard') =>
-    ({ data: { appearance: { colorScheme }, source: from, type: DASHBOARD_APPEARANCE_MESSAGE_TYPE }, source }) as MessageEvent
+    ({
+      data: { appearance: { colorScheme }, source: from, type: DASHBOARD_APPEARANCE_MESSAGE_TYPE },
+      source
+    }) as MessageEvent
 
   const send = (text: unknown, source: unknown = parent, from = 'hermes-dashboard') =>
     ({ data: { source: from, text, type: DASHBOARD_SEND_MESSAGE_TYPE }, source }) as MessageEvent

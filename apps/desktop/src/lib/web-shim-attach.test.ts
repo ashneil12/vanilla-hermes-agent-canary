@@ -62,7 +62,10 @@ describe('web shim + Desktop remote attach', () => {
     const requestGateway = vi.fn(async () => ({}) as never)
 
     await expect(
-      uploadComposerAttachment({ id: 'file:big', kind: 'file', label: 'huge.bin', path }, { remote: true, requestGateway, sessionId: 'sess-1' })
+      uploadComposerAttachment(
+        { id: 'file:big', kind: 'file', label: 'huge.bin', path },
+        { remote: true, requestGateway, sessionId: 'sess-1' }
+      )
     ).rejects.toThrow(/huge\.bin.*too large to upload to the remote gateway \(max 50 MB\)/)
     expect(requestGateway).not.toHaveBeenCalled()
   })

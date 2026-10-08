@@ -330,9 +330,7 @@ function ModelResults({
   // config.yaml and bricks new sessions at agent init ("no API key was found").
   const configured = providers.filter(
     p =>
-      (p.models ?? []).length > 0 &&
-      p.authenticated !== false &&
-      (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
+      (p.models ?? []).length > 0 && p.authenticated !== false && (localModelsShown || p.slug !== LOCAL_PROVIDER_SLUG)
   )
 
   // In-flight local downloads render as disabled progress rows: inside the

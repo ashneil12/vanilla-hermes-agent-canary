@@ -134,7 +134,12 @@ function declaredKeys(): { optional: string[]; required: string[] } {
   const required: string[] = []
 
   const visit = (node: ts.Node) => {
-    if (ts.isPropertySignature(node) && node.name.getText() === 'hermesDesktop' && node.type && ts.isTypeLiteralNode(node.type)) {
+    if (
+      ts.isPropertySignature(node) &&
+      node.name.getText() === 'hermesDesktop' &&
+      node.type &&
+      ts.isTypeLiteralNode(node.type)
+    ) {
       for (const member of node.type.members) {
         if (member.name) {
           ;(member.questionToken ? optional : required).push(member.name.getText())
@@ -201,7 +206,11 @@ function unguardedUseSites(keys: Set<string>): string[] {
     const source = parse(file)
 
     const visit = (node: ts.Node) => {
-      if (ts.isPropertyAccessExpression(node) && keys.has(node.name.text) && bridgeReceiver(node.expression.getText())) {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        keys.has(node.name.text) &&
+        bridgeReceiver(node.expression.getText())
+      ) {
         const parent = node.parent
 
         const callsIt = ts.isCallExpression(parent) && parent.expression === node && !parent.questionDotToken
@@ -266,12 +275,16 @@ describe('hosted-web bridge drift guard', () => {
 
   it('every acknowledged-absent key that is called without `?.` has been reviewed as guarded', () => {
     const sites = unguardedUseSites(new Set(ACKNOWLEDGED_ABSENT))
-    const fresh = [...new Set(sites.map(site => site.split('@')[0]))].filter(key => !REVIEWED_UNGUARDED_KEYS.includes(key))
+    const fresh = [...new Set(sites.map(site => site.split('@')[0]))].filter(
+      key => !REVIEWED_UNGUARDED_KEYS.includes(key)
+    )
 
     // A new key here means upstream started calling an absent key without `?.`. Read the sites
     // below: if a guard precedes them add the key to REVIEWED_UNGUARDED_KEYS; if not, implement the
     // key in web-shim.ts.
-    expect(fresh, `unreviewed keys, sites: ${sites.filter(s => fresh.includes(s.split('@')[0])).join(', ')}`).toEqual([])
+    expect(fresh, `unreviewed keys, sites: ${sites.filter(s => fresh.includes(s.split('@')[0])).join(', ')}`).toEqual(
+      []
+    )
   })
 
   it('keeps the reviewed-key list honest (every entry is still an acknowledged-absent key)', () => {
