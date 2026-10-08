@@ -188,8 +188,12 @@ jobs:
             # do not exist for this account, so those jobs would queue forever), generated
             # skill docs, and contributor mappings for upstream authors.
             python3 scripts/ci/fork_runner_labels.py
-            python3 -m pip install -q pyyaml
-            python3 website/scripts/generate-skill-docs.py >/dev/null
+            # The docs generator imports the repo's own hermes_yaml (ruamel.yaml) since upstream
+            # 2026-10; failing soft here still opens the PR, and the Docs Site check then tells
+            # a human exactly what is stale instead of the whole sync dying.
+            python3 -m pip install -q pyyaml ruamel.yaml
+            python3 website/scripts/generate-skill-docs.py >/dev/null \
+              || echo "::warning::generate-skill-docs.py failed; the Docs Site check will flag stale pages"
             GH_TOKEN="${{ github.token }}" python3 scripts/ci/map_upstream_contributors.py --base origin/main
             git add -A
             if ! git diff --cached --quiet; then
