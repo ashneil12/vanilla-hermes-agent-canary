@@ -56,7 +56,7 @@ echo "" >&2
 
 # Step 1: Create registration file
 echo "Step 1/3: Creating registration file..." >&2
-REG_FILE=$("$SCRIPT_DIR/create-registration.sh" /tmp/agent-registration-$$.json)
+REG_FILE=$("$SCRIPT_DIR/create-registration.sh" ${TMPDIR:-/tmp}/agent-registration-$$.json)
 echo "" >&2
 
 # Step 2: Upload to IPFS

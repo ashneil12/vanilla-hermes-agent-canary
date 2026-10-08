@@ -1,0 +1,287 @@
+name: Docker Build Immutable
+
+# Builds ONE immutable image for a ref and proves it. It never creates or moves a
+# floating tag: no :stable, no :latest. Moving those is docker-publish.yml, which is
+# manual and owner-approved. tests/test_upstream_sync_workflows.py fails if a floating
+# tag ever appears in this file.
+#
+# Tags pushed (never deleted, never re-pointed):
+#   ghcr.io/<repo>:<upstream_tag>-<sha7>   e.g. v2026.9.24-a1b2c3d
+#   ghcr.io/<repo>:<sha>                    the full 40-char fork commit
+# Labels set on the image:
+#   org.opencontainers.image.revision   fork commit sha
+#   org.opencontainers.image.version    hermes-agent version (pyproject)
+#   io.hermesos.upstream-tag            upstream release tag the tree contains
+#
+# One build is tested and the SAME image is pushed (no second build that could differ).
+# After the push the digest is pulled back from the registry and re-checked.
+
+on:
+  # Manual proof build of an exact commit: push it to a branch named proof/<upstream tag>,
+  # e.g. `git push canary <sha>:refs/heads/proof/v2026.9.24`. The build uses that commit and
+  # takes the upstream tag from the branch name. Needed because a new workflow file cannot be
+  # dispatched until it is on main.
+  push:
+    branches: ["proof/v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit to build (must contain the upstream tag)"
+        required: true
+        type: string
+      upstream_tag:
+        description: "Upstream release tag the ref contains, e.g. v2026.9.24"
+        required: true
+        type: string
+      push:
+        description: "Push the immutable tags (false = build and test only)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      upstream_tag:
+        required: true
+        type: string
+      push:
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      image_tag:
+        value: ${{ jobs.build.outputs.image_tag }}
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+      version:
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-immutable-${{ inputs.ref || github.sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    if: github.repository == 'ashneil12/vanilla-hermes-agent-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      digest: ${{ steps.pushed.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    env:
+      REF_INPUT: ${{ inputs.ref || github.sha }}
+      UPSTREAM_TAG: ${{ inputs.upstream_tag || (startsWith(github.ref_name, 'proof/') && github.ref_name || '') }}
+      DO_PUSH: ${{ github.event_name == 'push' && 'true' || inputs.push }}
+    steps:
+      - name: Validate inputs
+        run: |
+          UPSTREAM_TAG="${UPSTREAM_TAG#proof/}"
+          echo "UPSTREAM_TAG=$UPSTREAM_TAG" >> "$GITHUB_ENV"
+          case "$UPSTREAM_TAG" in
+            v[0-9][0-9][0-9][0-9].*) ;;
+            *) echo "::error::upstream_tag must look like v2026.9.24, got '$UPSTREAM_TAG'"; exit 1 ;;
+          esac
+          case "$UPSTREAM_TAG" in *[!A-Za-z0-9.-]*) echo "::error::odd upstream_tag"; exit 1 ;; esac
+
+      - name: Checkout the ref
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ env.REF_INPUT }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Resolve sha, expected version and check the tag is really inside the ref
+        id: meta
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          short=${sha:0:7}
+          git fetch --no-tags https://github.com/NousResearch/hermes-agent.git "+refs/tags/${UPSTREAM_TAG}:refs/upstream-tag/${UPSTREAM_TAG}"
+          tag_sha=$(git rev-parse "refs/upstream-tag/${UPSTREAM_TAG}^{commit}")
+          if ! git merge-base --is-ancestor "$tag_sha" "$sha"; then
+            echo "::error::${UPSTREAM_TAG} (${tag_sha}) is not an ancestor of ${sha}; refusing to label this build with it"
+            exit 1
+          fi
+          pyver() { python3 -c 'import sys,tomllib;print(tomllib.load(sys.stdin.buffer)["project"]["version"])'; }
+          tag_version=$(git show "${tag_sha}:pyproject.toml" | pyver)
+          version=$(pyver < pyproject.toml)
+          if [ "$tag_version" != "$version" ]; then
+            echo "::error::pyproject version ${version} differs from ${UPSTREAM_TAG}'s ${tag_version}"
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "short=$short"
+            echo "version=$version"
+            echo "image_tag=${UPSTREAM_TAG}-${short}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${UPSTREAM_TAG}-${short} (hermes-agent ${version}) from ${sha}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build image (amd64, loaded for testing)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}:test
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            io.hermesos.upstream-tag=${{ env.UPSTREAM_TAG }}
+          build-args: |
+            HERMES_GIT_SHA=${{ steps.meta.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test image starts
+        run: |
+          mkdir -p /tmp/hermes-test
+          sudo chown -R 10000:10000 /tmp/hermes-test
+          docker run --rm -v /tmp/hermes-test:/opt/data "$IMAGE:test" --help
+
+      - name: Test packaged Hermes version equals the source and the upstream tag
+        env:
+          EXPECTED: ${{ steps.meta.outputs.version }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          docker run --rm -e EXPECTED -e SHA \
+            --entrypoint /opt/hermes/.venv/bin/python "$IMAGE:test" -c '
+          import json, os, tomllib
+          from importlib.metadata import version
+          with open("/opt/hermes/pyproject.toml", "rb") as f:
+              src = tomllib.load(f)["project"]["version"]
+          installed = version("hermes-agent")
+          expected = os.environ["EXPECTED"]
+          prov = json.load(open("/etc/hermes/image-provenance.json"))
+          prov_version = prov.get("version")
+          prov_revision = prov.get("revision")
+          problems = []
+          if installed != expected:
+              problems.append("installed=%s expected=%s" % (installed, expected))
+          if src != expected:
+              problems.append("source=%s expected=%s" % (src, expected))
+          if prov_version != expected:
+              problems.append("provenance.version=%s" % prov_version)
+          if prov_revision != os.environ["SHA"]:
+              problems.append("provenance.revision=%s" % prov_revision)
+          if problems:
+              raise SystemExit("Hermes version proof FAILED: " + "; ".join(problems))
+          print(f"Hermes package metadata matches: installed={installed} source={src} expected={expected}")
+          '
+
+      - name: Test dashboard subcommand
+        run: |
+          mkdir -p /tmp/hermes-test
+          sudo chown -R 10000:10000 /tmp/hermes-test
+          docker run --rm -v /tmp/hermes-test:/opt/data "$IMAGE:test" dashboard --help
+
+      # Fork seam guard: the media/Venice tool wiring must be intact in the built image.
+      # tests/ is excluded from the build context (.dockerignore, upstream's choice), so
+      # mount the checkout's tests read-only instead of baking them in.
+      - name: Media tool wiring regression gate
+        run: |
+          docker run --rm --entrypoint sh \
+            -v "$PWD/tests:/opt/hermes/tests:ro" \
+            "$IMAGE:test" \
+            -lc 'cd /opt/hermes && /usr/local/bin/uv pip install --python /opt/hermes/.venv/bin/python3 -q pytest pytest-timeout && /opt/hermes/.venv/bin/python3 -m pytest -p no:cacheprovider tests/tools/test_media_generation_wiring.py -q'
+
+      - name: Gateway lock PID namespace regression gate
+        timeout-minutes: 5
+        run: |
+          if [ -f scripts/ci/gateway_lock_regression.py ]; then
+            python3 -I -B scripts/ci/gateway_lock_regression.py \
+              "$IMAGE:test" "$GITHUB_SHA" \
+              --capacity-and-idle-preflight-confirmed
+          else
+            echo "scripts/ci/gateway_lock_regression.py not present on this ref; gate not applicable."
+          fi
+
+      - name: Refuse to overwrite an existing immutable tag
+        if: env.DO_PUSH == 'true'
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for t in "$IMAGE_TAG" "$SHA"; do
+            if existing=$(docker buildx imagetools inspect "${IMAGE}:${t}" --format '{{ json (index .Image "linux/amd64") }}' 2>/dev/null) && [ -n "$existing" ]; then
+              rev=$(printf '%s' "$existing" | jq -r '.config.Labels."org.opencontainers.image.revision" // ""')
+              if [ "$rev" != "$SHA" ]; then
+                echo "::error::${IMAGE}:${t} already exists with revision '${rev}'; immutable tags are never re-pointed"
+                exit 1
+              fi
+              echo "${IMAGE}:${t} already exists at this revision."
+            fi
+          done
+
+      - name: Log in to GitHub Container Registry
+        if: env.DO_PUSH == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the tested image under the immutable tags
+        id: pushed
+        if: env.DO_PUSH == 'true'
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker tag "$IMAGE:test" "${IMAGE}:${IMAGE_TAG}"
+          docker tag "$IMAGE:test" "${IMAGE}:${SHA}"
+          docker push "${IMAGE}:${IMAGE_TAG}"
+          docker push "${IMAGE}:${SHA}"
+          digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE}:${IMAGE_TAG}" | sed 's/.*@//')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # Pull back from the registry by digest (not from the local layer cache) and re-prove.
+      - name: Registry proof (labels, installed version, tag == digest)
+        if: env.DO_PUSH == 'true'
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          DIGEST: ${{ steps.pushed.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker image rm -f "${IMAGE}:${IMAGE_TAG}" "${IMAGE}:${SHA}" "$IMAGE:test" >/dev/null
+          docker pull -q "${IMAGE}@${DIGEST}"
+          labels=$(docker image inspect "${IMAGE}@${DIGEST}" --format '{{ json .Config.Labels }}')
+          rev=$(printf '%s' "$labels" | jq -r '."org.opencontainers.image.revision"')
+          ver=$(printf '%s' "$labels" | jq -r '."org.opencontainers.image.version"')
+          [ "$rev" = "$SHA" ] || { echo "::error::revision label ${rev} != ${SHA}"; exit 1; }
+          [ "$ver" = "$VERSION" ] || { echo "::error::version label ${ver} != ${VERSION}"; exit 1; }
+          installed=$(docker run --rm --entrypoint /opt/hermes/.venv/bin/python "${IMAGE}@${DIGEST}" -c 'from importlib.metadata import version; print(version("hermes-agent"))')
+          [ "$installed" = "$VERSION" ] || { echo "::error::installed ${installed} != ${VERSION}"; exit 1; }
+          for t in "$IMAGE_TAG" "$SHA"; do
+            tag_digest=$(docker buildx imagetools inspect "${IMAGE}:${t}" --format '{{ json .Manifest.Digest }}' | tr -d '"')
+            [ "$tag_digest" = "$DIGEST" ] || { echo "::error::${t} points at ${tag_digest}, expected ${DIGEST}"; exit 1; }
+          done
+          {
+            echo "### Immutable image published"
+            echo ""
+            echo "- tag: \`${IMAGE}:${IMAGE_TAG}\`"
+            echo "- also: \`${IMAGE}:${SHA}\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo "- hermes-agent: \`${installed}\` (revision label \`${rev}\`, version label \`${ver}\`)"
+            echo "- floating tags were not touched"
+          } >> "$GITHUB_STEP_SUMMARY"

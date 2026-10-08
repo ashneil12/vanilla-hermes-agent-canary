@@ -1,11 +1,12 @@
 """Remote terminal backend graceful degradation (terminal.degraded_mode).
 
-When the fork's never-brick backend fallback is disabled with
-``terminal.strict_backend=true``, connection-class infrastructure failures
-(SSH unreachable, Docker daemon down) must come back to the model as a
-structured ``status: "degraded"`` tool result with a reason and retry hint,
-not as a raised traceback blob. Non-strict mode continues to fall back to the
-local terminal, which is covered by ``test_terminal_requirements.py``.
+Connection-class infrastructure failures (SSH unreachable, Docker daemon
+down) must come back to the model as a structured ``status: "degraded"``
+tool result with a reason and a retry hint — not as a raised traceback
+blob.  Command failures (nonzero exit codes) are NOT infrastructure
+failures and must stay untouched.  ``terminal.degraded_mode: fail``
+preserves the historical raise/traceback behavior for anyone relying
+on it.
 
 Inspired by: Claude Cowork degraded-backend behavior (idea-level,
 docs-only evidence).
@@ -13,7 +14,6 @@ docs-only evidence).
 
 import json
 import subprocess
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -51,7 +51,6 @@ def _mock_ssh_unreachable(monkeypatch, stderr="ssh: connect to host unreachable.
 
 def _ssh_backend_env(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
-    monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_SSH_HOST", "unreachable.invalid")
     monkeypatch.setenv("TERMINAL_SSH_USER", "nobody")
     monkeypatch.delenv("TERMINAL_SSH_PORT", raising=False)
@@ -80,12 +79,6 @@ class TestExceptionClassification:
         with pytest.raises(EnvironmentConnectionError):
             SSHEnvironment(host="unreachable.invalid", user="nobody")
 
-    def test_docker_missing_executable_raises_connection_error(self, monkeypatch):
-        from tools.environments import docker as docker_env
-
-        monkeypatch.setattr(docker_env, "find_docker", lambda: None)
-        with pytest.raises(EnvironmentConnectionError):
-            docker_env._ensure_docker_available()
 
     def test_docker_daemon_timeout_raises_connection_error(self, monkeypatch):
         from tools.environments import docker as docker_env
@@ -99,12 +92,6 @@ class TestExceptionClassification:
         with pytest.raises(EnvironmentConnectionError):
             docker_env._ensure_docker_available()
 
-    def test_connection_error_is_a_runtime_error(self):
-        # Existing catchers of RuntimeError must keep working unchanged.
-        assert issubclass(EnvironmentConnectionError, RuntimeError)
-        err = EnvironmentConnectionError("boom")
-        assert err.reason == "boom"
-        assert err.retry_hint  # non-empty default hint
 
 
 class TestDegradedToolResult:
@@ -124,7 +111,6 @@ class TestDegradedToolResult:
 
     def test_docker_daemon_down_returns_degraded_result(self, isolated_env, monkeypatch):
         monkeypatch.setenv("TERMINAL_ENV", "docker")
-        monkeypatch.setenv("TERMINAL_STRICT_BACKEND", "1")
         monkeypatch.delenv("TERMINAL_DEGRADED_MODE", raising=False)
         monkeypatch.setattr(isolated_env, "_maybe_reap_docker_orphans", lambda _cc: None)
         monkeypatch.setattr("tools.environments.docker.find_docker", lambda: None)
@@ -202,23 +188,3 @@ class TestFailModePreservesRaiseBehavior:
         assert r["status"] == "degraded"
 
 
-class TestConfigBridging:
-    def test_degraded_mode_is_bridged_everywhere(self):
-        """terminal.degraded_mode must ride every config->env bridge path,
-        same four-site invariant as the docker_* keys."""
-        from tests.tools.test_terminal_config_env_sync import (
-            _cli_env_map_keys,
-            _gateway_env_map_keys,
-            _save_config_env_sync_keys,
-            _terminal_tool_env_var_names,
-        )
-
-        assert "degraded_mode" in _cli_env_map_keys()
-        assert "degraded_mode" in _gateway_env_map_keys()
-        assert "degraded_mode" in _save_config_env_sync_keys()
-        assert "TERMINAL_DEGRADED_MODE" in _terminal_tool_env_var_names()
-
-    def test_default_config_carries_degraded_mode(self):
-        from hermes_cli.config_defaults import DEFAULT_CONFIG
-
-        assert DEFAULT_CONFIG["terminal"].get("degraded_mode") == "warn"

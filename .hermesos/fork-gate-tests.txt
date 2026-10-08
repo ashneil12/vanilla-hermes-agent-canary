@@ -1,0 +1,21 @@
+# Tests the fork gate (.github/workflows/fork-gate.yml) runs on every PR. One path per line.
+# Add the test for every new fork seam here. Upstream's own suite is not part of this list:
+# it is tuned for 96-core runners and times out on standard ones (see .hermesos notes).
+tests/test_upstream_sync_workflows.py
+tests/test_docker_publish_version_cache.py
+tests/scripts/test_fork_runner_labels.py
+tests/scripts/test_map_upstream_contributors.py
+tests/scripts/test_gateway_lock_regression.py
+tests/gateway/test_runtime_governor.py
+tests/cron/test_runtime_governor.py
+tests/gateway/test_status.py
+tests/hermes_cli/test_fork_bankr.py
+tests/hermes_cli/test_fork_core_seams.py
+tests/hermes_cli/test_fork_providers.py
+tests/hermes_cli/test_web_server_fork_hivra.py
+tests/test_hermes_fork_home.py
+tests/tools/test_media_generation_wiring.py
+tests/tools/test_video_image_input.py
+tests/tools/test_image_edit_managed_upload.py
+tests/tools/test_image_edit_model_resolution.py
+tests/plugins/video_gen/test_venice_plugin.py

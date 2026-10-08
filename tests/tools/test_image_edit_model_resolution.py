@@ -4,7 +4,7 @@ Venice's /image/edit default (firered-image-edit) is a weak editor that drifts
 from the source. These tests lock in that edits instead use a strong model
 matched to the user's generation model, that "auto" aspect ratio is omitted
 (preserve the source frame; some models 400 on literal "auto"), and that
-image_generate with reference_images routes to the edit path.
+image_generate source images route to the edit path (via the Venice plugin).
 """
 
 import os
@@ -90,31 +90,36 @@ class TestEditAspectRatio:
 
 
 class TestGenerateWithReference:
-    """image_generate with reference_images routes to the edit path."""
+    """image_generate source images (image_url / reference_image_urls) route to the Venice edit
+    path through the Venice image plugin's capabilities (hermes-fork: no edit in tools/image_generation_tool.py)."""
 
-    def test_single_reference_calls_image_edit(self, monkeypatch):
-        import tools.image_generation_tool as ig
+    def _provider(self, monkeypatch):
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        from plugins.image_gen.venice import VeniceImageGenProvider
 
+        return VeniceImageGenProvider()
+
+    def test_single_image_url_calls_image_edit(self, monkeypatch):
         calls = {}
 
         def fake_edit(image, prompt, aspect_ratio="auto", **kw):
             calls["edit"] = {"image": image, "prompt": prompt, "aspect_ratio": aspect_ratio}
-            return '{"success": true, "image": "/e.png"}'
+            return '{"success": true, "image": "/e.png", "model": "nano-banana-2-edit"}'
 
         monkeypatch.setattr(ie, "image_edit_tool", fake_edit)
-        out = ig._handle_image_generate(
-            {"prompt": "make it night", "reference_images": ["/prior.png"], "aspect_ratio": "landscape"}
-        )
-        assert calls.get("edit") == {
-            "image": "/prior.png",
-            "prompt": "make it night",
-            "aspect_ratio": "16:9",
-        }
-        assert "success" in out
+        out = self._provider(monkeypatch).generate(
+            "make it night", aspect_ratio="landscape", image_url="/prior.png")
+        assert calls["edit"] == {"image": "/prior.png", "prompt": "make it night", "aspect_ratio": "16:9"}
+        assert out["success"] is True and out["image"] == "/e.png" and out["provider"] == "venice"
+        assert "video_generate" in out["hint"]  # chaining hint for local results
 
-    def test_multiple_references_call_compose(self, monkeypatch):
-        import tools.image_generation_tool as ig
+    def test_http_result_carries_no_local_path_hint(self, monkeypatch):
+        monkeypatch.setattr(ie, "image_edit_tool",
+                            lambda **kw: '{"success": true, "image": "https://cdn/x.png"}')
+        out = self._provider(monkeypatch).generate("p", image_url="https://x/y.png")
+        assert "hint" not in out
 
+    def test_image_url_plus_references_call_compose(self, monkeypatch):
         calls = {}
 
         def fake_compose(images, prompt, aspect_ratio="auto", **kw):
@@ -122,23 +127,53 @@ class TestGenerateWithReference:
             return '{"success": true, "image": "/c.png"}'
 
         monkeypatch.setattr(ie, "image_compose_tool", fake_compose)
-        ig._handle_image_generate(
-            {"prompt": "merge", "reference_images": ["/a.png", "/b.png"], "aspect_ratio": "portrait"}
-        )
-        assert calls["compose"]["images"] == ["/a.png", "/b.png"]
+        out = self._provider(monkeypatch).generate(
+            "merge", aspect_ratio="portrait", image_url="/a.png", reference_image_urls=["/b.png", "/c.png", "/d.png"])
+        assert calls["compose"]["images"] == ["/a.png", "/b.png", "/c.png"]  # capped at 3
         assert calls["compose"]["aspect_ratio"] == "9:16"
+        assert out["success"] is True
 
-    def test_no_reference_does_not_route_to_edit(self, monkeypatch):
-        import tools.image_generation_tool as ig
+    def test_edit_failure_is_error_envelope(self, monkeypatch):
+        monkeypatch.setattr(ie, "image_edit_tool", lambda **kw: json.dumps(
+            {"success": False, "image": None, "error": "bad input", "error_type": "bad_input"}))
+        out = self._provider(monkeypatch).generate("p", image_url="/x.png")
+        assert out["success"] is False and out["error_type"] == "bad_input" and out["error"] == "bad input"
 
-        # No reference → must NOT call edit; falls through to normal dispatch.
+    def test_no_source_does_not_route_to_edit(self, monkeypatch):
+        import requests
+
         def boom(*a, **k):
-            raise AssertionError("should not edit without a reference")
+            raise AssertionError("should not edit without a source image")
 
         monkeypatch.setattr(ie, "image_edit_tool", boom)
-        monkeypatch.setattr(ig, "_dispatch_to_plugin_provider", lambda prompt, ar, **kw: '{"success": true, "image": "/g.png"}')
-        out = ig._handle_image_generate({"prompt": "a cat"})
-        assert "success" in out
+        monkeypatch.setattr(ie, "image_compose_tool", boom)
+        seen = {}
+
+        class _R:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"images": ["aGk="]}
+
+        monkeypatch.setattr(requests, "post", lambda url, **kw: seen.update(url=url) or _R())
+        monkeypatch.setattr("plugins.image_gen.venice.save_b64_image", lambda b64, prefix="": "/tmp/g.png")
+        out = self._provider(monkeypatch).generate("a cat")
+        assert seen["url"].endswith("/image/generate") and out["success"] is True
+
+    def test_capabilities_advertise_image_modality(self, monkeypatch):
+        caps = self._provider(monkeypatch).capabilities()
+        assert "image" in caps["modalities"] and caps["max_reference_images"] == 2
+
+    def test_active_dynamic_schema_exposes_edit_params_on_venice_box(self, monkeypatch):
+        """Upstream's capability-driven schema now advertises image_url/reference_image_urls for Venice."""
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        import tools.image_generation_tool as ig
+
+        props = ig._build_dynamic_image_schema()["parameters"]["properties"]
+        assert {"image_url", "reference_image_urls"} <= set(props)
 
 
 class TestImageEditRegistryDispatch:

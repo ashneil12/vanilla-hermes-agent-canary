@@ -1,3 +1,28 @@
+# hermes-fork: hivra-web-build
+# ── Hivra web bundles (self-contained throwaway stage; lives FIRST in the file so an
+# upstream restructure of the later stages cannot conflict with it) ─────────────────────
+# Builds, from the build context, the two static bundles the box's Caddy serves:
+#   /out/webchat_dist   apps/desktop (the Desktop renderer + browser bridge,
+#                       apps/desktop/src/lib/web-shim.ts) built with --base=/webchat/. The base
+#                       is required: Caddy serves it at /webchat and at `/`, and relative asset
+#                       URLs would resolve to /assets/* (the dashboard's bundle) at `/`.
+#   /out/web_dist_dash  the dashboard SPA built a SECOND time with --base=/dash/ (the default
+#                       base=/ build is the backend's hermes_cli/web_dist). Base-/ assets are
+#                       absolute (/assets/*) and 404 under /dash, and a relative base breaks SPA
+#                       deep routes. inject-dash-bootstrap.cjs splices a <head> script that
+#                       supplies __HERMES_BASE_PATH__ and the session token from #iframe_token.
+# The full bookworm image carries the toolchain node-pty needs. Only the static output is copied
+# into the runtime (see the COPY in the runtime stage), none of the ~1GB of node_modules.
+FROM node:26-bookworm@sha256:e6cfc3514df35d1cb534e83f9279a242ad6e578692ab7b56d73dadcc7c4354a0 AS hivra_web_build
+WORKDIR /build
+COPY . .
+RUN npm install --no-audit --no-fund
+RUN cd apps/desktop && npx vite build --base=/webchat/ --outDir /out/webchat_dist --emptyOutDir
+RUN cd web && \
+    npx vite build --base=/dash/ --outDir /out/web_dist_dash --emptyOutDir && \
+    node inject-dash-bootstrap.cjs /out/web_dist_dash/index.html
+# hermes-fork: end hivra-web-build
+
 # Debian 13 still ships SQLite 3.46.1, which contains the upstream WAL-reset
 # corruption bug. Build a pinned shared library for the runtime image instead
 # of relying on a distro backport that trixie does not currently provide.
@@ -49,20 +74,6 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # 2.41) runtime.  Bumping to a new Node major is a one-line ARG change; see
 # #4977.
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
-
-# ── HermesOS web rich-chat bundle (throwaway builder stage) ─────────────────
-# Builds apps/desktop into the static /webchat bundle. The full node:22-bookworm
-# image carries the build-essential + python toolchain node-pty needs. Only the
-# ~21MB static dist is copied into the runtime below — none of the ~1GB of
-# node_modules / toolchain reaches the shipped image, so in-place fleet rolls
-# stay light (this is what fixes the heavy-image VM wedge).
-FROM node:26-bookworm AS webchat_build
-WORKDIR /build
-COPY . .
-RUN npm install --no-audit --no-fund \
- && cd apps/desktop \
- && npx vite build --base=/webchat/ --outDir /webchat_dist --emptyOutDir
-
 FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately.
@@ -87,16 +98,24 @@ RUN apt-get -o Acquire::Retries=3 update && \
     ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI (gh) — useful for general GitHub work by the agent. (The aeon skill
-# itself is gh-free/curl, but gh is good to have available.) Multi-arch via the
-# official apt repo.
-RUN install -d -m 0755 /etc/apt/keyrings && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
-    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gh && \
-    rm -rf /var/lib/apt/lists/*
+# Bot Screen (opt-in): PACKAGES["apt"] from tools/bot_desktop/runtime.py plus apt
+# `chromium` for the dock's Browser icon. ~930 MB apt on debian:13.4 (~1.4 GB of
+# image once the gated headed Chromium below is counted); nothing starts
+# at boot. docker.yml builds both variants and publishes these packages under
+# the `-desktop` tags: hosted sandboxes pull a prebuilt image and never run a
+# build, and cannot apt at run time either (unprivileged, no sudo). Only this
+# build step needs root —
+# Xvnc is a userspace X server, so the runtime user can drive it.
+#   docker build --build-arg HERMES_BOT_DESKTOP=1 .
+ARG HERMES_BOT_DESKTOP=0
+RUN if [ "$HERMES_BOT_DESKTOP" = "1" ]; then \
+        apt-get -o Acquire::Retries=3 update && \
+        DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        tigervnc-standalone-server xfce4-panel xfwm4 xfdesktop4 xfce4-settings xfce4-terminal \
+        dbus-x11 x11-xserver-utils x11-utils x11-xkb-utils xauth fonts-dejavu-core chromium && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Prefer the fixed SQLite over Debian's vulnerable libsqlite3.so.0. Keep the
 # public library name stable so both the system interpreter and the uv-created
 # venv resolve the replacement without changing Python import paths.
@@ -220,12 +239,24 @@ COPY apps/shared/ apps/shared/
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
 
+# chrome-headless-shell: what the browser tool has always driven headlessly.
+# Smaller, no window code paths. --with-deps pulls the shared system libraries.
 RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
     for i in 1 2 3; do \
         npx playwright install --with-deps chromium --only-shell && break || \
-        { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+        { [ "$i" = 3 ] && exit 1; echo "playwright headless-shell install failed (attempt $i); retrying in 10s"; sleep 10; }; \
     done && \
     npm cache clean --force
+
+# chrome-headless-shell cannot open a window, so the dock's Browser icon needs the
+# full build. Same Chromium family as the shell, so agent and human share one
+# --user-data-dir. Gated: a build with no desktop has nothing to show it on.
+RUN if [ "$HERMES_BOT_DESKTOP" = "1" ]; then \
+        for i in 1 2 3; do \
+            npx playwright install chromium && break || \
+            { [ "$i" = 3 ] && exit 1; echo "playwright chromium install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+        done; \
+    fi
 
 # ---------- Photon iMessage sidecar deps (baked, NS-606) ----------
 # The photon plugin's Node sidecar needs its own node_modules
@@ -271,12 +302,10 @@ RUN cd plugins/platforms/photon/sidecar && \
 # Health export is enabled. Collector and observability-backend dependencies
 # remain external and are not part of the Hermes production image.
 #
-# The hindsight memory provider's client (hindsight-client) is baked in
-# for the same reason: it lazy-installs into /opt/hermes/.venv at first
-# use, which lives inside the (immutable) image layer rather than the
-# mounted /opt/data volume, so it is lost on every container recreate /
-# image update and recall/retain then fails with
-# `ModuleNotFoundError: No module named 'hindsight_client'` (#38128).
+# Catalog memory plugins (e.g. hindsight, since it left the tree) are not
+# baked in: their pip dependencies install at plugin-install time through
+# tools/lazy_deps.py into HERMES_LAZY_INSTALL_TARGET (the durable /opt/data
+# volume, see below), so they survive container recreates (#38128).
 #
 # The Matrix gateway's deps ([matrix] extra) are baked in because
 # python-olm (transitive via mautrix[encryption]) builds from source on
@@ -285,10 +314,15 @@ RUN cd plugins/platforms/photon/sidecar && \
 # avoids the cross-platform failures that kept [matrix] out of [all]
 # while still making Matrix work in the published container. Fixes #30399.
 #
+# Google Chat's [google-chat] extra (google-cloud-pubsub + Chat API clients)
+# is baked so hosted/immutable images can enable the adapter without writing
+# the sealed venv. Runtime --install-deps still routes through lazy_deps into
+# HERMES_LAZY_INSTALL_TARGET when the extra is not present.
+#
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra matrix --extra google-chat
 
 # ---------- Frontend build (cached independently from Python source) ----------
 # Copy only the frontend source trees first so that Python-only changes don't
@@ -298,6 +332,44 @@ COPY ui-tui/ ui-tui/
 COPY apps/shared/ apps/shared/
 RUN cd web && npm run build && \
     cd ../ui-tui && npm run build
+
+# ---------- Bot Screen X socket directory ----------
+# Xvnc would create this itself (/tmp is 1777); pre-creating it keeps ownership
+# deterministic when HERMES_UID is remapped between boots.
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# XDG_RUNTIME_DIR (set below) sits under a predictable name in world-writable /tmp.
+# Shipping it root-owned means stage2 finds a directory it trusts and chowns it.
+RUN mkdir -p /tmp/hermes-runtime && chmod 0700 /tmp/hermes-runtime
+
+# hermes-fork: gh-cli
+# GitHub CLI for agents doing GitHub work (the aeon skill itself only needs curl).
+# Kept as its own layer, before the source copy so it stays cached across code changes.
+RUN install -d -m 0755 /etc/apt/keyrings && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/*
+
+# hermes-fork: hivra-web-build (copy half)
+# The static bundles from the stage at the top of this file -> hermes_cli/webchat_dist and
+# hermes_cli/web_dist_dash. The box's Caddy extracts and serves them; the dashboard does not.
+COPY --chown=hermes:hermes --from=hivra_web_build /out/ /opt/hermes/hermes_cli/
+# hermes-fork: end hivra-web-build (copy half)
+
+# hermes-fork: editable-install-revision-key
+# Key the editable install by the source revision and drop stale editable metadata first.
+# Without this BuildKit restored a cached layer whose metadata described an older project
+# version, so a "0.20.5" image ran 0.20.0 code (2026-08-21). The CI "installed version ==
+# pyproject version" step in docker-build-immutable.yml guards it.
+ARG HERMES_GIT_SHA=
+RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" && \
+    rm -rf \
+        .venv/lib/python*/site-packages/hermes_agent-*.dist-info \
+        .venv/lib/python*/site-packages/__editable__.hermes_agent-*.pth \
+        hermes_agent*.egg-info
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
@@ -309,38 +381,11 @@ RUN cd web && npm run build && \
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w . .
 
-# Build browser dashboard and terminal UI assets.
-# The default base=/ build (-> hermes_cli/web_dist) is served at /desktop by the
-# backend (globals injected server-side). HermesOS: a SECOND base=/dash build
-# (-> hermes_cli/web_dist_dash) backs the "Admin Panel" nav item, served as a
-# static file_server by the control-plane Caddy. base-/ assets are absolute
-# (/assets/*) and 404 under /dash, and a relative base breaks SPA deep routes,
-# so /dash needs its own bundle. inject-dash-bootstrap.cjs splices a <head>
-# script supplying the base path + session token from the #iframe_token hash.
-RUN cd web && npm run build && \
-    npx vite build --base=/dash/ --outDir ../hermes_cli/web_dist_dash --emptyOutDir && \
-    node inject-dash-bootstrap.cjs ../hermes_cli/web_dist_dash/index.html && \
-    cd ../ui-tui && npm run build
-# HermesOS: drop in the prebuilt rich-chat bundle from the throwaway builder
-# stage (static files only — no node_modules/toolchain). web_server.py's
-# mount_webchat serves it at /webchat.
-COPY --chown=hermes:hermes --from=webchat_build /webchat_dist /opt/hermes/hermes_cli/webchat_dist
-
 # ---------- Permissions ----------
 # Link hermes-agent itself (editable). Deps are already installed in the
 # cached layer above; `--no-deps` makes this a fast egg-link creation with no
-# resolution or downloads. Key this layer by the source revision explicitly:
-# the dependency cache can otherwise restore editable metadata produced for an
-# older project version even though the current source tree was copied above.
-# Remove that stale metadata before reinstalling so importlib.metadata and the
-# console entry point describe the same commit as /opt/hermes.
-ARG HERMES_GIT_SHA=
-RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" && \
-    rm -rf \
-        .venv/lib/python*/site-packages/hermes_agent-*.dist-info \
-        .venv/lib/python*/site-packages/__editable__.hermes_agent-*.pth \
-        hermes_agent*.egg-info && \
-    uv pip install --no-cache-dir --no-deps -e "."
+# resolution or downloads.
+RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are
 # already root-owned (COPY, uv sync, npm install all run as root) and
@@ -349,7 +394,7 @@ RUN printf 'Installing Hermes source revision %s\n' "${HERMES_GIT_SHA:-local}" &
 USER root
 RUN mkdir -p /opt/hermes/bin && \
     cp /opt/hermes/docker/hermes-exec-shim.sh /opt/hermes/bin/hermes && \
-    chmod 0755 /opt/hermes/bin/hermes && \
+    chmod 0755 /opt/hermes /opt/hermes/bin/hermes && \
     printf 'docker\n' > /opt/hermes/.install_method
 # The ``.install_method`` stamp is baked next to the running code (the install
 # tree), NOT into $HERMES_HOME. $HERMES_HOME (/opt/data) is a shared data
@@ -362,7 +407,11 @@ RUN mkdir -p /opt/hermes/bin && \
 # `s6-setuidgid hermes` in its run script. If HERMES_UID is unset, services
 # run as the default hermes user (UID 10000).
 
-# ---------- Bake build-time git revision ----------
+# ---------- Bake image provenance + build-time git revision ----------
+# The versioned, non-secret provenance marker is the authoritative runtime
+# signal that this filesystem came from an immutable image.  It deliberately
+# lives outside both /opt/hermes (which operators sometimes bind-mount as a
+# checkout) and /opt/data (the mutable HERMES_HOME volume).
 # .dockerignore excludes .git, so `git rev-parse HEAD` from inside the
 # container always returns nothing — meaning `hermes dump` reports
 # "(unknown)" and the startup banner drops its `· upstream <sha>` suffix.
@@ -375,13 +424,18 @@ RUN mkdir -p /opt/hermes/bin && \
 # banner.get_git_banner_state() try the baked SHA first, then fall back
 # to live `git rev-parse` for source installs (unchanged behaviour).
 #
-# The arg is optional — local `docker build` without --build-arg simply
-# omits the file, and the runtime falls back to live-git lookup.  CI
-# (.github/workflows/docker-publish.yml) passes ${{ github.sha }} so
+# The arg is optional — local `docker build` without --build-arg omits the
+# SHA file (and records a null provenance revision), so build-info falls back
+# to live-git lookup.  CI
+# (.github/workflows/docker.yml) passes ${{ github.sha }} so
 # every published image has it.
-RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
+ARG HERMES_GIT_SHA=
+RUN set -eu; \
+    if [ -n "${HERMES_GIT_SHA}" ]; then \
         printf '%s\n' "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha; \
-    fi
+    fi; \
+    mkdir -p /etc/hermes; \
+    HERMES_GIT_SHA="${HERMES_GIT_SHA}" python3 -c 'import json, os, pathlib, tomllib; project = tomllib.loads(pathlib.Path("/opt/hermes/pyproject.toml").read_text(encoding="utf-8"))["project"]; marker = pathlib.Path("/etc/hermes/image-provenance.json"); marker.write_text(json.dumps({"schema": 1, "deployment_kind": "image", "manager": "docker", "image": "nousresearch/hermes-agent", "version": project["version"], "revision": os.environ.get("HERMES_GIT_SHA") or None}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"); marker.chmod(0o444)'
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
@@ -441,6 +495,12 @@ ENV HERMES_DISABLE_LAZY_INSTALLS=1
 # on the /opt/data volume, so it persists across container recreates / image
 # updates (an ABI stamp invalidates it if a rebuild bumps the interpreter).
 ENV HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages
+
+# Xfce, dbus and the display-allocation lock need one; containers have no logind
+# to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data
+# volume, which a host-side install may share — two instances would then contend
+# for one lock. Container-scoped instead; seeded 0700 by docker/stage2-hook.sh.
+ENV XDG_RUNTIME_DIR=/tmp/hermes-runtime
 
 # `docker exec` privilege-drop shim. When operators run
 # `docker exec <c> hermes ...` they default to root, and any file the

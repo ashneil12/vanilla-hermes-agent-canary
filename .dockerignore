@@ -70,26 +70,22 @@ runtime/
 
 # ---------- Not needed inside the Docker image ----------
 
-# Desktop app source (Tauri/Electron). Most of apps/ is never installed in the
-# container, BUT the `webchat_build` Dockerfile stage compiles apps/desktop (which
-# imports apps/shared) into the /webchat bundle, so those two MUST stay in the
-# build context. A blanket `apps/` ignore (re-introduced by an upstream sync) makes
-# `cd apps/desktop` fail in that stage and breaks the whole image build.
-apps/*
-!apps/desktop
-!apps/shared
+# Desktop app source (Tauri/Electron); never installed in the container.
+# apps/shared is the dashboard↔desktop websocket helper and is linked from
+# web/package.json as a file: workspace dep — keep it in the build context.
+apps/
+!apps/shared/
+!apps/shared/**
+# hermes-fork: webchat-build — the `webchat_build` Dockerfile stage compiles apps/desktop
+# (which imports apps/shared) into the /webchat bundle, so it must stay in the context.
+!apps/desktop/
+!apps/desktop/**
 
-# Test suite. Upstream excludes it ("not shipped in production images"), but the
-# fork's docker-publish "Media tool wiring regression gate" runs
-#   pytest tests/tools/test_media_generation_wiring.py
-# INSIDE the built image, so tests/ MUST stay in the build context or the gate
-# dies with "file or directory not found" (exit 4). A blanket `tests/` ignore
-# (re-introduced by an upstream sync) breaks the image publish. Keep it in.
-# tests/  <- intentionally NOT excluded; see above.
+# Test suite — not shipped in production images
+tests/
 
-# Documentation site (Docusaurus) and supplementary docs
+# Documentation site (Docusaurus)
 website/
-docs/
 
 # Assets only used by the GitHub README
 assets/
@@ -113,3 +109,10 @@ plans/
 .gitattributes
 .hadolint.yaml
 .mailmap
+
+# Debug/export artifacts — must never reach image layers (COPY . .)
+/log.txt
+/sqlite_leak_fix.png
+/*.png.bak
+*.tar.gz
+*.tgz

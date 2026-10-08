@@ -71,12 +71,12 @@ normal uid — no sudo needed):
 H="${HERMES_HOME:-$HOME/.hermes}"
 arch=x64; [ "$(uname -m)" = aarch64 ] && arch=aarch64
 # JRE 25 (matches signal-cli 0.14.x)
-curl -fsSL -o /tmp/jre.tgz "https://api.adoptium.net/v3/binary/latest/25/ga/linux/$arch/jre/hotspot/normal/eclipse"
-mkdir -p "$H/jre" && tar -xzf /tmp/jre.tgz -C "$H/jre" --strip-components=1
+curl -fsSL -o ${TMPDIR:-/tmp}/jre.tgz "https://api.adoptium.net/v3/binary/latest/25/ga/linux/$arch/jre/hotspot/normal/eclipse"
+mkdir -p "$H/jre" && tar -xzf ${TMPDIR:-/tmp}/jre.tgz -C "$H/jre" --strip-components=1
 # signal-cli (pinned)
 V=0.14.4.1
-curl -fsSL -o /tmp/scli.tgz "https://github.com/AsamK/signal-cli/releases/download/v$V/signal-cli-$V.tar.gz"
-mkdir -p "$H/signal-cli" && tar -xzf /tmp/scli.tgz -C "$H/signal-cli" --strip-components=1
+curl -fsSL -o ${TMPDIR:-/tmp}/scli.tgz "https://github.com/AsamK/signal-cli/releases/download/v$V/signal-cli-$V.tar.gz"
+mkdir -p "$H/signal-cli" && tar -xzf ${TMPDIR:-/tmp}/scli.tgz -C "$H/signal-cli" --strip-components=1
 mkdir -p "$H/signal-data" "$H/logs"
 ```
 

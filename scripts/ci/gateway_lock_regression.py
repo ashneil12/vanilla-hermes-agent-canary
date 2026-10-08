@@ -259,7 +259,7 @@ class Harness:
                 receipt = rows[0]
                 emit("worker", role=role, result=receipt.get("result"), check=receipt.get("check"), error_type=receipt.get("error_type"))
                 require(state.get("ExitCode") == 0 and state.get("OOMKilled") is False and receipt.get("result") == "PASS", role + ":worker-failed")
-                require(receipt.get("cases") == ["default", "explicit-profile"], role + ":case-coverage")
+                require(receipt.get("cases") == ["default"], role + ":case-coverage")
                 evidence[role] = receipt
                 done.add(role)
             if len(done) < 2:

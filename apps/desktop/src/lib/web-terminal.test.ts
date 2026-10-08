@@ -205,6 +205,16 @@ describe('browser terminal session capability', () => {
     await expect(h.terminal.write(first.session.id, 'still alive')).resolves.toBe(true)
   })
 
+  // hermes-fork: Desktop's attach-after-subscribe contract (use-terminal-session.ts).
+  it('attach confirms a live session and rejects an unknown or disposed one', async () => {
+    const h = harness()
+    const { session } = await h.start()
+    await expect(h.terminal.attach(session.id)).resolves.toBe(true)
+    await expect(h.terminal.attach('nope')).resolves.toBe(false)
+    await h.terminal.dispose(session.id)
+    await expect(h.terminal.attach(session.id)).resolves.toBe(false)
+  })
+
   it('replays bounded early output exactly once and honors data unsubscribe', async () => {
     const h = harness()
     const { session, socket } = await h.start()

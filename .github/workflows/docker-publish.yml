@@ -1,5 +1,8 @@
 name: Docker Build and Publish
 
+# MOVES :stable and :latest (the floating tags old boxes still follow). Owner-approved,
+# manual dispatch only. Scheduled upstream syncs never use this file: they build immutable
+# tags with docker-build-immutable.yml instead.
 on:
   # Manual-dispatch only. This workflow IS the image publisher: builderbox-1 (the
   # former auto-publisher) was retired, so nothing auto-builds on merge. After
@@ -112,10 +115,13 @@ jobs:
           # (upstream moved it out), so install it ephemerally into the throwaway
           # --rm test container before running the gate — keeps the shipped image
           # light (cardinal rule #1) while still running the regression gate.
+          # tests/ is excluded from the build context (upstream's .dockerignore), so the
+          # gate mounts the checkout's tests read-only instead of baking them into the image.
           docker run --rm \
             --entrypoint sh \
+            -v "$PWD/tests:/opt/hermes/tests:ro" \
             "$IMAGE:test" \
-            -lc 'cd /opt/hermes && /usr/local/bin/uv pip install --python /opt/hermes/.venv/bin/python3 -q pytest pytest-timeout && /opt/hermes/.venv/bin/python3 -m pytest tests/tools/test_media_generation_wiring.py -q'
+            -lc 'cd /opt/hermes && /usr/local/bin/uv pip install --python /opt/hermes/.venv/bin/python3 -q pytest pytest-timeout && /opt/hermes/.venv/bin/python3 -m pytest -p no:cacheprovider tests/tools/test_media_generation_wiring.py -q'
 
 
       # Two real PID namespaces sharing only a fresh bounded test volume.

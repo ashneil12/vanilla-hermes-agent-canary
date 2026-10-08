@@ -361,7 +361,7 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
         const preview = await normalizeOrLocalPreviewTarget(dragPath)
 
         if (preview) {
-          openPreview(preview, 'file-browser')
+          openPreview(preview)
         }
       } catch (error) {
         notifyError(error, t.rightSidebar.previewUnavailable)
@@ -420,7 +420,7 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
           )}
         </span>
 
-        <span className="hidden shrink-0 items-center gap-0.5 group-hover/review-row:flex touch:flex">
+        <span className="hidden shrink-0 items-center gap-0.5 group-hover/review-row:flex">
           <Tip label={file.staged ? c.unstage : c.stage}>
             <Button
               aria-label={file.staged ? c.unstage : c.stage}
@@ -453,7 +453,7 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
 
         <DiffCount
           added={node.added}
-          className="text-[0.64rem] leading-4 group-hover/review-row:hidden touch:hidden"
+          className="text-[0.64rem] leading-4 group-hover/review-row:hidden"
           removed={node.removed}
         />
         {file.staged && (

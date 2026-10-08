@@ -1,0 +1,62 @@
+name: Fork gate
+
+# Fast, reliable gate for the fork's own seams. Upstream's Python suite is sized for 32 to 96
+# core runners; on standard runners it times out and fails on timing assertions, so a green
+# "All required checks pass" cannot be expected from it. This job runs the tests that guard the
+# fork seams (list: .hermesos/fork-gate-tests.txt) and fails if a path in the list is missing.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  seams:
+    name: Fork gate / seams
+    if: github.repository == 'ashneil12/vanilla-hermes-agent-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          uv venv --python 3.13 .venv
+          uv sync --python .venv/bin/python --extra dev --extra messaging --extra mcp
+
+      - name: Run the fork seam tests
+        run: |
+          set -euo pipefail
+          paths=$(grep -v -E '^\s*(#|$)' .hermesos/fork-gate-tests.txt)
+          missing=0
+          for p in $paths; do
+            [ -e "$p" ] || { echo "::error::$p is listed in .hermesos/fork-gate-tests.txt but missing"; missing=1; }
+          done
+          [ "$missing" = 0 ]
+          # One pytest process per file: several fork tests mutate process-global state
+          # (plugin registry, gateway.status rebinding), and a combined run is order sensitive.
+          failed=0
+          for p in $paths; do
+            echo "::group::$p"
+            .venv/bin/python -m pytest -o addopts="" -q -p no:cacheprovider "$p" || { echo "::error::$p failed"; failed=1; }
+            echo "::endgroup::"
+          done
+          [ "$failed" = 0 ]

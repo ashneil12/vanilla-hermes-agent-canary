@@ -366,7 +366,7 @@ def test_owner_includes_sqlite_receipt_once(worker, tmp_path, monkeypatch):
 def completed_workers(harness, monkeypatch):
     receipts = {
         "owner": {
-            "result": "PASS", "cases": ["default", "explicit-profile"],
+            "result": "PASS", "cases": ["default"],
             "namespace": "owner-ns", "handoff_verified": True,
             "sqlite_runtime": {
                 "executable": "/opt/hermes/.venv/bin/python", "sqlite_version": "3.51.3",
@@ -374,7 +374,7 @@ def completed_workers(harness, monkeypatch):
             },
         },
         "reader": {
-            "result": "PASS", "cases": ["default", "explicit-profile"], "namespace": "reader-ns",
+            "result": "PASS", "cases": ["default"], "namespace": "reader-ns",
             "pid_collision_rejected": True, "held_files_preserved": True, "second_acquisition_denied": True,
             "release_cleanup_reacquisition": True, "other_profile_preserved": True,
         },

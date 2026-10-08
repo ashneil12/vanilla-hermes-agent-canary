@@ -3,14 +3,14 @@
 "Turn this image into a video" passes a LOCAL image (often one the agent just
 generated). Venice video accepts a data URL but not a local path, so the tool
 must auto-encode local paths / base64 into a data: URL (downscaled for the
-managed-proxy cap). HTTP(S) and existing data: URLs pass through untouched.
+managed-proxy cap) -- done by the Venice video plugin (hermes-fork), so tools/video_generation_tool.py stays vanilla. HTTP(S) and existing data: URLs pass through untouched.
 """
 
 import base64
 
 import pytest
 
-import tools.video_generation_tool as vg
+import plugins.video_gen.venice as vg
 
 PIL = pytest.importorskip("PIL")
 from PIL import Image  # noqa: E402
@@ -54,23 +54,24 @@ def test_large_local_image_downscaled_under_budget(tmp_path):
     assert len(raw) <= 3_000_000
 
 
-def test_handler_encodes_local_image_url(monkeypatch, tmp_path):
+def test_provider_generate_encodes_local_image_url(monkeypatch, tmp_path):
     p = tmp_path / "src.png"
     Image.new("RGB", (320, 200), (200, 50, 50)).save(p, format="PNG")
-
     captured = {}
 
-    class _Provider:
-        def default_model(self):
-            return "veo-3.1"
+    async def fake_submit(client, payload, *, api_key, base_url):
+        captured["payload"] = dict(payload)
+        return "queue-1"
 
-        def generate(self, prompt, **kwargs):
-            captured.update(kwargs)
-            return '{"success": true, "video": "/v.mp4"}'
+    async def fake_poll(client, queue_id, *, api_key, base_url, timeout_seconds, poll_interval):
+        return {"status": "done", "body": {"download_url": "https://x/v.mp4", "model": "m"}}
 
-    monkeypatch.setattr(vg, "_resolve_active_provider", lambda: _Provider())
-    monkeypatch.setattr(vg, "_read_configured_video_provider", lambda: "venice")
-    monkeypatch.setattr(vg, "_read_configured_video_model", lambda: None)
-
-    vg._handle_video_generate({"prompt": "animate it", "image_url": str(p)})
-    assert captured["image_url"].startswith("data:image/"), captured.get("image_url")
+    monkeypatch.setattr(vg, "_resolve_credentials", lambda: ("k", "https://api.venice.ai/api/v1"))
+    monkeypatch.setattr(vg, "_resolve_concrete_model", lambda family, mode: f"veo-{mode}")
+    monkeypatch.setattr(vg, "_submit_job", fake_submit)
+    monkeypatch.setattr(vg, "_poll_job", fake_poll)
+    res = vg.VeniceVideoGenProvider().generate(
+        "animate it", image_url=str(p), reference_image_urls=[str(p)])
+    assert res.get("success") is True, res
+    assert captured["payload"]["image_url"].startswith("data:image/")
+    assert captured["payload"]["reference_image_urls"][0].startswith("data:image/")

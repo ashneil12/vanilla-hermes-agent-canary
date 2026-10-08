@@ -1,143 +1,210 @@
-"""Regression guard for media-generation tool wiring.
+"""Regression guard for media-generation tool wiring (hermes-fork).
 
-Each invariant below silently broke ``audio_generate`` in production at least
-once (see the four audio fixes May 2026). They are network-free and key-free so
-they run in CI and fail the build BEFORE a broken :stable image can ship — the
-point being that an upstream sync or refactor can't quietly regress media gen
-again.
+Run in-image by the docker publish workflow ("Media tool wiring regression gate")
+BEFORE a broken :stable can ship. Network-free and key-free. It is the living
+manifest of the Venice seams on top of upstream: every invariant below silently
+broke production Venice media at least once, or would break on an upstream sync.
 
-Bug history these cover:
-  1. Venice audio polled ``GET /audio/{id}`` (404) instead of the queue/retrieve
-     flow → music requests hard-errored.
-  2. ``audio_generate`` wasn't listed in the ``video_gen`` toolset definition →
-     the LLM never saw the tool.
-  3. The tool/system-prompt didn't steer code-biased models to the tool →
-     they hand-rolled WAVs via the terminal/skills.
-  4. The registered handler was ``lambda **kw:`` (zero positional params); the
-     executor calls ``handler(args, **kwargs)`` → ``TypeError`` on every agent
-     call (a direct function call masked it).
+Seam shape (thin fork): Venice media lives in add-only files and bundled backend
+plugins; upstream-owned files carry only the ``venice-autopair`` marker lines.
+
+Invariants:
+  1. Every fork-registered tool handler accepts the executor's call shape
+     ``handler(args, **kwargs)`` (a ``lambda **kw:`` handler TypeErrors on every
+     agent call; four fork tools shipped like that).
+  2. Fork tools register under toolsets upstream DEFAULT-ENABLES (image_gen, web,
+     tts, memory, browser) or the opt-in video_gen, so ``_get_platform_tools``
+     resolves them with no edit to toolsets.py / tools_config.py.
+  3. Venice audio polls the queue/retrieve flow, not ``GET /audio/{id}``.
+  4. Venice video omits ``aspect_ratio`` for image/reference-to-video.
+  5. The Venice image/video/TTS/STT backends are registered plugins; the three
+     upstream seams carry their ``hermes-fork: venice-autopair`` marker and an
+     unset provider resolves to venice only when VENICE_API_KEY is set.
+  6. No registered tool schema is pre-enveloped (Venice 400s on a double wrap).
 """
 
 import inspect
-import os
+import json
+import re
+from pathlib import Path
 
 import pytest
 
 import model_tools  # noqa: F401 — import triggers discover_builtin_tools()
 from tools.registry import registry
-from toolsets import get_toolset, resolve_toolset, _HERMES_CORE_TOOLS
+from toolsets import get_toolset, resolve_toolset
 import tools.audio_generate_tool as audio_mod
-import tools.image_generation_tool as image_mod
 import tools.venice_extras_tool as extras_mod
 
+REPO = Path(__file__).resolve().parents[2]
 
-class TestMediaToolWiring:
-    def test_audio_generate_registered(self):
-        assert registry.get_entry("audio_generate") is not None, (
-            "audio_generate is not registered — discover_builtin_tools() should "
-            "self-register it from tools/audio_generate_tool.py"
-        )
-
-    def test_audio_generate_member_of_video_gen_toolset(self):
-        # Bug 2: a tool only reaches the model if its toolset definition lists it.
-        assert "audio_generate" in get_toolset("video_gen")["tools"]
-        assert "audio_generate" in resolve_toolset("video_gen")
-        assert registry.get_entry("audio_generate").toolset == "video_gen"
-
-    def test_sibling_media_tools_still_wired(self):
-        assert "video_generate" in resolve_toolset("video_gen")
-        assert "image_generate" in resolve_toolset("image_gen")
-
-    def test_audio_handler_accepts_positional_args_dict(self):
-        # Bug 4: the executor invokes ``entry.handler(args, **kwargs)``. A handler
-        # that takes no positional parameter (``lambda **kw:``) raises TypeError
-        # on every agent call. Verify the registered handler can bind a dict.
-        handler = registry.get_entry("audio_generate").handler
-        sig = inspect.signature(handler)
-        try:
-            sig.bind({"prompt": "x"})
-        except TypeError:
-            pytest.fail(
-                "audio_generate handler must accept a positional args dict "
-                "(executor calls handler(args, **kwargs)); got "
-                f"signature {sig}"
-            )
-
-    def test_venice_queue_and_retrieve_endpoints(self):
-        # Bug 1: Venice audio is POST /audio/queue then POST /audio/retrieve
-        # (binary), NOT GET /audio/{queue_id}.
-        src = inspect.getsource(audio_mod)
-        assert "/audio/queue" in src
-        assert "/audio/retrieve" in src, (
-            "Venice audio must poll POST /audio/retrieve; a GET /audio/{id} poll 404s"
-        )
-
-    def test_media_generation_guidance_present_and_wired(self):
-        # Bug 3: steer code-biased models to the tools instead of writing code.
-        from agent.prompt_builder import MEDIA_GENERATION_GUIDANCE
-
-        assert "audio_generate" in MEDIA_GENERATION_GUIDANCE
-        import agent.system_prompt as sp
-
-        assert "MEDIA_GENERATION_GUIDANCE" in inspect.getsource(sp), (
-            "MEDIA_GENERATION_GUIDANCE must be appended in build_system_prompt_parts"
-        )
-
-
-# Native Venice extra tools (tools/venice_extras_tool.py). Same bug-4 handler
-# invariant as audio_generate: the executor calls handler(args, **kwargs), so a
-# zero-positional ``lambda **kw:`` handler TypeErrors on every agent call.
-_EXTRA_TOOLS = {
+# name -> toolset, for every tool the fork adds (tools/*.py self-registration).
+FORK_TOOLS = {
+    "image_edit": "image_gen",
+    "image_compose": "image_gen",
+    "image_upscale": "image_gen",
+    "image_remove_background": "image_gen",
     "image_styles": "image_gen",
+    "multimodal_get_settings": "image_gen",
+    "multimodal_set_model": "image_gen",
     "text_parser": "web",
     "video_transcribe": "web",
+    "crypto_rpc": "web",
     "voice_clone": "tts",
+    "text_embed": "memory",
+    "venice_characters": "memory",
+    "audio_generate": "video_gen",
     "audio_quote": "video_gen",
     "video_quote": "video_gen",
-    "crypto_rpc": "crypto",
+    "browser_session_start": "browser",
+    "browser_session_end": "browser",
+    "browser_goto": "browser",
+    "browser_click_text": "browser",
+    "browser_click_selector": "browser",
+    "browser_fill": "browser",
+    "browser_wait_for": "browser",
+    "browser_assert_visible": "browser",
+    "browser_get_text": "browser",
+    "browser_screenshot": "browser",
+    "browser_run_named_flow": "browser",
 }
 
 
-class TestVeniceExtrasWiring:
-    @pytest.mark.parametrize("tool,toolset", sorted(_EXTRA_TOOLS.items()))
-    def test_extra_tool_registered_in_its_toolset(self, tool, toolset):
+class TestForkToolRegistration:
+    @pytest.mark.parametrize("tool,toolset", sorted(FORK_TOOLS.items()))
+    def test_registered_in_expected_toolset(self, tool, toolset):
         entry = registry.get_entry(tool)
-        assert entry is not None, f"{tool} not registered"
-        assert entry.toolset == toolset, f"{tool} should be in toolset {toolset}"
+        assert entry is not None, f"{tool} not registered (discover_builtin_tools should import its module)"
+        assert entry.toolset == toolset
+        # The registry merges into the static toolset: this is what makes the tool reach the model.
         assert tool in resolve_toolset(toolset), f"{tool} missing from resolved {toolset}"
 
-    @pytest.mark.parametrize("tool", sorted(_EXTRA_TOOLS))
-    def test_extra_tool_in_core_composite(self, tool):
-        # Without core membership the toolset's subset-check fails and the
-        # whole toolset silently disappears from the LLM's tool list.
-        assert tool in _HERMES_CORE_TOOLS, f"{tool} missing from _HERMES_CORE_TOOLS"
-
-    @pytest.mark.parametrize("tool", sorted(_EXTRA_TOOLS))
-    def test_extra_handler_accepts_positional_args_dict(self, tool):
+    @pytest.mark.parametrize("tool", sorted(FORK_TOOLS))
+    def test_handler_accepts_positional_args_dict(self, tool):
+        # The executor calls ``entry.handler(args, **kwargs)``.
         handler = registry.get_entry(tool).handler
         try:
-            inspect.signature(handler).bind({"network": "list"})
+            inspect.signature(handler).bind({"prompt": "x"})
         except TypeError:
-            pytest.fail(f"{tool} handler must accept a positional args dict")
+            pytest.fail(
+                f"{tool} handler must accept a positional args dict "
+                f"(executor calls handler(args, **kwargs)); got {inspect.signature(handler)}"
+            )
+
+    def test_audio_generate_member_of_video_gen_toolset(self):
+        assert "audio_generate" in get_toolset("video_gen")["tools"]
+        assert "video_generate" in resolve_toolset("video_gen")
+        assert "image_generate" in resolve_toolset("image_gen")
+
+    def test_no_registered_schema_is_pre_enveloped(self):
+        # {"type":"function","function":{...}} registered as a schema is wrapped a second time
+        # downstream; strict providers (Venice) reject the whole request. Upstream does not unwrap.
+        bad = [
+            name for name in registry.get_all_tool_names()
+            if isinstance(registry.get_entry(name).schema, dict)
+            and (registry.get_entry(name).schema.get("type") == "function"
+                 or "function" in registry.get_entry(name).schema)
+        ]
+        assert not bad, f"pre-enveloped schemas registered: {bad}"
+
+    def test_venice_characters_schema_is_flat(self):
+        from tools.venice_characters_tool import VENICE_CHARACTERS_SCHEMA
+
+        assert VENICE_CHARACTERS_SCHEMA.get("type") != "function"
+        assert VENICE_CHARACTERS_SCHEMA["name"] == "venice_characters"
+
+    def test_multimodal_get_settings_dispatches_through_registry(self, monkeypatch, tmp_path):
+        # Real executor path (registry.dispatch), not a direct call: the direct call masks bug 1.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        out = json.loads(registry.dispatch("multimodal_get_settings", {}))
+        assert out.get("success") is True, out
 
     def test_crypto_rpc_blocks_signing_methods(self, monkeypatch):
-        # Read-only by design: state-changing/signing methods must be refused
-        # BEFORE any network call (so this stays key-free/network-free).
+        # Read-only by design: state-changing/signing methods are refused BEFORE any network call.
         monkeypatch.setenv("VENICE_API_KEY", "test-key-not-used")
-        import json as _json
-
         for m in ("eth_sendTransaction", "eth_sendRawTransaction", "personal_sign"):
-            out = _json.loads(extras_mod.crypto_rpc_tool("ethereum", m))
+            out = json.loads(extras_mod.crypto_rpc_tool("ethereum", m))
             assert out["success"] is False
-            assert out["error_type"] == "write_method_blocked", (
-                f"{m} must be blocked; got {out}"
-            )
+            assert out["error_type"] == "write_method_blocked", f"{m} must be blocked; got {out}"
+
+
+class TestDefaultVisibility:
+    """Upstream's toolset resolver (no fork edit) must enable the fork tools on a default Venice box.
+
+    This is the failure the old toolsets.py edits guarded: a toolset silently dropping out of the
+    LLM's tool list, after which the agent falls back to shell/curl.
+    """
+
+    @pytest.fixture
+    def default_defs(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("VENICE_API_KEY", "test-key")
+        import tools.browser_sidecar as sidecar
+        from hermes_cli.tools_config import _get_platform_tools
+
+        monkeypatch.setattr(sidecar, "_is_sidecar_available", lambda: True)
+        # check_fn was bound at registration; flip the live entries too.
+        for name, ts in FORK_TOOLS.items():
+            if ts == "browser":
+                monkeypatch.setattr(registry.get_entry(name), "check_fn", lambda: True)
+        enabled = sorted(_get_platform_tools({}, "cli"))
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=enabled, quiet_mode=True, skip_tool_search_assembly=True)
+        return enabled, {d["function"]["name"] for d in defs}
+
+    @pytest.mark.parametrize(
+        "tool", sorted(t for t, ts in FORK_TOOLS.items() if ts != "video_gen"))
+    def test_fork_tool_visible_on_default_platform_toolsets(self, default_defs, tool):
+        enabled, names = default_defs
+        assert tool in names, f"{tool} not exposed by default (enabled toolsets: {enabled})"
+
+    def test_image_generate_exposed_on_venice_only_box(self, default_defs):
+        # autopair: no FAL key, no image_gen.provider, only VENICE_API_KEY.
+        assert "image_generate" in default_defs[1]
+
+    def test_video_gen_tools_exposed_when_toolset_enabled(self, monkeypatch, tmp_path):
+        # video_gen is default-off upstream (opt-in via hermes tools); once enabled the audio tools ride along.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("VENICE_API_KEY", "test-key")
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=["video_gen"], quiet_mode=True, skip_tool_search_assembly=True)
+        names = {d["function"]["name"] for d in defs}
+        assert {"video_generate", "audio_generate", "audio_quote", "video_quote"} <= names
+
+
+class TestVeniceAudioWiring:
+    def test_venice_queue_and_retrieve_endpoints(self):
+        # Venice audio is POST /audio/queue then POST /audio/retrieve (binary), NOT GET /audio/{queue_id}.
+        src = inspect.getsource(audio_mod)
+        assert "/audio/queue" in src
+        assert "/audio/retrieve" in src, "Venice audio must poll POST /audio/retrieve; a GET /audio/{id} poll 404s"
+
+    def test_audio_generate_reads_configured_model(self):
+        # Settings -> Media music-model dropdown must be a live control.
+        assert hasattr(audio_mod, "_read_configured_audio_model")
+        assert "_read_configured_audio_model" in inspect.getsource(audio_mod.audio_generate_tool)
+
+
+class TestMediaGuidanceSeam:
+    """Steers code-biased models to the media tools instead of hand-rolling WAVs.
+    hermes-fork: the guidance lives in the bundled `hivra-core` plugin (plugins/hivra-core),
+    injected through upstream's register_system_prompt_section API, so no prompt_builder edit."""
+
+    def test_media_generation_guidance_present_and_wired(self):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[2] / "plugins" / "hivra-core" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("hivra_core_for_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert "audio_generate" in mod.MEDIA_GENERATION_GUIDANCE
+        assert "register_system_prompt_section" in path.read_text(encoding="utf-8")
 
 
 class TestVideoModelResolution:
-    """Dynamic family+mode → variant resolution for Venice video, so the user
-    picks a FAMILY (or Auto) and the agent auto-selects the right
-    text/image/reference-to-video model from the request inputs."""
+    """Dynamic family+mode -> variant resolution for Venice video, so the user picks a FAMILY (or
+    Auto) and the plugin selects the right text/image/reference-to-video model from the inputs."""
 
     def _vv(self):
         import plugins.video_gen.venice as vv
@@ -168,17 +235,13 @@ class TestVideoModelResolution:
     def test_single_id_family_resolves_to_itself(self, monkeypatch):
         vv = self._vv()
         monkeypatch.setattr(vv, "_video_model_ids", lambda: ["veo-3.1", "kling-v3"])
-        # Veo/Kling carry the mode in the payload (image_url switch) → unchanged.
+        # Veo/Kling carry the mode in the payload (image_url switch) -> unchanged.
         assert vv._resolve_concrete_model("veo-3.1", "image-to-video") == "veo-3.1"
 
 
 class TestVeniceVideoPayload:
-    """Submit payload must omit aspect_ratio for image/reference-to-video.
-
-    Venice 400s ('This model does not support aspect_ratio') when an image or
-    reference frame is supplied, because the output frame is derived from the
-    source. Pure text-to-video keeps aspect_ratio.
-    """
+    """Submit payload must omit aspect_ratio for image/reference-to-video (Venice 400s: 'This model
+    does not support aspect_ratio'); pure text-to-video keeps it."""
 
     def _provider_capturing(self, monkeypatch):
         import plugins.video_gen.venice as vv
@@ -193,10 +256,7 @@ class TestVeniceVideoPayload:
             return {"status": "done", "body": {"download_url": "https://x/v.mp4", "model": "m"}}
 
         monkeypatch.setattr(vv, "_resolve_credentials", lambda: ("test-key", "https://api.venice.ai/api/v1"))
-        monkeypatch.setattr(
-            vv, "_resolve_concrete_model",
-            lambda family, mode: f"seedance-2-0-{mode}",
-        )
+        monkeypatch.setattr(vv, "_resolve_concrete_model", lambda family, mode: f"seedance-2-0-{mode}")
         monkeypatch.setattr(vv, "_submit_job", fake_submit)
         monkeypatch.setattr(vv, "_poll_job", fake_poll)
         return vv.VeniceVideoGenProvider(), captured
@@ -210,45 +270,120 @@ class TestVeniceVideoPayload:
 
     def test_image_to_video_omits_aspect_ratio(self, monkeypatch):
         provider, captured = self._provider_capturing(monkeypatch)
-        res = provider.generate(
-            "make it move",
-            image_url="data:image/png;base64,AAAA",
-            aspect_ratio="16:9",
-        )
+        res = provider.generate("make it move", image_url="data:image/png;base64,AAAA", aspect_ratio="16:9")
         assert res.get("success") is True, res
-        assert "aspect_ratio" not in captured["payload"], (
-            "image-to-video must NOT send aspect_ratio (Venice rejects it)"
-        )
+        assert "aspect_ratio" not in captured["payload"], "image-to-video must NOT send aspect_ratio"
         assert captured["payload"].get("image_url") == "data:image/png;base64,AAAA"
 
     def test_reference_to_video_omits_aspect_ratio(self, monkeypatch):
         provider, captured = self._provider_capturing(monkeypatch)
-        res = provider.generate(
-            "blend these",
-            reference_image_urls=["https://x/a.png"],
-            aspect_ratio="9:16",
-        )
+        res = provider.generate("blend these", reference_image_urls=["https://x/a.png"], aspect_ratio="9:16")
         assert res.get("success") is True, res
         assert "aspect_ratio" not in captured["payload"]
         assert captured["payload"].get("reference_image_urls") == ["https://x/a.png"]
 
 
+class TestVeniceBackendsRegistered:
+    """The Venice backends are bundled plugins (no inline bodies in upstream tool files)."""
+
+    def test_all_four_registries_have_venice(self):
+        from hermes_cli.plugins import _ensure_plugins_discovered
+        from agent import image_gen_registry, transcription_registry, tts_registry, video_gen_registry
+
+        _ensure_plugins_discovered()
+        assert image_gen_registry.get_provider("venice") is not None
+        assert video_gen_registry.get_provider("venice") is not None
+        assert tts_registry.get_provider("venice") is not None
+        assert transcription_registry.get_provider("venice") is not None
+
+    def test_venice_is_not_a_builtin_name_that_would_shadow_the_plugin(self):
+        from tools.transcription_tools import BUILTIN_STT_PROVIDERS
+        from tools.tts_tool import BUILTIN_TTS_PROVIDERS
+
+        assert "venice" not in BUILTIN_TTS_PROVIDERS
+        assert "venice" not in BUILTIN_STT_PROVIDERS
+
+
 class TestMediaConfigHonoring:
-    """Guard the Settings → Media controls against becoming dead controls:
-    the agent generators must read the config defaults the WebUI persists."""
+    """Settings -> Media controls must not become dead controls: the Venice image plugin reads
+    the config defaults the WebUI persists."""
 
-    def test_audio_generate_reads_configured_model(self):
-        assert hasattr(audio_mod, "_read_configured_audio_model")
-        src = inspect.getsource(audio_mod.audio_generate_tool)
-        assert "_read_configured_audio_model" in src, (
-            "audio_generate must honor audio_gen.model so the Media music-model "
-            "dropdown is a live control"
-        )
+    def test_image_style_preset_default_reaches_the_venice_payload(self, monkeypatch):
+        import plugins.image_gen.venice as vi
 
-    def test_image_generate_reads_configured_style(self):
-        assert hasattr(image_mod, "_read_configured_image_style")
-        src = inspect.getsource(image_mod._dispatch_to_plugin_provider)
-        assert "style_preset" in src and "_read_configured_image_style" in src, (
-            "image dispatch must forward image_gen.style_preset so the Media "
-            "Style dropdown is a live control"
-        )
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        monkeypatch.setattr(vi, "_configured_style_preset", lambda: "Neon Punk")
+        sent = {}
+
+        class _R:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"images": ["aGk="]}
+
+        def fake_post(url, **kw):
+            sent.update(kw["json"])
+            return _R()
+
+        monkeypatch.setattr(vi.requests, "post", fake_post)
+        monkeypatch.setattr(vi, "save_b64_image", lambda b64, prefix="": "/tmp/g.png")
+        assert vi.VeniceImageGenProvider().generate("a cat")["success"] is True
+        assert sent.get("style_preset") == "Neon Punk"
+
+
+class TestAutopairSeam:
+    """venice-autopair: unset image_gen/video_gen provider -> venice iff VENICE_API_KEY is set."""
+
+    SEAM_FILES = (
+        "tools/image_generation_tool.py",
+        "agent/provider_registry.py",
+        "tools/transcription_tools.py",
+    )
+
+    @pytest.mark.parametrize("rel", SEAM_FILES)
+    def test_seam_marker_present(self, rel):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        assert len(re.findall(r"hermes-fork: venice-autopair", text)) == 1, (
+            f"{rel} must carry exactly one 'hermes-fork: venice-autopair' marker")
+
+    def test_helper_only_pairs_media_sections_with_a_key(self, monkeypatch):
+        from tools.venice_autopair import default_provider
+
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        assert default_provider("image_gen") == "venice"
+        assert default_provider("video_gen") == "venice"
+        assert default_provider("tts") is None  # tts.provider is seeded to edge; never auto-paired
+        monkeypatch.delenv("VENICE_API_KEY")
+        assert default_provider("image_gen") is None
+
+    def test_image_tool_resolves_venice_when_unset_and_keyed(self, monkeypatch):
+        import tools.image_generation_tool as ig
+
+        monkeypatch.setattr(ig, "_read_image_gen_key", lambda key: None)
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        assert ig._read_configured_image_provider() == "venice"
+        assert ig._plugin_provider_name() == "venice"
+        monkeypatch.delenv("VENICE_API_KEY")
+        assert ig._read_configured_image_provider() is None
+
+    def test_explicit_provider_always_wins(self, monkeypatch):
+        import tools.image_generation_tool as ig
+
+        monkeypatch.setattr(ig, "_read_image_gen_key", lambda key: "fal" if key == "provider" else None)
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        assert ig._read_configured_image_provider() == "fal"
+
+    def test_registries_pair_with_venice_even_when_another_provider_is_available(self, monkeypatch):
+        from agent import provider_registry
+
+        monkeypatch.setenv("VENICE_API_KEY", "k")
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {})
+        import logging
+
+        log = logging.getLogger("t")
+        assert provider_registry.configured_provider_name("image_gen", log) == "venice"
+        assert provider_registry.configured_provider_name("video_gen", log) == "venice"
+        assert provider_registry.configured_provider_name("web", log) is None  # not part of the seam

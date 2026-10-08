@@ -1,4 +1,4 @@
-import { type CSSProperties, useRef, useState } from 'react'
+import { useState } from 'react'
 
 import { composerPanelCard } from '@/components/chat/composer-dock'
 import { Button } from '@/components/ui/button'
@@ -21,19 +21,9 @@ import { cn } from '@/lib/utils'
 import { useComposerAttachmentProviders } from './contrib'
 import { GHOST_ICON_BTN } from './controls'
 import type { ChatBarState } from './types'
+import { useWebFilePicker } from './web-file-picker' // hermes-fork: web-file-picker
 
 const SNIPPET_KEYS = ['codeReview', 'implementationPlan', 'explainThis']
-
-// Off-screen (NOT display:none) so a programmatic input.click() reliably opens
-// the native file dialog — mirrors the proven selectBrowserFiles approach in
-// lib/web-shim.ts (some browsers won't open a chooser for a display:none input).
-const OFFSCREEN_INPUT_STYLE: CSSProperties = {
-  position: 'fixed',
-  left: '-9999px',
-  top: '-9999px',
-  opacity: 0,
-  pointerEvents: 'none'
-}
 
 export function ContextMenu({
   state,
@@ -55,39 +45,14 @@ export function ContextMenu({
   // `composer.attachments` contributions — plugin/core-registered rows that
   // extend this menu through the same registry as every other surface.
   const attachmentProviders = useComposerAttachmentProviders()
-
-  // HermesOS hosted web: the Files/Images pickers cannot go through Radix's
-  // onSelect → selectPaths → input.click() chain. onSelect fires inside Radix's
-  // synthetic discrete-event dispatch, and in the cross-origin dashboard iframe
-  // that synthetic boundary doesn't carry transient user-activation, so Chrome
-  // silently declines to open the native file dialog (no dialog, no upload, no
-  // console error). Paste/drag are unaffected because they never open a native
-  // chooser. Fix: click a persistent hidden <input> from a REAL DOM onClick
-  // (which keeps activation), and route the chosen File[] through the same
-  // proven upload path drag-drop uses (onWebAttachFiles → attachDroppedItems).
-  // Native (Electron) keeps its IPC selectPaths flow untouched.
-  const isWebClient =
-    typeof window !== 'undefined' &&
-    Boolean((window as unknown as { __HERMES_WEB_CLIENT__?: boolean }).__HERMES_WEB_CLIENT__)
-  const webAttach = isWebClient && Boolean(onWebAttachFiles)
-  const filesInputRef = useRef<HTMLInputElement>(null)
-  const imagesInputRef = useRef<HTMLInputElement>(null)
-
-  const onWebInputChange = (input: HTMLInputElement | null) => {
-    if (!input || !onWebAttachFiles) {
-      return
-    }
-    const files = Array.from(input.files ?? [])
-    input.value = '' // reset so re-picking the same file fires change again
-    if (files.length) {
-      onWebAttachFiles(files)
-    }
-  }
+  // hermes-fork: web-file-picker — hosted web opens the chooser from a real DOM
+  // click (see ./web-file-picker.tsx); native keeps the IPC picker below.
+  const web = useWebFilePicker(onWebAttachFiles)
 
   return (
     <>
       <DropdownMenu>
-        <Tip label={state.tools.label} side="top">
+        <Tip label={state.tools.label} placement="control">
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={state.tools.label}
@@ -109,11 +74,10 @@ export function ContextMenu({
             {c.attachLabel}
           </DropdownMenuLabel>
           <ContextMenuItem
-            disabled={webAttach ? false : !onPickFiles}
+            disabled={web.enabled ? false : !onPickFiles}
             icon={FileText}
-            {...(webAttach
-              ? { onClick: () => filesInputRef.current?.click() }
-              : { onSelect: onPickFiles })}
+            onClick={web.enabled ? web.pickFiles : undefined} // hermes-fork: web-file-picker
+            onSelect={web.enabled ? undefined : onPickFiles}
           >
             {c.files}
           </ContextMenuItem>
@@ -121,11 +85,10 @@ export function ContextMenu({
             {c.folder}
           </ContextMenuItem>
           <ContextMenuItem
-            disabled={webAttach ? false : !onPickImages}
+            disabled={web.enabled ? false : !onPickImages}
             icon={ImageIcon}
-            {...(webAttach
-              ? { onClick: () => imagesInputRef.current?.click() }
-              : { onSelect: onPickImages })}
+            onClick={web.enabled ? web.pickImages : undefined} // hermes-fork: web-file-picker
+            onSelect={web.enabled ? undefined : onPickImages}
           >
             {c.images}
           </ContextMenuItem>
@@ -168,30 +131,7 @@ export function ContextMenu({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {/* Persistent hidden inputs live OUTSIDE DropdownMenuContent so they
-          survive the menu closing on select; the web rows .click() them from a
-          real DOM gesture (see the comment in ContextMenu above). */}
-      {webAttach ? (
-        <>
-          <input
-            multiple
-            onChange={() => onWebInputChange(filesInputRef.current)}
-            ref={filesInputRef}
-            style={OFFSCREEN_INPUT_STYLE}
-            tabIndex={-1}
-            type="file"
-          />
-          <input
-            accept="image/*"
-            multiple
-            onChange={() => onWebInputChange(imagesInputRef.current)}
-            ref={imagesInputRef}
-            style={OFFSCREEN_INPUT_STYLE}
-            tabIndex={-1}
-            type="file"
-          />
-        </>
-      ) : null}
+      {web.inputs /* hermes-fork: web-file-picker — outlives the menu closing */}
 
       <PromptSnippetsDialog onInsertText={onInsertText} onOpenChange={setSnippetsOpen} open={snippetsOpen} />
     </>
@@ -246,7 +186,7 @@ export function ContextMenuItem({ children, disabled, icon: Icon, onClick, onSel
     <DropdownMenuItem
       className="text-[length:var(--conversation-tool-font-size)] focus:bg-(--ui-bg-tertiary)"
       disabled={disabled}
-      onClick={onClick}
+      onClick={onClick} // hermes-fork: web-file-picker
       onSelect={onSelect}
     >
       <Icon />
@@ -259,10 +199,7 @@ interface ContextMenuItemProps {
   children: string
   disabled?: boolean
   icon: IconComponent
-  // Real DOM onClick — used for the hosted-web file pickers so input.click()
-  // runs with transient user-activation (Radix onSelect's synthetic dispatch
-  // loses it inside the cross-origin iframe).
-  onClick?: () => void
+  onClick?: () => void // hermes-fork: web-file-picker
   onSelect?: () => void
 }
 
@@ -273,9 +210,7 @@ interface ContextMenuProps {
   onPickFiles?: () => void
   onPickFolders?: () => void
   onPickImages?: () => void
-  // Hosted-web only: receives File[] chosen via the persistent hidden inputs and
-  // routes them through the proven attachDroppedItems upload path.
-  onWebAttachFiles?: (files: File[]) => void
+  onWebAttachFiles?: (files: File[]) => void // hermes-fork: web-file-picker
   state: ChatBarState
 }
 

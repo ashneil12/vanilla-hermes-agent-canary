@@ -1,0 +1,141 @@
+name: Upstream sync follow-up
+
+# Reacts to CI finishing on an `upstream-sync/<tag>` PR opened by upstream-release-sync.yml:
+#   * CI green  -> build the immutable image (docker-build-immutable.yml) and comment the
+#                  tag, digest and proof on the PR.
+#   * CI red    -> comment on the PR and open/update an `upstream-sync-stuck` issue.
+#   * build red -> same.
+# It never merges the PR and never moves :stable / :latest.
+#
+# Safety: workflow_run runs the default-branch copy of this file with a write token, so the
+# gate only accepts runs whose head branch is `upstream-sync/<release tag>` in THIS repository
+# (never a fork) and that came from a pull_request event.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: >-
+      github.repository == 'ashneil12/vanilla-hermes-agent-canary' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'upstream-sync/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      ci_ok: ${{ steps.decide.outputs.ci_ok }}
+      pr: ${{ steps.decide.outputs.pr }}
+      tag: ${{ steps.decide.outputs.tag }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Decide
+        id: decide
+        run: |
+          set -euo pipefail
+          tag="${HEAD_BRANCH#upstream-sync/}"
+          case "$tag" in
+            v[0-9][0-9][0-9][0-9].*) ;;
+            *) echo "not a release sync branch"; echo "ci_ok=skip" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          case "$tag" in *[!A-Za-z0-9.-]*) echo "odd tag"; echo "ci_ok=skip" >> "$GITHUB_OUTPUT"; exit 0 ;; esac
+          pr=$(gh pr list --state open --head "$HEAD_BRANCH" --json number,headRefOid --jq "[.[] | select(.headRefOid == \"$HEAD_SHA\")][0].number // empty")
+          if [ -z "$pr" ]; then
+            echo "No open PR whose head is $HEAD_SHA (branch moved or PR closed); ignoring."
+            echo "ci_ok=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "pr=$pr"
+            echo "tag=$tag"
+            echo "head_sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "ci_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+            gh pr comment "$pr" --body "CI finished **${CONCLUSION}** for \`${HEAD_SHA:0:10}\`: ${RUN_URL}. No image was built. Fix the failure on this branch (fork seams carry \`hermes-fork:\` markers), or close the PR."
+            title="Upstream sync stuck: ${tag} (CI ${CONCLUSION})"
+            body="CI is ${CONCLUSION} on PR #${pr} (\`${HEAD_BRANCH}\`, ${HEAD_SHA:0:10}). Run: ${RUN_URL}. No image is built until CI is green. This issue is updated in place."
+            existing=$(gh issue list --state open --label upstream-sync-stuck --search "in:title \"Upstream sync stuck: ${tag}\"" --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --title "$title" --body "$body"
+              gh issue comment "$existing" --body "Still red at $(date -u +%Y-%m-%dT%H:%MZ): ${RUN_URL}"
+            else
+              gh issue create --title "$title" --label upstream-sync-stuck --body "$body"
+            fi
+          fi
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.ci_ok == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-build-immutable.yml
+    with:
+      ref: ${{ needs.gate.outputs.head_sha }}
+      upstream_tag: ${{ needs.gate.outputs.tag }}
+      push: true
+
+  report:
+    needs: [gate, build]
+    if: always() && needs.gate.outputs.ci_ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ needs.gate.outputs.pr }}
+      TAG: ${{ needs.gate.outputs.tag }}
+      HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+      RESULT: ${{ needs.build.result }}
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      VERSION: ${{ needs.build.outputs.version }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Comment the result
+        run: |
+          set -euo pipefail
+          img="ghcr.io/${GH_REPO}"
+          if [ "$RESULT" = "success" ]; then
+            gh pr comment "$PR" --body "Immutable image built and proven for \`${HEAD_SHA:0:10}\`.
+
+          - \`${img}:${IMAGE_TAG}\`
+          - digest \`${DIGEST}\`
+          - hermes-agent \`${VERSION}\`; revision and version labels, installed version and provenance all matched
+          - \`:stable\` / \`:latest\` were **not** touched
+
+          Details: ${RUN_URL}. Merge this PR with a merge commit when you are ready; moving \`:stable\` is a separate manual step."
+          else
+            gh pr comment "$PR" --body "CI is green but the image build **${RESULT}**: ${RUN_URL}. Nothing was published under a floating tag."
+            title="Upstream sync stuck: ${TAG} (image build ${RESULT})"
+            body="CI is green on PR #${PR} but the immutable image build ${RESULT}. Run: ${RUN_URL}. This issue is updated in place."
+            existing=$(gh issue list --state open --label upstream-sync-stuck --search "in:title \"Upstream sync stuck: ${TAG}\"" --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --title "$title" --body "$body"
+            else
+              gh issue create --title "$title" --label upstream-sync-stuck --body "$body"
+            fi
+          fi

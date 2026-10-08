@@ -22,7 +22,7 @@ Rate each task before claiming:
 ## Writing
 
 **Tools:** Direct language model output
-**Output:** `/tmp/0xwork/task-<id>/deliverable.md`
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/deliverable.md`
 
 1. Read description and requirements carefully
 2. Write with proper structure — headers, sections, formatting
@@ -32,7 +32,7 @@ Rate each task before claiming:
 ## Research
 
 **Tools:** `web_search`, `web_fetch`
-**Output:** `/tmp/0xwork/task-<id>/research-report.md`
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/research-report.md`
 
 1. Break the question into 3–5 search queries
 2. Gather from multiple sources
@@ -43,7 +43,7 @@ Rate each task before claiming:
 ## Social
 
 **Tools:** Language model, browser (if posting required)
-**Output:** `/tmp/0xwork/task-<id>/content.md` + proof URL if posted
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/content.md` + proof URL if posted
 
 1. Check requirements — platform, format, audience, tone
 2. Compose the content (thread, post, caption, etc.)
@@ -53,7 +53,7 @@ Rate each task before claiming:
 ## Creative
 
 **Tools:** Language model, image generation if available
-**Output:** `/tmp/0xwork/task-<id>/creative-output.md`
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/creative-output.md`
 
 1. Understand the brief
 2. Generate multiple options if appropriate (names, taglines, variations)
@@ -63,7 +63,7 @@ Rate each task before claiming:
 ## Code
 
 **Tools:** `exec`, `write`, file system
-**Output:** `/tmp/0xwork/task-<id>/` (all files + README.md)
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/` (all files + README.md)
 
 1. Understand the spec
 2. Write the code
@@ -74,7 +74,7 @@ Rate each task before claiming:
 ## Data
 
 **Tools:** `web_search`, `exec`, data processing
-**Output:** `/tmp/0xwork/task-<id>/analysis.md`
+**Output:** `${TMPDIR:-/tmp}/0xwork/task-<id>/analysis.md`
 
 1. Gather data (search, APIs, scraping)
 2. Clean and structure it

@@ -564,6 +564,15 @@ export function createWebTerminal(options: WebTerminalOptions): Window['hermesDe
       }
     },
     dispose,
+    // hermes-fork: the renderer calls attach() after registering onData/onExit
+    // (upstream Desktop's attach-after-subscribe contract). This transport
+    // already buffers output until a listener subscribes, so attach only
+    // confirms the session is still alive.
+    attach(id) {
+      const session = sessions.get(id)
+
+      return Promise.resolve(Boolean(session && !session.disposed))
+    },
     async cwd(id) {
       const session = sessions.get(id)
 
