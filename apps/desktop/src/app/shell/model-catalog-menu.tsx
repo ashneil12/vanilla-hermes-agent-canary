@@ -826,14 +826,7 @@ function groupModels(
   const q = normalize(search)
   const groups: ProviderGroup[] = []
 
-  for (const provider of providers) {
-    // hermes-fork: keyless-provider-guard — skip providers the box has no usable
-    // credentials for (see components/model-picker.tsx). They stay reachable via
-    // the full model picker's "Add provider".
-    if (provider.authenticated === false) {
-      continue
-    }
-
+  for (const provider of providers.filter(p => p.authenticated !== false)) { // hermes-fork: keyless-provider-guard (see components/model-picker.tsx)
     const allFamilies = collapseModelFamilies(provider.models ?? [])
 
     if (allFamilies.length === 0) {
