@@ -289,7 +289,8 @@ export function ModelCatalogMenu({
   )
 
   const groups = useMemo(
-    () => groupModels(pickerProviders, search, { model: current.model, provider: current.provider }, shownKeys),
+    // hermes-fork: keyless-provider-guard — providers without usable credentials are not offered (see components/model-picker.tsx)
+    () => groupModels(pickerProviders.filter(p => p.authenticated !== false), search, { model: current.model, provider: current.provider }, shownKeys),
     [pickerProviders, search, current.model, current.provider, shownKeys]
   )
 
@@ -826,7 +827,7 @@ function groupModels(
   const q = normalize(search)
   const groups: ProviderGroup[] = []
 
-  for (const provider of providers.filter(p => p.authenticated !== false)) { // hermes-fork: keyless-provider-guard (see components/model-picker.tsx)
+  for (const provider of providers) {
     const allFamilies = collapseModelFamilies(provider.models ?? [])
 
     if (allFamilies.length === 0) {
