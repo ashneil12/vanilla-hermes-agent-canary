@@ -1,0 +1,94 @@
+name: Register Hivra release
+
+# Tells the Hivra release registry about an immutable image this repository built and
+# proved, so an operator can promote it from the console instead of pasting a tag.
+#
+# Registration is all it can do. The Hivra route (POST /api/ops/hermes-releases/ci) lands the
+# release at "Registered", where no box is offered it, and refuses any request that carries a
+# stage, channel, halt or rollout. It also resolves the digest from GHCR itself, so the
+# optional `digest` below is only a cross-check. Promoting stays with a signed-in operator.
+#
+# Called by upstream-sync-followup.yml after a proven build, and runnable by hand for a tag
+# that already exists (a new workflow file cannot be dispatched until it is on main).
+#
+# Needs the repository secret HERMES_RELEASE_CI_TOKEN (the same value as the Hivra Canary
+# project's env var of that name). Without it the job fails with a clear message and nothing
+# else changes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable image tag to register, e.g. v2026.9.24-a1b2c3d"
+        required: true
+        type: string
+      digest:
+        description: "Optional sha256 digest the build proved (Hivra checks it against GHCR)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      digest:
+        required: false
+        type: string
+    outputs:
+      created:
+        description: "true when Hivra created the release, false when it already existed"
+        value: ${{ jobs.register.outputs.created }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: register-hivra-release-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: ghcr.io/ashneil12/vanilla-hermes-agent-canary
+  HIVRA_CI_URL: https://canary.hermesos.cloud/api/ops/hermes-releases/ci
+
+jobs:
+  register:
+    if: github.repository == 'ashneil12/vanilla-hermes-agent-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      created: ${{ steps.call.outputs.created }}
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      IMAGE_DIGEST: ${{ inputs.digest }}
+      HERMES_RELEASE_CI_TOKEN: ${{ secrets.HERMES_RELEASE_CI_TOKEN }}
+    steps:
+      - name: Register
+        id: call
+        run: |
+          set -euo pipefail
+          if [ -z "${HERMES_RELEASE_CI_TOKEN:-}" ]; then
+            echo "::error::Repository secret HERMES_RELEASE_CI_TOKEN is not set; nothing was registered."
+            exit 1
+          fi
+          if ! [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*-[0-9a-f]{7}$ ]]; then
+            echo "::error::image_tag must be an immutable build tag like v2026.9.24-a1b2c3d, got '$IMAGE_TAG'"
+            exit 1
+          fi
+          if [ -n "${IMAGE_DIGEST:-}" ] && ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest must look like sha256:<64 hex>"
+            exit 1
+          fi
+          body=$(jq -n --arg repo "$IMAGE_REPO" --arg tag "$IMAGE_TAG" --arg digest "${IMAGE_DIGEST:-}" \
+            '{imageRepo: $repo, tag: $tag} + (if $digest == "" then {} else {digest: $digest} end)')
+          code=$(curl --silent --show-error --max-time 30 --retry 3 \
+            --output response.json --write-out '%{http_code}' \
+            -X POST "$HIVRA_CI_URL" \
+            --oauth2-bearer "$HERMES_RELEASE_CI_TOKEN" \
+            -H 'Content-Type: application/json' --data "$body")
+          echo "Hivra answered HTTP $code"
+          cat response.json; echo
+          case "$code" in
+            201) echo "created=true" >> "$GITHUB_OUTPUT" ;;
+            200) echo "created=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Hivra refused the registration (HTTP $code)"; exit 1 ;;
+          esac

@@ -20,6 +20,7 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 SYNC = WORKFLOWS / "upstream-release-sync.yml"
 BUILD = WORKFLOWS / "docker-build-immutable.yml"
 FOLLOWUP = WORKFLOWS / "upstream-sync-followup.yml"
+REGISTER = WORKFLOWS / "register-hivra-release.yml"
 
 
 def _load(path: Path) -> dict:
@@ -34,7 +35,7 @@ def _strip_comments(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-@pytest.mark.parametrize("path", [SYNC, BUILD, FOLLOWUP], ids=lambda p: p.name)
+@pytest.mark.parametrize("path", [SYNC, BUILD, FOLLOWUP, REGISTER], ids=lambda p: p.name)
 def test_workflow_parses_and_is_canary_only(path: Path):
     data = _load(path)
     assert data["jobs"], f"{path.name} has no jobs"
@@ -120,3 +121,24 @@ def test_fork_gate_lists_existing_tests():
     # On the CI branch only some fork tests exist yet; the thin branch has all of them.
     gate = (root / ".github" / "workflows" / "fork-gate.yml").read_text(encoding="utf-8")
     assert ".hermesos/fork-gate-tests.txt" in gate
+
+
+def test_register_workflow_only_registers_on_the_canary_route():
+    code = _strip_comments(REGISTER.read_text(encoding="utf-8"))
+    assert "https://canary.hermesos.cloud/api/ops/hermes-releases/ci" in code
+    assert "IMAGE_REPO: ghcr.io/ashneil12/vanilla-hermes-agent-canary" in code
+    # The registry route has no promote/stable/halt fields; the workflow must not try to send any.
+    for forbidden in ("promote", ":stable", ":latest", "halt", "rollout", "channel"):
+        assert forbidden not in code.lower(), f"register workflow must not mention {forbidden!r}"
+    # The token goes in through the environment, never an argument or a log line.
+    assert "--oauth2-bearer \"$HERMES_RELEASE_CI_TOKEN\"" in code
+    assert "echo \"$HERMES_RELEASE_CI_TOKEN" not in code
+    assert "set -x" not in code
+    triggers = _load(REGISTER)["on"]
+    assert "pull_request" not in triggers and "push" not in triggers
+
+
+def test_followup_registers_only_after_a_successful_build():
+    text = FOLLOWUP.read_text(encoding="utf-8")
+    assert "register-hivra-release.yml" in text
+    assert "needs.build.result == 'success'" in text
