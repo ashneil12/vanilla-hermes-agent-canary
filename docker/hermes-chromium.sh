@@ -76,10 +76,32 @@ done
 
 decision="$(decide)"
 
+# Switches that turn part of the sandbox off even when the namespaces work. require refuses them;
+# auto lets an operator's explicit choice through but says the browser is not fully sandboxed.
+weakening=""
+for arg in "$@"; do
+    case "$arg" in
+        --single-process|--no-zygote|--disable-namespace-sandbox|--disable-seccomp-filter-sandbox|\
+        --disable-gpu-sandbox|--disable-renderer-sandbox)
+            weakening="$weakening $arg" ;;
+    esac
+done
+if [ -n "$weakening" ] && [ "$decision" = sandboxed ]; then
+    if [ "$mode" = require ]; then
+        decision=refused
+    else
+        echo "hermes-chromium: WARNING: Chromium is running WITHOUT its sandbox fully on:$weakening" >&2
+    fi
+fi
+
 if [ "$decision" = refused ]; then
+    if [ -n "$weakening" ] && namespaces_available; then
+        reason="it was asked to weaken the sandbox:$weakening"
+    else
+        reason="this process cannot create user/PID/network namespaces. Run the container as a non-root user with docker/seccomp-chromium.json as its seccomp profile."
+    fi
     echo "hermes-chromium: refusing to start Chromium without its sandbox (HERMES_CHROMIUM_SANDBOX=require," \
-         "uid $(id -u)): this process cannot create user/PID/network namespaces. Run the container as a" \
-         "non-root user with docker/seccomp-chromium.json as its seccomp profile." >&2
+         "uid $(id -u)): $reason" >&2
     exit 70
 fi
 

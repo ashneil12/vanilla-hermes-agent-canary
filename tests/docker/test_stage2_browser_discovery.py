@@ -46,9 +46,10 @@ def test_stage2_discovers_chromium_binary(
     )
 
     # Must be a browser binary by basename — NOT a shared library.
+    # hermes-fork: chromium-sandbox — the fork image pins its sandbox-deciding wrapper.
     accepted_names = (
         "chrome", "chromium", "chrome-headless-shell",
-        "headless_shell", "chromium-browser",
+        "headless_shell", "chromium-browser", "hermes-chromium",
     )
     r = docker_exec_sh(
         container_name,

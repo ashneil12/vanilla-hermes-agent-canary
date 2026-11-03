@@ -33,6 +33,7 @@ import time
 MIN_CHROMIUM_VERSION = "156.0.8078.73"
 DEFAULT_EXECUTABLE = "/usr/local/bin/hermes-chromium"
 DEFAULT_REAL = "/usr/lib/chromium/chromium"
+WRAPPER_REFUSED = 70  # docker/hermes-chromium.sh's exit code when require mode refuses
 _PAGE = "data:text/html,<title>hermes-sandbox-check</title><p>sandbox check</p>"
 
 
@@ -157,8 +158,11 @@ def launch_and_inspect(executable, timeout):
             time.sleep(0.1)
         if proc.poll() is not None:
             stderr.seek(0)
-            return {"outcome": "refused", "exit_code": proc.returncode,
-                    "stderr": stderr.read().decode(errors="replace")[-1500:]}
+            err = stderr.read().decode(errors="replace")
+            # Only the wrapper's deliberate refusal counts; any other early exit is a crash.
+            refused = proc.returncode == WRAPPER_REFUSED and "refusing to start Chromium" in err
+            return {"outcome": "refused" if refused else "crashed", "exit_code": proc.returncode,
+                    "stderr": err[-1500:]}
         report = _wait_for_renderer(proc.pid, deadline)
         stderr.seek(0)
         report["outcome"] = "sandboxed" if report["sandboxed"] else (

@@ -92,6 +92,16 @@ class TestWrapperDecision:
         code, argv, _, _ = _run_wrapper(tmp_path, ["about:blank"], uid=0, mode="require", namespaces=True)
         assert code == 70 and argv is None
 
+    def test_require_refuses_switches_that_weaken_the_sandbox(self, tmp_path):
+        code, argv, stderr, _ = _run_wrapper(tmp_path, ["--single-process", "about:blank"], mode="require")
+        assert code == 70 and argv is None
+        assert "weaken the sandbox: --single-process" in stderr
+
+    def test_auto_warns_when_a_switch_weakens_the_sandbox(self, tmp_path):
+        code, argv, stderr, _ = _run_wrapper(tmp_path, ["--disable-seccomp-filter-sandbox", "about:blank"])
+        assert code == 0 and "--disable-seccomp-filter-sandbox" in argv and "--no-sandbox" not in argv
+        assert "WITHOUT its sandbox fully on: --disable-seccomp-filter-sandbox" in stderr
+
     def test_off_is_an_explicit_opt_out(self, tmp_path):
         code, argv, stderr, _ = _run_wrapper(tmp_path, ["about:blank"], mode="off")
         assert code == 0 and argv.count("--no-sandbox") == 1
@@ -200,6 +210,16 @@ class TestImageContract:
 
 
 class TestCheckScript:
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+    def test_refused_means_the_wrapper_refused_not_any_crash(self, tmp_path):
+        check = _load_check_script()
+        crash = tmp_path / "crash"
+        _stub(crash, "exit 1\n")
+        assert check.launch_and_inspect(str(crash), 10)["outcome"] == "crashed"
+        refuse = tmp_path / "refuse"
+        _stub(refuse, 'echo "hermes-chromium: refusing to start Chromium without its sandbox" >&2; exit 70\n')
+        assert check.launch_and_inspect(str(refuse), 10)["outcome"] == "refused"
+
     def test_version_parsing_and_floor(self):
         check = _load_check_script()
         assert check.version_tuple("Chromium 156.0.8078.79 ") == (156, 0, 8078, 79)

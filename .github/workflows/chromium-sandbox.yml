@@ -13,6 +13,9 @@ on:
       - docker/**
       - tools/browser_tool*.py
       - tools/browser_use_cli.py
+      - plugins/browser/**
+      - pyproject.toml
+      - uv.lock
       - tools/bot_desktop/**
       - scripts/chromium_sandbox_check.py
       - scripts/ci/chromium_sandbox_regression.sh
@@ -27,6 +30,9 @@ on:
       - docker/**
       - tools/browser_tool*.py
       - tools/browser_use_cli.py
+      - plugins/browser/**
+      - pyproject.toml
+      - uv.lock
       - tools/bot_desktop/**
       - scripts/chromium_sandbox_check.py
       - scripts/ci/chromium_sandbox_regression.sh
