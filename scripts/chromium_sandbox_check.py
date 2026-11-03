@@ -43,7 +43,8 @@ def version_tuple(text):
 
 
 def chromium_version(executable):
-    out = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=30)
+    out = subprocess.run([executable, "--version"], capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=30)
     return (out.stdout or out.stderr).strip()
 
 
@@ -217,7 +218,7 @@ def main(argv=None):
     version = version_tuple(version_text)
     floor = version_tuple(args.min_version)
     result = {"executable": args.executable, "version": version_text, "min_version": args.min_version,
-              "version_ok": bool(version and floor and version >= floor), "uid": os.getuid(),
+              "version_ok": bool(version and floor and version >= floor), "uid": getattr(os, "getuid", lambda: None)(),
               "mode": os.environ.get("HERMES_CHROMIUM_SANDBOX", "auto"), "expect": args.expect}
     result.update(inspect_running(args.real) if args.running else launch_and_inspect(args.executable, args.timeout))
     result["ok"] = result["version_ok"] and result["outcome"] == args.expect
