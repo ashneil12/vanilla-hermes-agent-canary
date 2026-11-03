@@ -21,6 +21,7 @@ SECCOMP="$root/docker/seccomp-chromium.json"
 CHECK=/opt/hermes/scripts/chromium_sandbox_check.py
 [[ -f "$SECCOMP" ]] || { echo "FAIL: $SECCOMP missing" >&2; exit 1; }
 
+# no-tmp: ok — HOME inside a throwaway --rm test container (uid 1024 has no home there)
 gateway=(--rm --user 1024:1024 --entrypoint "" -e HOME=/tmp -e HERMES_HOME=/tmp/hermes-home)
 profile=(--security-opt "seccomp=$SECCOMP")
 
@@ -96,6 +97,7 @@ CHECK_ARGS=(--expect refused)
 check "${gateway[@]}" -e HERMES_CHROMIUM_SANDBOX=require "$IMAGE" || fail "require mode started Chromium without its sandbox"
 
 echo "== 3c. root, require, even with the profile: refuses to start"
+# no-tmp: ok — HOME inside a throwaway --rm test container
 check --rm --user 0:0 --entrypoint "" -e HOME=/tmp "${profile[@]}" -e HERMES_CHROMIUM_SANDBOX=require "$IMAGE" \
   || fail "require mode started Chromium as root"
 
