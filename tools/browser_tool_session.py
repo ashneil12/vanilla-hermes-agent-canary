@@ -47,8 +47,26 @@ def apparmor_restricts_unprivileged_userns() -> bool:
         return False
 
 
+# hermes-fork: chromium-sandbox
+# The image's Chromium is docker/hermes-chromium.sh (AGENT_BROWSER_EXECUTABLE_PATH). It decides the
+# sandbox itself from what the kernel allows (HERMES_CHROMIUM_SANDBOX=auto|require|off) and strips any
+# --no-sandbox a launcher passes, because agent-browser appends one whenever it sees /.dockerenv.
+HERMES_CHROMIUM_WRAPPER = "hermes-chromium"
+
+
+def _hermes_chromium_wrapper_active(env: Optional[Dict[str, str]] = None) -> bool:
+    """True when Chromium is launched through the image's sandbox-deciding wrapper."""
+    exe = (env if env is not None else os.environ).get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+    return bool(exe) and os.path.basename(exe) == HERMES_CHROMIUM_WRAPPER and os.access(exe, os.X_OK)
+# hermes-fork: end chromium-sandbox
+
+
 def _needs_chromium_sandbox_bypass() -> bool:
-    """True when Chromium needs --no-sandbox to start reliably (root, Docker, AppArmor userns)."""
+    """True when Chromium needs --no-sandbox to start reliably (root, Docker, AppArmor userns).
+
+    Never with the image's wrapper: it owns that decision (``_hermes_chromium_wrapper_active``)."""
+    if _hermes_chromium_wrapper_active():
+        return False
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return True
     if _install._running_in_docker():
@@ -59,7 +77,7 @@ def _needs_chromium_sandbox_bypass() -> bool:
 def _apply_chromium_sandbox_args(browser_env: Dict[str, str]) -> None:
     """Add required Chromium sandbox flags without overriding user settings."""
     if ("AGENT_BROWSER_ARGS" not in browser_env and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env
-            and _needs_chromium_sandbox_bypass()):
+            and not _hermes_chromium_wrapper_active(browser_env) and _needs_chromium_sandbox_bypass()):
         _bt.logger.debug("browser: sandbox bypass needed (root/docker/AppArmor userns) — injecting --no-sandbox")
         browser_env["AGENT_BROWSER_ARGS"] = ",".join(CHROMIUM_SANDBOX_BYPASS_ARGS)
 
@@ -93,7 +111,11 @@ def _format_browser_timeout_error(
     if detail:
         parts.append(detail[:1500])
 
-    if "sandbox" in f"{stderr}\n{stdout}".lower():
+    if "sandbox" in f"{stderr}\n{stdout}".lower() and _hermes_chromium_wrapper_active():
+        parts.append("Chromium sandbox launch failed. The image's hermes-chromium decides the sandbox: "
+                     "run `hermes-chromium --hermes-sandbox-status`, and see HERMES_CHROMIUM_SANDBOX "
+                     "(auto, require, off) in docker/hermes-chromium.sh")
+    elif "sandbox" in f"{stderr}\n{stdout}".lower():
         parts.append("Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
                      "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
                      "or run: npx agent-browser install --with-deps")

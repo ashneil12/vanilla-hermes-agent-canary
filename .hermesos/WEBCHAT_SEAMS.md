@@ -14,9 +14,14 @@ Find them all: `git grep -n "hermes-fork:" -- apps web hermes_cli Dockerfile .do
 | `hivra-web` | `hermes_cli/web_server.py` | +4 | Mounts the fork-only router, beside `mount_spa`. |
 | `hivra-web-build` | `Dockerfile` | +25 top stage, +5 COPY | Self-contained `hivra_web_build` stage FIRST in the file (webchat `--base=/webchat/` + dashboard `--base=/dash/` + `inject-dash-bootstrap.cjs`), one `COPY --from` in the runtime stage after the gh-cli block. |
 | `hivra-web-build` | `.dockerignore` | +4 | Keeps `apps/desktop` in the build context. |
+| `chromium-sandbox` | `Dockerfile` | +27 / -16 | Debian `chromium` from trixie-security with a build-time floor (`CHROMIUM_MIN_VERSION`, CVE-2026-118306) replaces Playwright's Chrome for Testing (both `npx playwright install` steps removed), and `AGENT_BROWSER_EXECUTABLE_PATH` points at `/usr/local/bin/hermes-chromium`. |
+| `chromium-sandbox` | `tools/browser_tool_session.py` | +20 | `_needs_chromium_sandbox_bypass()` / `_apply_chromium_sandbox_args()` never inject `--no-sandbox` when the wrapper is the browser: it decides. |
+| `chromium-sandbox` | `docker/stage2-hook.sh` | +3 | Comment only: the Playwright cache scan is skipped because the image sets `AGENT_BROWSER_EXECUTABLE_PATH`. |
+| `chromium-sandbox` | `.github/workflows/docker-publish.yml`, `docker-build-immutable.yml` | +9 / +11 | Run `scripts/ci/chromium_sandbox_regression.sh` before any push. |
 
 ## Fork-only files (never edited upstream)
 
+- `docker/hermes-chromium.sh` (the image's Chromium: decides the sandbox from what the kernel allows, `HERMES_CHROMIUM_SANDBOX=auto|require|off`, and strips the `--no-sandbox` agent-browser appends in every container), `docker/seccomp-chromium.json` (byte-identical to Hivra's browser-sidecar profile), `scripts/chromium_sandbox_check.py` (live renderer-namespace proof, also the fleet audit), `scripts/ci/chromium_sandbox_regression.sh`, `.github/workflows/chromium-sandbox.yml`, `tests/tools/test_chromium_sandbox.py`.
 - `apps/desktop/src/lib/web-shim.ts`, `web-files.ts`, `web-terminal.ts` (+ tests): the browser bridge, attachments (synthetic paths), browser terminal over the Hivra sidecar.
 - `apps/desktop/src/plugins/hivra/` (bundled plugin, auto-registered by upstream's vite glob, inert unless `window.__HERMES_WEB_CLIENT__`): Hivra theme (+ first-run default; the old `hermesos-dark` alias is gone), Admin Panel sidebar row and route page, dashboard appearance / starter-prompt `postMessage` bridge, phone polish (dvh, 16px inputs, safe-area, viewport-fit, close overlays on navigation).
 - `apps/desktop/src/lib/web-shim-drift.test.ts`: CI drift guard (see Re-sync).
@@ -30,12 +35,14 @@ Find them all: `git grep -n "hermes-fork:" -- apps web hermes_cli Dockerfile .do
 
 ## Hivra control plane must provide (do not edit from here)
 
+- Chromium's sandbox in the gateway (and any agent-image service that browses) needs `security_opt: [seccomp=<dir>/browser-sidecar-seccomp.json]` (the same profile as `docker/seccomp-chromium.json`) and a non-root `user:`; then set `HERMES_CHROMIUM_SANDBOX=require` so it fails closed. Without the profile the image still browses, unsandboxed, with a warning on stderr. Do not add `no-new-privileges` to the gateway without checking its gated sudo.
 - `terminal.cwd: /workspace` in the box's config.yaml, or the file tree opens at the dashboard's launch dir. `TERMINAL_CWD=/workspace` on the dashboard env is NOT enough (the config default `"."` wins in `_fs_default_cwd`). The sidecar already sets `TERMINAL_CWD` for itself only.
 - `HERMES_DASHBOARD_URL` on the dashboard service (already in the box `.env`) for the Venice deep link.
 - Box install stamp `/opt/hermes/.install_method = docker` (the image bakes it) so no "Update ready" toast / About update UI appears. Reproduced locally with the stamp.
 
 ## Re-sync checklist
 
+0. `chromium-sandbox`: upstream `main` (Nov 2026) dropped agent-browser and launches a packaged Chromium 145 with the same `--no-sandbox` bypass. Whatever launcher upstream ships, it must run `/usr/local/bin/hermes-chromium` (never a Playwright/packaged build) and must not decide the sandbox itself; `scripts/ci/chromium_sandbox_regression.sh` fails otherwise.
 1. `cd apps/desktop && npx vitest run src/lib/web-shim-drift.test.ts`. A new REQUIRED preload key: implement it in `web-shim.ts` or add it to `ACKNOWLEDGED_ABSENT`. Never add a catch-all no-op Proxy: the renderer feature-detects Electron-only UI (`?.cloud`, `typeof openWindow === 'function'`), a no-op would switch it on.
 2. `npx vite build --base=/webchat/ --outDir ${TMPDIR:-/tmp}/x` and `cd web && npx vite build --base=/dash/ --outDir ${TMPDIR:-/tmp}/y && node inject-dash-bootstrap.cjs ${TMPDIR:-/tmp}/y/index.html`.
 3. Upstream restructures the Dockerfile often (stages `runtime_base`, `frontend_build` already on `upstream/main`, web built by `scripts/build/web.mjs` with generated icons): the `/dash` build here is a plain `vite build`; re-check favicon/icons there.

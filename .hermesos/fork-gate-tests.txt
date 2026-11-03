@@ -19,3 +19,4 @@ tests/tools/test_video_image_input.py
 tests/tools/test_image_edit_managed_upload.py
 tests/tools/test_image_edit_model_resolution.py
 tests/plugins/video_gen/test_venice_plugin.py
+tests/tools/test_chromium_sandbox.py
