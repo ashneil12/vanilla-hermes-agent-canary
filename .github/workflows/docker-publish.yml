@@ -134,6 +134,15 @@ jobs:
             "$IMAGE:test" "$GITHUB_SHA" \
             --capacity-and-idle-preflight-confirmed
 
+      # hermes-fork: chromium-sandbox — the image must ship a patched Chromium (CVE floor) whose sandbox
+      # comes on under docker/seccomp-chromium.json, on the agent's real launch path, before any push.
+      # The runner restricts unprivileged user namespaces like the fleet's Ubuntu 24.04 guests.
+      - name: Chromium patch and sandbox regression gate
+        timeout-minutes: 15
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          bash scripts/ci/chromium_sandbox_regression.sh "$IMAGE:test"
+
       - name: Log in to GitHub Container Registry
         if: >-
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||

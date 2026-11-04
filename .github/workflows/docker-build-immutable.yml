@@ -212,6 +212,17 @@ jobs:
             echo "scripts/ci/gateway_lock_regression.py not present on this ref; gate not applicable."
           fi
 
+      # hermes-fork: chromium-sandbox (see docker-publish.yml). Older refs predate the gate.
+      - name: Chromium patch and sandbox regression gate
+        timeout-minutes: 15
+        run: |
+          if [ -f scripts/ci/chromium_sandbox_regression.sh ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+            bash scripts/ci/chromium_sandbox_regression.sh "$IMAGE:test"
+          else
+            echo "scripts/ci/chromium_sandbox_regression.sh not present on this ref; gate not applicable."
+          fi
+
       - name: Refuse to overwrite an existing immutable tag
         if: env.DO_PUSH == 'true'
         env:

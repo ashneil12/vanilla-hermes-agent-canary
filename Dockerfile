@@ -82,8 +82,8 @@ FROM debian:13.4
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Store Playwright browsers outside the volume mount so the build-time
-# install survives the /opt/data volume overlay at runtime.
+# Outside the /opt/data volume overlay. The image installs no Playwright browser any more
+# (hermes-fork: chromium-sandbox); this only keeps a manual `npx playwright install` off the volume.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 
 # Install system dependencies in one layer, clear APT cache.
@@ -98,8 +98,36 @@ RUN apt-get -o Acquire::Retries=3 update && \
     ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
-# Bot Screen (opt-in): PACKAGES["apt"] from tools/bot_desktop/runtime.py plus apt
-# `chromium` for the dock's Browser icon. ~930 MB apt on debian:13.4 (~1.4 GB of
+# hermes-fork: chromium-sandbox
+# The one Chromium every browser in the image runs: the agent's browser tools and Browser Use (both
+# launch through agent-browser) and the Bot Desktop dock. It loads untrusted pages next to the agent's
+# keys, so it must be a patched build. Playwright's Chrome for Testing is a frozen snapshot (151 on
+# Playwright 1.62.1) and is no longer installed; Debian's chromium tracks trixie-security, rebuilding
+# the image picks up its latest security release, and the build fails below the CVE floor
+# (CVE-2026-118306, a sandbox escape fixed in 156.0.8078.73). The font and Xvfb packages are the ones
+# `playwright install --with-deps` used to pull, so pages render as before.
+# CHROMIUM_MIN_VERSION must equal MIN_CHROMIUM_VERSION in scripts/chromium_sandbox_check.py
+# (tests/tools/test_chromium_sandbox.py pins both).
+ARG CHROMIUM_MIN_VERSION=156.0.8078.73
+RUN apt-get -o Acquire::Retries=3 update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+    chromium xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6 xfonts-scalable \
+    fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf && \
+    rm -rf /var/lib/apt/lists/* && \
+    installed="$(dpkg-query -W -f='${Version}' chromium)" && \
+    if ! dpkg --compare-versions "$installed" ge "$CHROMIUM_MIN_VERSION"; then \
+        echo "chromium $installed is older than the security floor $CHROMIUM_MIN_VERSION" >&2; exit 1; \
+    fi && \
+    /usr/lib/chromium/chromium --version
+# Decides Chromium's sandbox from what the kernel allows and strips the --no-sandbox agent-browser
+# appends in every container (see the script). agent-browser and the dock launch it through
+# AGENT_BROWSER_EXECUTABLE_PATH, which also skips docker/stage2-hook.sh's Playwright cache scan.
+COPY --chmod=0755 docker/hermes-chromium.sh /usr/local/bin/hermes-chromium
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/hermes-chromium
+# hermes-fork: end chromium-sandbox
+
+# Bot Screen (opt-in): PACKAGES["apt"] from tools/bot_desktop/runtime.py. The dock's Browser icon
+# runs the chromium installed above (hermes-fork: chromium-sandbox). ~930 MB apt on debian:13.4 (~1.4 GB of
 # image once the gated headed Chromium below is counted); nothing starts
 # at boot. docker.yml builds both variants and publishes these packages under
 # the `-desktop` tags: hosted sandboxes pull a prebuilt image and never run a
@@ -112,7 +140,7 @@ RUN if [ "$HERMES_BOT_DESKTOP" = "1" ]; then \
         apt-get -o Acquire::Retries=3 update && \
         DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         tigervnc-standalone-server xfce4-panel xfwm4 xfdesktop4 xfce4-settings xfce4-terminal \
-        dbus-x11 x11-xserver-utils x11-utils x11-xkb-utils xauth fonts-dejavu-core chromium && \
+        dbus-x11 x11-xserver-utils x11-utils x11-xkb-utils xauth fonts-dejavu-core && \
         rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -212,7 +240,7 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && 
 WORKDIR /opt/hermes
 
 # ---------- Layer-cached dependency install ----------
-# Copy only package manifests first so npm install + Playwright are cached
+# Copy only package manifests first so npm install is cached
 # unless the lockfiles themselves change.
 #
 # ui-tui/packages/hermes-ink/ is copied IN FULL (not just its manifests)
@@ -239,24 +267,11 @@ COPY apps/shared/ apps/shared/
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
 
-# chrome-headless-shell: what the browser tool has always driven headlessly.
-# Smaller, no window code paths. --with-deps pulls the shared system libraries.
+# hermes-fork: chromium-sandbox — no `npx playwright install` here any more. The browser tool,
+# Browser Use and the dock all run the Debian chromium above through hermes-chromium, so agent and
+# human still share one binary and one --user-data-dir, and no unpatched Chrome for Testing ships.
 RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
-    for i in 1 2 3; do \
-        npx playwright install --with-deps chromium --only-shell && break || \
-        { [ "$i" = 3 ] && exit 1; echo "playwright headless-shell install failed (attempt $i); retrying in 10s"; sleep 10; }; \
-    done && \
     npm cache clean --force
-
-# chrome-headless-shell cannot open a window, so the dock's Browser icon needs the
-# full build. Same Chromium family as the shell, so agent and human share one
-# --user-data-dir. Gated: a build with no desktop has nothing to show it on.
-RUN if [ "$HERMES_BOT_DESKTOP" = "1" ]; then \
-        for i in 1 2 3; do \
-            npx playwright install chromium && break || \
-            { [ "$i" = 3 ] && exit 1; echo "playwright chromium install failed (attempt $i); retrying in 10s"; sleep 10; }; \
-        done; \
-    fi
 
 # ---------- Photon iMessage sidecar deps (baked, NS-606) ----------
 # The photon plugin's Node sidecar needs its own node_modules

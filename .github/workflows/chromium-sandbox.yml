@@ -1,0 +1,92 @@
+name: Chromium sandbox
+
+# hermes-fork: chromium-sandbox
+# Builds the agent image and proves its Chromium is patched (Debian security build at or above the
+# CVE floor, no Playwright Chrome for Testing) and sandboxed wherever the container allows it, on the
+# agent's real launch paths: scripts/ci/chromium_sandbox_regression.sh. docker-publish.yml and
+# docker-build-immutable.yml run the same script before they push. This workflow publishes nothing.
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker/**
+      - tools/browser_tool*.py
+      - tools/browser_use_cli.py
+      - plugins/browser/**
+      - pyproject.toml
+      - uv.lock
+      - tools/bot_desktop/**
+      - scripts/chromium_sandbox_check.py
+      - scripts/ci/chromium_sandbox_regression.sh
+      - tests/tools/test_chromium_sandbox.py
+      - package.json
+      - package-lock.json
+      - .github/workflows/chromium-sandbox.yml
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker/**
+      - tools/browser_tool*.py
+      - tools/browser_use_cli.py
+      - plugins/browser/**
+      - pyproject.toml
+      - uv.lock
+      - tools/bot_desktop/**
+      - scripts/chromium_sandbox_check.py
+      - scripts/ci/chromium_sandbox_regression.sh
+      - .github/workflows/chromium-sandbox.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-sandbox-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Chromium sandbox / image
+    if: github.repository == 'ashneil12/vanilla-hermes-agent-canary' || github.repository == 'ashneil12/vanilla-hermes-agent'
+    # The fleet's guests run Ubuntu 24.04 with apparmor_restrict_unprivileged_userns=1.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: Build image (amd64, loaded for testing)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: hermes-chromium-sandbox:test
+          build-args: |
+            HERMES_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test image starts
+        run: |
+          mkdir -p /tmp/hermes-test
+          sudo chown -R 10000:10000 /tmp/hermes-test
+          docker run --rm -v /tmp/hermes-test:/opt/data hermes-chromium-sandbox:test --help
+
+      - name: Restrict unprivileged user namespaces like the fleet
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+          uname -r
+          docker version --format 'docker {{.Server.Version}}'
+
+      - name: Chromium patch and sandbox regression
+        timeout-minutes: 15
+        run: bash scripts/ci/chromium_sandbox_regression.sh hermes-chromium-sandbox:test

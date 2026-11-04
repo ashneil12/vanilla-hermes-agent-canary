@@ -743,7 +743,10 @@ if [ -d "$INSTALL_DIR/skills" ]; then
 fi
 
 # --- Discover agent-browser's Chromium binary ---
-# The image populates ``$PLAYWRIGHT_BROWSERS_PATH`` (=/opt/hermes/.playwright)
+# hermes-fork: chromium-sandbox — the fork image sets AGENT_BROWSER_EXECUTABLE_PATH to
+# /usr/local/bin/hermes-chromium (Debian chromium + sandbox decision), so this scan is skipped there
+# and only runs for builds that still install Playwright browsers.
+# Such a build populates ``$PLAYWRIGHT_BROWSERS_PATH`` (=/opt/hermes/.playwright)
 # with ``chromium_headless_shell-<build>/chrome-headless-shell-linux64/``, plus
 # ``chromium-<build>/chrome-linux64/`` on a HERMES_BOT_DESKTOP build.
 # agent-browser (the runtime CLI Hermes spawns for the
